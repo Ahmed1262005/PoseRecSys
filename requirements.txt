@@ -1,0 +1,33 @@
+# Fashion Personalized Feed - Dependencies
+# RecBole + FashionCLIP with Polyvore Dataset
+
+# Core ML/DL
+recbole==1.2.0
+torch>=1.10.0
+torchvision
+
+# FashionCLIP for visual embeddings
+fashion-clip
+
+# Vector search
+faiss-gpu
+
+# API
+fastapi
+uvicorn[standard]
+
+# Data processing
+pandas
+numpy
+pillow
+tqdm
+requests
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# Utilities
+pyyaml
+scikit-learn
