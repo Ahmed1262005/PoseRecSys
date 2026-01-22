@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import random
 
-from swipe_engine import SwipeEngine, UserPreferences
+from .swipe_engine import SwipeEngine, UserPreferences
 
 
 # =============================================================================

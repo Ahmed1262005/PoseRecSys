@@ -16,7 +16,7 @@ from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass, field
 import random
 
-from swipe_engine import SwipeEngine, UserPreferences, SwipeAction
+from .swipe_engine import SwipeEngine, UserPreferences, SwipeAction
 
 
 @dataclass

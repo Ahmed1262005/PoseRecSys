@@ -27,11 +27,13 @@ import json
 import uvicorn
 import numpy as np
 
-from swipe_engine import SwipeEngine, UserPreferences, SwipeAction
-from four_choice_engine import FourChoiceEngine, FourChoicePreferences
-from ranking_engine import RankingEngine, RankingPreferences
-from attribute_test_engine import AttributeTestEngine, AttributeTestPreferences, ATTRIBUTE_TEST_PHASES
-from predictive_four_engine import PredictiveFourEngine, PredictivePreferences
+from engines import (
+    SwipeEngine, UserPreferences, SwipeAction,
+    FourChoiceEngine, FourChoicePreferences,
+    RankingEngine, RankingPreferences,
+    AttributeTestEngine, AttributeTestPreferences, ATTRIBUTE_TEST_PHASES,
+    PredictiveFourEngine, PredictivePreferences
+)
 from gender_config import (
     get_config, get_category_order, MENS_CONFIG, WOMENS_CONFIG
 )

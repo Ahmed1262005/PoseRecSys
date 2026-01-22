@@ -29,27 +29,37 @@ A production-ready multimodal fashion recommendation system combining visual com
 ```
 outfitTransformer/
 ├── src/
+│   ├── recs/                              # Main Recommendation API (Supabase)
+│   │   ├── api_endpoints.py               # FastAPI routes (/api/recs/v2/*)
+│   │   ├── candidate_selection.py         # Candidate retrieval from pgvector
+│   │   ├── models.py                      # Pydantic models
+│   │   ├── pipeline.py                    # Main recommendation pipeline
+│   │   ├── recommendation_service.py      # Service layer
+│   │   ├── sasrec_ranker.py               # SASRec model ranking
+│   │   └── session_state.py               # Session management
+│   │
+│   ├── engines/                           # UI Engines for style discovery
+│   │   ├── swipe_engine.py                # Base Tinder-style engine
+│   │   ├── four_choice_engine.py          # Four-choice selection
+│   │   ├── ranking_engine.py              # Drag-to-rank interaction
+│   │   ├── attribute_test_engine.py       # Attribute preference testing
+│   │   └── predictive_four_engine.py      # Predictive four-choice
+│   │
+│   ├── swipe_server.py                    # Main FastAPI server (women's fashion)
+│   ├── api.py                             # Legacy Polyvore API
 │   ├── outfit_transformer.py              # OutfitTransformer model (65.31% FITB)
 │   ├── embeddings.py                      # FashionCLIP embeddings + Faiss
-│   ├── train_models.py                    # RecBole BERT4Rec/SASRec training
-│   ├── evaluate.py                        # FITB, AUC, retrieval metrics
-│   ├── data_processing.py                 # Polyvore → RecBole format
-│   ├── api.py                             # FastAPI server
 │   ├── feed_generator.py                  # Hybrid recommendation engine
-│   ├── amazon_feed.py                     # Amazon Fashion feed
 │   ├── outrove_filter.py                  # Onboarding preference filtering
-│   └── precompute_tops_attributes.py      # Pre-compute tops metadata
-├── models/
-│   ├── outfit_transformer_best.pth        # 1.4 GB - OutfitTransformer checkpoint
-│   ├── polyvore_embeddings.pkl            # 224 MB - FashionCLIP embeddings
-│   ├── polyvore_faiss_index.bin           # 279 MB - Faiss index
-│   ├── BERT4Rec-Dec-08-2025_03-24-36.pth  # 101 MB - BERT4Rec model
-│   └── SASRec-Dec-11-2025_18-20-35.pth    # 262 MB - SASRec model
-├── data/
-│   ├── polyvore/                          # Polyvore dataset
-│   ├── polyvore_u/                        # Polyvore-U (sequential)
-│   └── amazon_fashion/                    # Amazon Fashion dataset
-└── tests/                                 # Pytest test suite
+│   ├── women_search_engine.py             # Women's fashion search (Supabase)
+│   └── gender_config.py                   # Gender-specific configuration
+│
+├── sql/                                   # Database migrations (16 files)
+├── tests/                                 # Pytest test suite
+├── docs/                                  # API documentation
+├── config/                                # Configuration files
+├── models/                                # Trained models (not in git)
+└── data/                                  # Datasets (not in git)
 ```
 
 ---

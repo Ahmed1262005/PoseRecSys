@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import random
 
-from swipe_engine import SwipeEngine, UserPreferences
+from .swipe_engine import SwipeEngine, UserPreferences
 from gender_config import (
     get_config, get_category_order, get_attribute_prompts,
     get_attribute_weights, get_embeddings_path, get_attributes_path,

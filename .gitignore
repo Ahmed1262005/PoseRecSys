@@ -23,19 +23,20 @@ venv/
 *.swp
 *.swo
 
-# Data (large files)
-data/polyvore/images/
-data/polyvore_u/
-data/amazon_fashion/
-models/*.pth
-models/*.pkl
-models/*.bin
-models/*.npy
+# Data - exclude all data directories
+data/
+models/
 *.pkl
 *.npy
+*.pth
+*.bin
+*.tar.gz
+*.zip
 
 # Logs
 logs/
+log/
+log_tensorboard/
 *.log
 
 # OS
@@ -51,3 +52,9 @@ htmlcov/
 *.tmp
 *.temp
 /tmp/
+
+# Gradio
+.gradio/
+
+# Claude
+.claude/
