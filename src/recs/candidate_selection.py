@@ -32,11 +32,220 @@ from recs.models import (
     HardFilters,
     TopsPrefs,
     BottomsPrefs,
+    SkirtsPrefs,
     DressesPrefs,
+    OnePiecePrefs,
     OuterwearPrefs,
 )
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
+
+
+# =============================================================================
+# Type Mappings for Article Types
+# =============================================================================
+
+# Mapping from onboarding type selections to database article_type values
+# Used to determine include_article_types filter based on user's module selections
+TYPE_MAPPINGS = {
+    # Tops mappings
+    'tee': ['t-shirts', 'tees'],
+    't-shirt': ['t-shirts', 'tees'],
+    'blouse': ['blouses'],
+    'sweater': ['sweaters', 'knitwear'],
+    'cardigan': ['cardigans'],
+    'cardigan-top': ['cardigans'],
+    'tank': ['tank tops', 'camisoles'],
+    'tank-top': ['tank tops', 'camisoles'],
+    'crop-top': ['crop tops'],
+    'bodysuit': ['bodysuits'],
+    'hoodie': ['hoodies', 'sweatshirts'],
+    'sweatshirt': ['sweatshirts', 'hoodies'],
+
+    # Bottoms mappings
+    'jeans': ['jeans', 'denim'],
+    'pants': ['pants', 'trousers'],
+    'trousers': ['pants', 'trousers'],
+    'shorts': ['shorts'],
+    'leggings': ['leggings'],
+
+    # Skirt mappings
+    'a-line-skirt': ['skirts', 'a-line skirts'],
+    'pencil-skirt': ['skirts', 'pencil skirts'],
+    'mini-skirt': ['skirts', 'mini skirts'],
+    'midi-skirt': ['skirts', 'midi skirts'],
+    'maxi-skirt': ['skirts', 'maxi skirts'],
+
+    # Dress mappings
+    'wrap-dress': ['dresses', 'wrap dresses'],
+    'a-line-dress': ['dresses', 'a-line dresses'],
+    'bodycon': ['dresses', 'bodycon dresses'],
+    'shift': ['dresses', 'shift dresses'],
+    'maxi-dress': ['maxi dresses', 'dresses'],
+    'midi-dress': ['midi dresses', 'dresses'],
+    'mini-dress': ['mini dresses', 'dresses'],
+
+    # One-piece mappings
+    'jumpsuit': ['jumpsuits'],
+    'romper': ['rompers'],
+    'overalls': ['overalls'],
+
+    # Outerwear mappings
+    'coats': ['coats'],
+    'coat': ['coats'],
+    'jackets': ['jackets'],
+    'jacket': ['jackets'],
+    'blazers': ['blazers'],
+    'blazer': ['blazers'],
+    'puffer': ['puffer jackets', 'puffers'],
+    'trench': ['trench coats'],
+}
+
+
+def get_include_article_types(profile: OnboardingProfile) -> Optional[List[str]]:
+    """
+    Determine which article types to INCLUDE based on user's type preferences.
+
+    Supports both:
+    - V3 format: flat type preferences (top_types, bottom_types, dress_types, outerwear_types)
+    - Legacy format: per-module preferences (profile.tops.types, profile.bottoms.types, etc.)
+
+    Returns None if no specific types selected (include all).
+
+    FALLBACK: If no type prefs are set but categories are selected, we use
+    the categories to determine basic exclusions.
+    """
+    include_types = set()
+
+    # ==========================================================================
+    # V3 Format: Flat type preferences
+    # ==========================================================================
+    if profile.top_types:
+        for type_key in profile.top_types:
+            type_key_lower = type_key.lower().replace(' ', '-')
+            if type_key_lower in TYPE_MAPPINGS:
+                include_types.update(TYPE_MAPPINGS[type_key_lower])
+            else:
+                include_types.add(type_key)
+
+    if profile.bottom_types:
+        # V3: bottom_types now includes skirt types
+        for type_key in profile.bottom_types:
+            type_key_lower = type_key.lower().replace(' ', '-')
+            if type_key_lower in TYPE_MAPPINGS:
+                include_types.update(TYPE_MAPPINGS[type_key_lower])
+            else:
+                include_types.add(type_key)
+
+    if profile.dress_types:
+        # V3: dress_types now includes jumpsuit/romper
+        for type_key in profile.dress_types:
+            type_key_lower = type_key.lower().replace(' ', '-')
+            if type_key_lower in TYPE_MAPPINGS:
+                include_types.update(TYPE_MAPPINGS[type_key_lower])
+            else:
+                include_types.add(type_key)
+
+    if profile.outerwear_types:
+        for type_key in profile.outerwear_types:
+            type_key_lower = type_key.lower().replace(' ', '-')
+            if type_key_lower in TYPE_MAPPINGS:
+                include_types.update(TYPE_MAPPINGS[type_key_lower])
+            else:
+                include_types.add(type_key)
+
+    # ==========================================================================
+    # Legacy Format: Per-module preferences (backward compat)
+    # ==========================================================================
+    if not include_types:
+        # Tops
+        if profile.tops and profile.tops.enabled and profile.tops.types:
+            for type_key in profile.tops.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+
+        # Bottoms
+        if profile.bottoms and profile.bottoms.enabled and profile.bottoms.types:
+            for type_key in profile.bottoms.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+
+        # Skirts (only if enabled)
+        if profile.skirts and profile.skirts.enabled and profile.skirts.types:
+            for type_key in profile.skirts.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+        elif profile.skirts and profile.skirts.enabled:
+            include_types.add('skirts')
+
+        # Dresses (only if enabled)
+        if profile.dresses and profile.dresses.enabled and profile.dresses.types:
+            for type_key in profile.dresses.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+        elif profile.dresses and profile.dresses.enabled:
+            include_types.add('dresses')
+
+        # One-piece (only if enabled)
+        if profile.one_piece and profile.one_piece.enabled and profile.one_piece.types:
+            for type_key in profile.one_piece.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+        elif profile.one_piece and profile.one_piece.enabled:
+            include_types.update(['jumpsuits', 'rompers', 'overalls'])
+
+        # Outerwear (only if enabled)
+        if profile.outerwear and profile.outerwear.enabled and profile.outerwear.types:
+            for type_key in profile.outerwear.types:
+                type_key_lower = type_key.lower().replace(' ', '-')
+                if type_key_lower in TYPE_MAPPINGS:
+                    include_types.update(TYPE_MAPPINGS[type_key_lower])
+                else:
+                    include_types.add(type_key)
+        elif profile.outerwear and profile.outerwear.enabled:
+            include_types.update(['coats', 'jackets', 'blazers'])
+
+    # ==========================================================================
+    # FALLBACK: Use categories if no type preferences set
+    # ==========================================================================
+    if not include_types and profile.categories:
+        CATEGORY_TO_ARTICLE_TYPES = {
+            'tops': ['t-shirts', 'tees', 'blouses', 'sweaters', 'cardigans', 'tank tops',
+                     'camisoles', 'crop tops', 'bodysuits', 'hoodies', 'sweatshirts', 'shirts'],
+            'bottoms': ['jeans', 'denim', 'pants', 'trousers', 'shorts', 'leggings',
+                        'skirts', 'a-line skirts', 'pencil skirts', 'mini skirts', 'midi skirts', 'maxi skirts'],
+            'skirts': ['skirts', 'a-line skirts', 'pencil skirts', 'mini skirts', 'midi skirts', 'maxi skirts'],
+            'dresses': ['dresses', 'mini dresses', 'midi dresses', 'maxi dresses', 'wrap dresses',
+                        'bodycon dresses', 'shift dresses', 'a-line dresses', 'jumpsuits', 'rompers', 'overalls'],
+            'one-piece': ['jumpsuits', 'rompers', 'overalls'],
+            'outerwear': ['coats', 'jackets', 'blazers', 'puffer jackets', 'trench coats'],
+        }
+
+        selected_categories = set(c.lower() for c in profile.categories)
+
+        for cat in selected_categories:
+            if cat in CATEGORY_TO_ARTICLE_TYPES:
+                include_types.update(CATEGORY_TO_ARTICLE_TYPES[cat])
+
+        if include_types:
+            print(f"[CandidateSelection] FALLBACK: Using categories {profile.categories} to derive article types: {len(include_types)} types")
+
+    return list(include_types) if include_types else None
 
 
 # =============================================================================
@@ -52,17 +261,33 @@ class CandidateSelectionConfig:
     EXPLORATION_CANDIDATES: int = 50   # Random diverse for discovery
 
     # Soft preference scoring weights (OR logic - any match adds to score)
+    # Brand weight increased to 0.40 to give preferred brands significant boost
     SOFT_WEIGHTS: Dict[str, float] = None
+
+    # Brand boost multipliers based on brand_openness setting
+    BRAND_OPENNESS_MULTIPLIERS: Dict[str, float] = None
 
     def __post_init__(self):
         if self.SOFT_WEIGHTS is None:
             self.SOFT_WEIGHTS = {
-                'fit': 0.20,
-                'style': 0.25,
-                'length': 0.15,
-                'neckline': 0.15,
+                'fit': 0.15,
+                'style': 0.20,
+                'length': 0.10,
+                'neckline': 0.10,
                 'sleeve': 0.10,
-                'brand': 0.15,
+                'rise': 0.10,
+                'brand_preferred': 0.40,  # Strong boost for preferred brands
+                'brand_new': 0.10,        # Small boost for new brands (discovery)
+                'type_match': 0.25,       # Boost for matching type preferences
+            }
+        if self.BRAND_OPENNESS_MULTIPLIERS is None:
+            self.BRAND_OPENNESS_MULTIPLIERS = {
+                'stick_to_favorites': 2.0,    # Double the brand boost
+                'stick-to-favorites': 2.0,
+                'mix': 1.0,                   # Normal brand boost
+                'mix-favorites-new': 0.8,    # Slightly reduced to allow discovery
+                'discover_new': 0.5,          # Half brand boost for max discovery
+                'discover-new': 0.5,
             }
 
 
@@ -206,39 +431,72 @@ class CandidateSelectionModule:
         # Step 1: Build hard filters from onboarding profile
         hard_filters = HardFilters.from_user_state(user_state, gender)
 
-        # Step 1b: Add article_types filter from request (not stored in profile)
+        # Step 1b: Compute include_article_types
+        # Priority: API request > profile-computed
         if article_types:
-            hard_filters.article_types = article_types
+            # API request specifies exact types to include
+            hard_filters.include_article_types = article_types
+            print(f"[CandidateSelection] Using API-specified article_types: {article_types}")
+        elif user_state.onboarding_profile and not hard_filters.include_article_types:
+            # Compute from profile if not already set
+            profile = user_state.onboarding_profile
+
+            # Debug: Log what modules are enabled and their types
+            print(f"[CandidateSelection] Profile modules:")
+            if profile.tops:
+                print(f"  - tops: enabled={profile.tops.enabled}, types={profile.tops.types}")
+            if profile.bottoms:
+                print(f"  - bottoms: enabled={profile.bottoms.enabled}, types={profile.bottoms.types}")
+            if profile.skirts:
+                print(f"  - skirts: enabled={profile.skirts.enabled}, types={profile.skirts.types}")
+            if profile.dresses:
+                print(f"  - dresses: enabled={profile.dresses.enabled}, types={profile.dresses.types}")
+            if profile.one_piece:
+                print(f"  - one_piece: enabled={profile.one_piece.enabled}, types={profile.one_piece.types}")
+            if profile.outerwear:
+                print(f"  - outerwear: enabled={profile.outerwear.enabled}, types={profile.outerwear.types}")
+
+            profile_types = get_include_article_types(user_state.onboarding_profile)
+            print(f"[CandidateSelection] Computed include_article_types: {profile_types}")
+
+            if profile_types:
+                hard_filters.include_article_types = profile_types
 
         # Step 2: Choose retrieval strategy based on user state
         # ALWAYS use keyset functions for proper cursor-based pagination
         # Exclusion is handled in Python after fetching (to preserve unlimited scroll)
-        if user_state.taste_vector:
-            # Warm user: use taste vector similarity with keyset cursor
-            candidates = self._retrieve_by_taste_vector_keyset(
-                taste_vector=user_state.taste_vector,
-                hard_filters=hard_filters,
-                cursor_score=cursor_score,
-                cursor_id=cursor_id,
-                limit=page_size
-            )
-        else:
-            # Cold user: use trending with keyset cursor
-            candidates = self._retrieve_trending_keyset(
-                hard_filters=hard_filters,
-                cursor_score=cursor_score,
-                cursor_id=cursor_id,
-                limit=page_size
-            )
+
+        # EXPERIMENT: Always use exploration, disable taste_vector similarity
+        # if user_state.taste_vector:
+        #     # Warm user: use taste vector similarity with keyset cursor
+        #     candidates = self._retrieve_by_taste_vector_keyset(
+        #         taste_vector=user_state.taste_vector,
+        #         hard_filters=hard_filters,
+        #         cursor_score=cursor_score,
+        #         cursor_id=cursor_id,
+        #         limit=page_size
+        #     )
+        # else:
+
+        # Always use exploration (deterministic random) with keyset cursor
+        # Use user_id as seed for consistent ordering across pages
+        random_seed = user_state.user_id or user_state.anon_id or "default"
+        candidates = self._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed=random_seed,
+            cursor_score=cursor_score,
+            cursor_id=cursor_id,
+            limit=page_size
+        )
 
         # Step 2b: Filter out excluded items in Python (preserves keyset cursor pagination)
         if exclude_ids:
             candidates = [c for c in candidates if c.item_id not in exclude_ids]
 
-        # Step 2c: Filter by article_types if specified (Python-level filter)
-        if hard_filters.article_types:
-            # Enrich candidates with article_type if not already present
-            # (Workaround until SQL migration 016_add_article_type.sql is applied)
+        # Step 2c: Filter by include_article_types if specified (Python-level fallback)
+        # Note: SQL functions now handle this, but keep as fallback until migration applied
+        if hard_filters.include_article_types and hard_filters.article_types:
+            # Old code path for backward compatibility
             candidates = self._enrich_with_article_types(candidates)
             article_types_lower = [at.lower() for at in hard_filters.article_types]
             candidates = [c for c in candidates if (c.article_type or '').lower() in article_types_lower]
@@ -277,6 +535,16 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
+                # Lifestyle filters (NEW)
+                'exclude_styles': hard_filters.exclude_styles,
+                'include_occasions': hard_filters.include_occasions,
+                'include_article_types': hard_filters.include_article_types,
+                'style_threshold': hard_filters.style_threshold,
+                'occasion_threshold': hard_filters.occasion_threshold,
+                # Pattern filters (NEW)
+                'include_patterns': hard_filters.include_patterns,
+                'exclude_patterns': hard_filters.exclude_patterns,
+                'pattern_threshold': hard_filters.pattern_threshold,
             }
             result = self.supabase.rpc('match_products_keyset', params).execute()
             return [self._row_to_candidate(row, source="taste_vector") for row in (result.data or [])]
@@ -311,6 +579,16 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
+                # Lifestyle filters (NEW)
+                'exclude_styles': hard_filters.exclude_styles,
+                'include_occasions': hard_filters.include_occasions,
+                'include_article_types': hard_filters.include_article_types,
+                'style_threshold': hard_filters.style_threshold,
+                'occasion_threshold': hard_filters.occasion_threshold,
+                # Pattern filters (NEW)
+                'include_patterns': hard_filters.include_patterns,
+                'exclude_patterns': hard_filters.exclude_patterns,
+                'pattern_threshold': hard_filters.pattern_threshold,
             }
             result = self.supabase.rpc('get_trending_keyset', params).execute()
             return [self._row_to_candidate(row, source="trending") for row in (result.data or [])]
@@ -346,7 +624,22 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
+                # Lifestyle filters (NEW)
+                'exclude_styles': hard_filters.exclude_styles,
+                'include_occasions': hard_filters.include_occasions,
+                'include_article_types': hard_filters.include_article_types,
+                'style_threshold': hard_filters.style_threshold,
+                'occasion_threshold': hard_filters.occasion_threshold,
+                # Pattern filters (NEW)
+                'include_patterns': hard_filters.include_patterns,
+                'exclude_patterns': hard_filters.exclude_patterns,
+                'pattern_threshold': hard_filters.pattern_threshold,
             }
+
+            # Debug log article type filtering
+            if hard_filters.include_article_types:
+                print(f"[CandidateSelection] SQL filter include_article_types: {hard_filters.include_article_types}")
+
             result = self.supabase.rpc('get_exploration_keyset', params).execute()
             return [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
         except Exception as e:
@@ -624,6 +917,7 @@ class CandidateSelectionModule:
             length=row.get('length'),
             sleeve=row.get('sleeve'),
             neckline=row.get('neckline'),
+            rise=row.get('rise'),
             style_tags=row.get('style_tags', []) or [],
             image_url=row.get('primary_image_url') or '',
             gallery_images=row.get('gallery_images', []) or [],
@@ -643,54 +937,328 @@ class CandidateSelectionModule:
         """
         Apply soft preference scoring to candidates.
 
+        Supports both:
+        - V3 format: flat attribute preferences (preferred_fits, preferred_sleeves, etc.)
+        - Legacy format: per-category preferences (profile.tops.fits, etc.)
+
         Uses OR logic: any match adds to the preference_score.
         Weights from config.SOFT_WEIGHTS.
+
+        Key scoring factors:
+        - Type match: Does item type match user's selected types? (+0.25)
+        - Brand match: Is this a preferred brand? (+0.40, modified by brand_openness)
+        - Fit match: Does fit match preferences? (+0.15)
+        - Style match: Does item style match user's style directions? (+0.20)
+        - Attribute matches: Length, sleeve, neckline, rise (+0.10 each)
         """
         if not profile:
             return candidates
 
         weights = self.config.SOFT_WEIGHTS
 
+        # Get brand openness multiplier (default to 1.0 if not set)
+        brand_multiplier = 1.0
+        if profile.brand_openness:
+            brand_multiplier = self.config.BRAND_OPENNESS_MULTIPLIERS.get(
+                profile.brand_openness.lower(), 1.0
+            )
+
+        # Pre-compute preferred brands (case-insensitive)
+        preferred_brands_lower = set(b.lower() for b in profile.preferred_brands) if profile.preferred_brands else set()
+
+        # Check if we have V3 flat preferences
+        has_v3_prefs = bool(
+            profile.preferred_fits or profile.preferred_sleeves or
+            profile.preferred_lengths or profile.preferred_rises
+        )
+
         for c in candidates:
             score = 0.0
+            item_category = (c.broad_category or c.category or '').lower()
 
-            # Get category-specific preferences
-            cat_prefs = self._get_category_prefs(profile, c.broad_category or c.category)
+            # =================================================================
+            # V3 Format: Use flat attribute preferences with category mappings
+            # =================================================================
+            if has_v3_prefs:
+                # Type match using V3 type lists
+                type_match = self._check_type_match_v3(profile, c.article_type or c.category, item_category)
+                if type_match:
+                    score += weights['type_match']
 
-            if cat_prefs:
-                # Fit match
-                if hasattr(cat_prefs, 'fits') and cat_prefs.fits and c.fit:
-                    if c.fit.lower() in [f.lower() for f in cat_prefs.fits]:
+                # Fit match with category mapping
+                if profile.preferred_fits and c.fit:
+                    fit_applies = self._attribute_applies_to_category(
+                        c.fit, item_category, profile.preferred_fits, profile.fit_category_mapping, 'fitId'
+                    )
+                    if fit_applies:
                         score += weights['fit']
 
-                # Length match
-                if hasattr(cat_prefs, 'lengths') and cat_prefs.lengths and c.length:
-                    if c.length.lower() in [l.lower() for l in cat_prefs.lengths]:
-                        score += weights['length']
-
-                # Neckline match
-                if hasattr(cat_prefs, 'necklines') and cat_prefs.necklines and c.neckline:
-                    if c.neckline.lower() in [n.lower() for n in cat_prefs.necklines]:
-                        score += weights['neckline']
-
-                # Sleeve match
-                if hasattr(cat_prefs, 'sleeves') and cat_prefs.sleeves and c.sleeve:
-                    if c.sleeve.lower() in [s.lower() for s in cat_prefs.sleeves]:
+                # Sleeve match with category mapping
+                if profile.preferred_sleeves and c.sleeve:
+                    sleeve_applies = self._attribute_applies_to_category(
+                        c.sleeve, item_category, profile.preferred_sleeves, profile.sleeve_category_mapping, 'sleeveId'
+                    )
+                    if sleeve_applies:
                         score += weights['sleeve']
 
-            # Style direction match (applies to all categories)
-            if profile.style_directions and c.style_tags:
-                if any(s.lower() in [t.lower() for t in c.style_tags] for s in profile.style_directions):
+                # Length match with category mapping
+                if c.length:
+                    # Check standard lengths (for tops/bottoms)
+                    if profile.preferred_lengths:
+                        length_applies = self._attribute_applies_to_category(
+                            c.length, item_category, profile.preferred_lengths, profile.length_category_mapping, 'lengthId'
+                        )
+                        if length_applies:
+                            score += weights['length']
+
+                    # Check dress/skirt lengths (mini, midi, maxi)
+                    if profile.preferred_lengths_dresses and item_category in ['dresses', 'skirts']:
+                        length_applies = self._attribute_applies_to_category(
+                            c.length, item_category, profile.preferred_lengths_dresses,
+                            profile.length_dresses_category_mapping, 'lengthId'
+                        )
+                        if length_applies:
+                            score += weights['length']
+
+                # Rise match (bottoms only, no category mapping needed)
+                if profile.preferred_rises and hasattr(c, 'rise') and c.rise:
+                    if c.rise.lower() in [r.lower() for r in profile.preferred_rises]:
+                        score += weights['rise']
+
+            # =================================================================
+            # Legacy Format: Use per-category preferences
+            # =================================================================
+            else:
+                cat_prefs = self._get_category_prefs(profile, c.broad_category or c.category)
+
+                if cat_prefs:
+                    # Type match
+                    type_match = self._check_type_match(cat_prefs, c.article_type or c.category)
+                    if type_match:
+                        score += weights['type_match']
+
+                    # Fit match
+                    if hasattr(cat_prefs, 'fits') and cat_prefs.fits and c.fit:
+                        if c.fit.lower() in [f.lower() for f in cat_prefs.fits]:
+                            score += weights['fit']
+
+                    # Length match
+                    if hasattr(cat_prefs, 'lengths') and cat_prefs.lengths and c.length:
+                        if c.length.lower() in [l.lower() for l in cat_prefs.lengths]:
+                            score += weights['length']
+
+                    # Neckline match
+                    if hasattr(cat_prefs, 'necklines') and cat_prefs.necklines and c.neckline:
+                        if c.neckline.lower() in [n.lower() for n in cat_prefs.necklines]:
+                            score += weights['neckline']
+
+                    # Sleeve match
+                    if hasattr(cat_prefs, 'sleeves') and cat_prefs.sleeves and c.sleeve:
+                        if c.sleeve.lower() in [s.lower() for s in cat_prefs.sleeves]:
+                            score += weights['sleeve']
+
+                    # Rise match (for bottoms)
+                    if hasattr(cat_prefs, 'rises') and cat_prefs.rises and hasattr(c, 'rise') and c.rise:
+                        if c.rise.lower() in [r.lower() for r in cat_prefs.rises]:
+                            score += weights['rise']
+
+            # =================================================================
+            # Style match (works for both V3 and legacy)
+            # =================================================================
+            style_prefs = profile.style_persona if profile.style_persona else profile.style_directions
+            if style_prefs and c.style_tags:
+                if any(s.lower() in [t.lower() for t in c.style_tags] for s in style_prefs):
                     score += weights['style']
 
-            # Brand preference match (soft boost)
-            if profile.preferred_brands and c.brand:
-                if c.brand in profile.preferred_brands:
-                    score += weights['brand']
+            # =================================================================
+            # Brand preference match
+            # =================================================================
+            if c.brand:
+                brand_lower = c.brand.lower()
+                if preferred_brands_lower and brand_lower in preferred_brands_lower:
+                    brand_boost = weights['brand_preferred'] * brand_multiplier
+                    score += brand_boost
+                elif profile.brand_openness in ['discover_new', 'discover-new', 'mix-favorites-new']:
+                    score += weights['brand_new']
 
             c.preference_score = score
 
         return candidates
+
+    def _attribute_applies_to_category(
+        self,
+        item_value: str,
+        item_category: str,
+        preferences: List[str],
+        category_mapping: List[Dict[str, Any]],
+        mapping_key: str
+    ) -> bool:
+        """
+        Check if an attribute preference applies to the given item/category.
+
+        Uses category mapping to determine if the preference applies.
+        If no mapping exists for the preference, assume it applies to all categories.
+
+        Args:
+            item_value: The item's attribute value (e.g., "regular" for fit)
+            item_category: The item's category (e.g., "tops", "dresses")
+            preferences: List of preferred values (e.g., ["regular", "relaxed"])
+            category_mapping: List of {mappingKey, categories} dicts
+            mapping_key: The key in the mapping (e.g., "fitId", "sleeveId")
+        """
+        item_value_lower = item_value.lower()
+        item_category_lower = item_category.lower()
+
+        # Check if item value is in preferences
+        if item_value_lower not in [p.lower() for p in preferences]:
+            return False
+
+        # If no mapping, assume applies to all categories
+        if not category_mapping:
+            return True
+
+        # Find the mapping for this preference value
+        for mapping in category_mapping:
+            if mapping.get(mapping_key, '').lower() == item_value_lower:
+                categories = mapping.get('categories', [])
+                # Check if item category is in the mapped categories
+                if any(item_category_lower in cat.lower() or cat.lower() in item_category_lower
+                       for cat in categories):
+                    return True
+                return False
+
+        # No mapping found for this value - assume applies to all
+        return True
+
+    def _check_type_match_v3(self, profile: OnboardingProfile, article_type: str, category: str) -> bool:
+        """
+        Check if item's article_type matches user's V3 type preferences.
+
+        V3 has flat type lists: top_types, bottom_types, dress_types, outerwear_types
+        """
+        if not article_type:
+            return False
+
+        article_type_lower = article_type.lower()
+
+        # Determine which type list to check based on category
+        types_list = None
+        if 'top' in category or 'knit' in category or 'woven' in category:
+            types_list = profile.top_types
+        elif 'bottom' in category or 'trouser' in category or 'pant' in category or 'skirt' in category:
+            types_list = profile.bottom_types
+        elif 'dress' in category or 'jumpsuit' in category or 'romper' in category:
+            types_list = profile.dress_types
+        elif 'outer' in category or 'jacket' in category or 'coat' in category:
+            types_list = profile.outerwear_types
+
+        if not types_list:
+            return True  # No type preferences = accept all
+
+        # Check if article_type matches any of the user's selected types
+        for pref_type in types_list:
+            pref_type_lower = pref_type.lower().replace(' ', '-')
+
+            # Direct match
+            if pref_type_lower == article_type_lower or pref_type_lower.replace('-', ' ') == article_type_lower:
+                return True
+
+            # Check mappings
+            if pref_type_lower in TYPE_MAPPINGS:
+                if article_type_lower in TYPE_MAPPINGS[pref_type_lower]:
+                    return True
+
+            # Fuzzy match
+            if pref_type_lower.replace('-', '') in article_type_lower.replace('-', '').replace(' ', ''):
+                return True
+
+        return False
+
+    def _check_type_match(self, cat_prefs, article_type: str) -> bool:
+        """
+        Check if item's article_type matches user's selected types for the category.
+
+        Maps onboarding type names to product article_types.
+        """
+        if not article_type:
+            return False
+
+        article_type_lower = article_type.lower()
+
+        # Get the types list from category prefs
+        types_list = None
+        if hasattr(cat_prefs, 'types') and cat_prefs.types:
+            types_list = cat_prefs.types
+
+        if not types_list:
+            # No type preferences = accept all
+            return True
+
+        # Create mapping from onboarding types to article_types
+        type_mappings = {
+            # Tops mappings
+            'blouse': ['blouses', 'blouse'],
+            'tee': ['t-shirts', 't-shirt', 'tees', 'tee'],
+            't-shirt': ['t-shirts', 't-shirt', 'tees'],
+            'sweater': ['sweaters', 'sweater', 'knitwear'],
+            'cardigan': ['cardigans', 'cardigan'],
+            'cardigan-top': ['cardigans', 'cardigan'],
+            'tank': ['tank tops', 'tank top', 'camisoles'],
+            'tank-top': ['tank tops', 'tank top', 'camisoles'],
+            'crop-top': ['crop tops', 'crop top'],
+            'bodysuit': ['bodysuits', 'bodysuit'],
+            'hoodie': ['hoodies', 'hoodie', 'sweatshirts'],
+            'sweatshirt': ['sweatshirts', 'sweatshirt', 'hoodies'],
+            # Bottoms mappings
+            'jeans': ['jeans', 'denim'],
+            'pants': ['pants', 'trousers'],
+            'trousers': ['pants', 'trousers'],
+            'shorts': ['shorts'],
+            'leggings': ['leggings'],
+            # Skirt mappings
+            'a-line-skirt': ['skirts', 'a-line skirt'],
+            'pencil-skirt': ['skirts', 'pencil skirt'],
+            'mini-skirt': ['skirts', 'mini skirt'],
+            'midi-skirt': ['skirts', 'midi skirt'],
+            'maxi-skirt': ['skirts', 'maxi skirt'],
+            # Dress mappings
+            'wrap-dress': ['dresses', 'wrap dress'],
+            'a-line-dress': ['dresses', 'a-line dress'],
+            'bodycon': ['dresses', 'bodycon dress'],
+            'shift': ['dresses', 'shift dress'],
+            'maxi': ['maxi dresses', 'maxi dress'],
+            'midi': ['midi dresses', 'midi dress'],
+            'mini': ['mini dresses', 'mini dress'],
+            # One-piece mappings
+            'jumpsuit': ['jumpsuits', 'jumpsuit'],
+            'romper': ['rompers', 'romper'],
+            'overalls': ['overalls'],
+            # Outerwear mappings
+            'coats': ['coats', 'coat'],
+            'jackets': ['jackets', 'jacket'],
+            'blazers': ['blazers', 'blazer'],
+            'puffer': ['puffer jackets', 'puffer'],
+            'trench': ['trench coats', 'trench'],
+        }
+
+        # Check if article_type matches any of the user's selected types
+        for pref_type in types_list:
+            pref_type_lower = pref_type.lower().replace(' ', '-')
+
+            # Direct match
+            if pref_type_lower == article_type_lower or pref_type_lower.replace('-', ' ') == article_type_lower:
+                return True
+
+            # Check mappings
+            if pref_type_lower in type_mappings:
+                if article_type_lower in type_mappings[pref_type_lower]:
+                    return True
+
+            # Fuzzy match - check if article_type contains the preference type
+            if pref_type_lower.replace('-', '') in article_type_lower.replace('-', '').replace(' ', ''):
+                return True
+
+        return False
 
     def _get_category_prefs(self, profile: OnboardingProfile, category: str):
         """Get category-specific preferences from profile."""
@@ -726,8 +1294,14 @@ class CandidateSelectionModule:
 
         Combines:
         - Tinder test results (taste_vector)
-        - Onboarding profile (9 modules)
+        - Full onboarding profile (10 modules including per-category preferences)
         - (Interaction history would be loaded separately for SASRec)
+
+        This enables:
+        - Cold start mitigation using onboarding preferences
+        - Type-based filtering (topTypes, bottomTypes, etc.)
+        - Brand preference boosting
+        - Attribute-based soft scoring (fit, sleeve, rise, length)
         """
         state = UserState(
             user_id=user_id or anon_id or "",
@@ -755,23 +1329,24 @@ class CandidateSelectionModule:
                     if len(taste_vec) == 512:
                         state.taste_vector = taste_vec
 
-                # Build onboarding profile
+                # Build full onboarding profile with per-category preferences
                 if row.get('has_onboarding'):
-                    state.onboarding_profile = OnboardingProfile(
-                        user_id=user_id or anon_id or "",
-                        categories=row.get('onboarding_categories', []),
-                        colors_to_avoid=row.get('colors_to_avoid', []),
-                        materials_to_avoid=row.get('materials_to_avoid', []),
-                        preferred_brands=row.get('preferred_brands', []),
-                        brands_to_avoid=row.get('brands_to_avoid', []),
-                        style_directions=row.get('style_directions', [])
+                    state.onboarding_profile = self._build_full_onboarding_profile(
+                        user_id or anon_id or "",
+                        row
                     )
 
                 # Determine state type
+                # IMPORTANT: Even without taste_vector, if user has onboarding,
+                # treat as TINDER_COMPLETE to use preferences for cold start mitigation
                 state_str = row.get('state_type', 'cold_start')
                 if state_str == 'warm_user':
                     state.state_type = UserStateType.WARM_USER
                 elif state_str == 'tinder_complete' or state.taste_vector:
+                    state.state_type = UserStateType.TINDER_COMPLETE
+                elif row.get('has_onboarding'):
+                    # User has onboarding but no taste_vector - use onboarding preferences
+                    # This is critical for cold start mitigation
                     state.state_type = UserStateType.TINDER_COMPLETE
                 else:
                     state.state_type = UserStateType.COLD_START
@@ -780,6 +1355,163 @@ class CandidateSelectionModule:
             print(f"[CandidateSelection] Error loading user state: {e}")
 
         return state
+
+    def _build_full_onboarding_profile(self, user_key: str, row: Dict[str, Any]) -> OnboardingProfile:
+        """
+        Build full OnboardingProfile from DB row.
+
+        Supports both:
+        - V3 format: flat attribute/type preferences
+        - Legacy format: per-category module preferences
+
+        This extracts all preferences saved during onboarding.
+        """
+        profile = OnboardingProfile(
+            user_id=user_key,
+            # Core setup
+            categories=row.get('onboarding_categories', []) or [],
+            birthdate=row.get('birthdate'),
+            colors_to_avoid=row.get('colors_to_avoid', []) or [],
+            materials_to_avoid=row.get('materials_to_avoid', []) or [],
+            # Legacy single sizes (for backward compat)
+            sizes=row.get('sizes', []) or [],
+            # Brands
+            preferred_brands=row.get('preferred_brands', []) or [],
+            brands_to_avoid=row.get('brands_to_avoid', []) or [],
+            brand_openness=row.get('brand_openness'),
+            # Legacy style
+            style_directions=row.get('style_directions', []) or [],
+            modesty=row.get('modesty'),
+            # Global price
+            global_min_price=row.get('global_min_price'),
+            global_max_price=row.get('global_max_price'),
+        )
+
+        # =================================================================
+        # V3 Fields: Split sizes
+        # =================================================================
+        profile.top_sizes = row.get('top_sizes', []) or []
+        profile.bottom_sizes = row.get('bottom_sizes', []) or []
+        profile.outerwear_sizes = row.get('outerwear_sizes', []) or []
+
+        # =================================================================
+        # V3 Fields: Flat attribute preferences
+        # =================================================================
+        profile.preferred_fits = row.get('preferred_fits', []) or []
+        profile.fit_category_mapping = row.get('fit_category_mapping', []) or []
+        profile.preferred_sleeves = row.get('preferred_sleeves', []) or []
+        profile.sleeve_category_mapping = row.get('sleeve_category_mapping', []) or []
+        profile.preferred_lengths = row.get('preferred_lengths', []) or []
+        profile.length_category_mapping = row.get('length_category_mapping', []) or []
+        profile.preferred_lengths_dresses = row.get('preferred_lengths_dresses', []) or []
+        profile.length_dresses_category_mapping = row.get('length_dresses_category_mapping', []) or []
+        profile.preferred_rises = row.get('preferred_rises', []) or []
+
+        # =================================================================
+        # V3 Fields: Simplified type preferences
+        # =================================================================
+        profile.top_types = row.get('top_types', []) or []
+        profile.bottom_types = row.get('bottom_types', []) or []
+        profile.dress_types = row.get('dress_types', []) or []
+        profile.outerwear_types = row.get('outerwear_types', []) or []
+
+        # =================================================================
+        # V3 Fields: Lifestyle & Style persona
+        # =================================================================
+        profile.occasions = row.get('occasions', []) or []
+        profile.styles_to_avoid = row.get('styles_to_avoid', []) or []
+        profile.patterns_liked = row.get('patterns_liked', []) or []
+        profile.patterns_avoided = row.get('patterns_avoided', []) or []
+        profile.style_persona = row.get('style_persona', []) or []
+
+        # Legacy pattern fields (for backward compat)
+        profile.patterns_to_avoid = row.get('patterns_to_avoid', []) or []
+        profile.patterns_preferred = row.get('patterns_preferred', []) or []
+
+        # =================================================================
+        # V3 Fields: Simplified style discovery
+        # =================================================================
+        profile.style_discovery_complete = row.get('style_discovery_complete', False) or False
+        profile.swiped_items = row.get('swiped_items', []) or []
+
+        # =================================================================
+        # Legacy: Per-category preferences from JSONB columns
+        # =================================================================
+        # Tops preferences
+        tops_prefs = row.get('tops_prefs')
+        if tops_prefs and isinstance(tops_prefs, dict):
+            profile.tops = TopsPrefs(
+                types=tops_prefs.get('types', []) or [],
+                fits=tops_prefs.get('fits', []) or [],
+                lengths=tops_prefs.get('lengths', []) or [],
+                sleeves=tops_prefs.get('sleeves', []) or [],
+                necklines=tops_prefs.get('necklines', []) or [],
+                price_comfort=tops_prefs.get('price_comfort'),
+                enabled=tops_prefs.get('enabled', True)
+            )
+
+        # Bottoms preferences
+        bottoms_prefs = row.get('bottoms_prefs')
+        if bottoms_prefs and isinstance(bottoms_prefs, dict):
+            profile.bottoms = BottomsPrefs(
+                types=bottoms_prefs.get('types', []) or [],
+                fits=bottoms_prefs.get('fits', []) or [],
+                rises=bottoms_prefs.get('rises', []) or [],
+                lengths=bottoms_prefs.get('lengths', []) or [],
+                numeric_waist=bottoms_prefs.get('numeric_waist'),
+                numeric_hip=bottoms_prefs.get('numeric_hip'),
+                price_comfort=bottoms_prefs.get('price_comfort'),
+                enabled=bottoms_prefs.get('enabled', True)
+            )
+
+        # Dresses preferences
+        dresses_prefs = row.get('dresses_prefs')
+        if dresses_prefs and isinstance(dresses_prefs, dict):
+            profile.dresses = DressesPrefs(
+                types=dresses_prefs.get('types', []) or [],
+                fits=dresses_prefs.get('fits', []) or [],
+                lengths=dresses_prefs.get('lengths', []) or [],
+                sleeves=dresses_prefs.get('sleeves', []) or [],
+                price_comfort=dresses_prefs.get('price_comfort'),
+                enabled=dresses_prefs.get('enabled', True)
+            )
+
+        # Outerwear preferences
+        outerwear_prefs = row.get('outerwear_prefs')
+        if outerwear_prefs and isinstance(outerwear_prefs, dict):
+            profile.outerwear = OuterwearPrefs(
+                types=outerwear_prefs.get('types', []) or [],
+                fits=outerwear_prefs.get('fits', []) or [],
+                sleeves=outerwear_prefs.get('sleeves', []) or [],
+                price_comfort=outerwear_prefs.get('price_comfort'),
+                enabled=outerwear_prefs.get('enabled', True)
+            )
+
+        # Skirts preferences
+        skirts_prefs = row.get('skirts_prefs')
+        if skirts_prefs and isinstance(skirts_prefs, dict):
+            profile.skirts = SkirtsPrefs(
+                types=skirts_prefs.get('types', []) or [],
+                lengths=skirts_prefs.get('lengths', []) or [],
+                fits=skirts_prefs.get('fits', []) or [],
+                numeric_waist=skirts_prefs.get('numeric_waist'),
+                price_comfort=skirts_prefs.get('price_comfort'),
+                enabled=skirts_prefs.get('enabled', True)
+            )
+
+        # One-piece preferences
+        one_piece_prefs = row.get('one_piece_prefs')
+        if one_piece_prefs and isinstance(one_piece_prefs, dict):
+            profile.one_piece = OnePiecePrefs(
+                types=one_piece_prefs.get('types', []) or [],
+                fits=one_piece_prefs.get('fits', []) or [],
+                lengths=one_piece_prefs.get('lengths', []) or [],
+                numeric_waist=one_piece_prefs.get('numeric_waist'),
+                price_comfort=one_piece_prefs.get('price_comfort'),
+                enabled=one_piece_prefs.get('enabled', True)
+            )
+
+        return profile
 
     # =========================================================
     # Onboarding Profile Save
@@ -832,7 +1564,12 @@ class CandidateSelectionModule:
                 'p_global_max_price': profile.global_max_price,
                 'p_style_discovery': style_discovery_data,
                 'p_taste_vector': taste_vector,
-                'p_completed_at': profile.completed_at
+                'p_completed_at': profile.completed_at,
+                # Lifestyle fields (NEW)
+                'p_styles_to_avoid': profile.styles_to_avoid if profile.styles_to_avoid else [],
+                'p_occasions': profile.occasions if profile.occasions else [],
+                'p_patterns_to_avoid': profile.patterns_to_avoid if profile.patterns_to_avoid else [],
+                'p_patterns_preferred': profile.patterns_preferred if profile.patterns_preferred else []
             }).execute()
 
             return {
@@ -874,6 +1611,86 @@ class CandidateSelectionModule:
             count += 1
 
         return count
+
+    def save_onboarding_profile_v3(self, profile: OnboardingProfile, gender: str = "female") -> Dict[str, Any]:
+        """
+        Save user's V3 onboarding profile to Supabase.
+
+        V3 format uses:
+        - Split sizes (top_sizes, bottom_sizes, outerwear_sizes)
+        - Flat attribute preferences with category mappings
+        - Simplified type preferences (top_types, bottom_types, dress_types, outerwear_types)
+        - style_persona instead of style_directions
+        - Simplified style discovery (style_discovery_complete, swiped_items)
+        """
+        try:
+            # Determine user_id vs anon_id
+            user_id = None
+            anon_id = None
+
+            if profile.user_id and len(profile.user_id) == 36 and '-' in profile.user_id:
+                user_id = profile.user_id
+            else:
+                anon_id = profile.user_id
+
+            result = self.supabase.rpc('save_onboarding_profile_v3', {
+                'p_user_id': user_id,
+                'p_anon_id': anon_id,
+                'p_gender': gender,
+                # Core setup
+                'p_categories': profile.categories,
+                'p_birthdate': profile.birthdate,
+                'p_top_sizes': profile.top_sizes,
+                'p_bottom_sizes': profile.bottom_sizes,
+                'p_outerwear_sizes': profile.outerwear_sizes,
+                'p_colors_to_avoid': profile.colors_to_avoid,
+                'p_materials_to_avoid': profile.materials_to_avoid,
+                # Attribute preferences
+                'p_preferred_fits': profile.preferred_fits,
+                'p_fit_category_mapping': profile.fit_category_mapping,
+                'p_preferred_sleeves': profile.preferred_sleeves,
+                'p_sleeve_category_mapping': profile.sleeve_category_mapping,
+                'p_preferred_lengths': profile.preferred_lengths,
+                'p_length_category_mapping': profile.length_category_mapping,
+                'p_preferred_lengths_dresses': profile.preferred_lengths_dresses,
+                'p_length_dresses_category_mapping': profile.length_dresses_category_mapping,
+                'p_preferred_rises': profile.preferred_rises,
+                # Type preferences
+                'p_top_types': profile.top_types,
+                'p_bottom_types': profile.bottom_types,
+                'p_dress_types': profile.dress_types,
+                'p_outerwear_types': profile.outerwear_types,
+                # Lifestyle
+                'p_occasions': profile.occasions,
+                'p_styles_to_avoid': profile.styles_to_avoid,
+                'p_patterns_liked': profile.patterns_liked,
+                'p_patterns_avoided': profile.patterns_avoided,
+                'p_style_persona': profile.style_persona,
+                # Brands
+                'p_preferred_brands': profile.preferred_brands,
+                'p_brands_to_avoid': profile.brands_to_avoid,
+                'p_brand_openness': profile.brand_openness,
+                # Style discovery
+                'p_style_discovery_complete': profile.style_discovery_complete,
+                'p_swiped_items': profile.swiped_items,
+                'p_taste_vector': profile.taste_vector,
+                # Metadata
+                'p_completed_at': profile.completed_at,
+            }).execute()
+
+            return {
+                "status": "success",
+                "profile_id": str(result.data) if result.data else None,
+                "user_id": profile.user_id,
+                "has_taste_vector": profile.taste_vector is not None and len(profile.taste_vector) == 512
+            }
+
+        except Exception as e:
+            print(f"[CandidateSelection] Error saving V3 onboarding profile: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
 
     # =========================================================
     # User Seen History (for permanent deduplication)

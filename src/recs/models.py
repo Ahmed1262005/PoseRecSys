@@ -156,31 +156,51 @@ class StyleDiscoveryModule(BaseModel):
 
 class OnboardingProfile(BaseModel):
     """
-    Complete user onboarding profile from 10 modules.
+    Complete user onboarding profile - V3 format with flat attribute preferences.
 
-    Module 1: Core Setup (HARD filters - SQL WHERE)
-    Modules 2-7: Per-category preferences (SOFT scoring)
-    Module 8: Style preferences (SOFT scoring)
-    Module 9: Brand preferences (MIXED - both hard and soft)
-    Module 10: Style Discovery - Tinder test results (taste_vector)
+    Supports NEW frontend spec with:
+    - Split sizes (topSize, bottomSize, outerwearSize)
+    - Flat attributePreferences with category mappings
+    - Simplified typePreferences
+    - stylePersona support
+    - Simplified styleDiscovery
+
+    Also maintains backward compatibility with old per-module format.
     """
     user_id: str
 
     # -------------------------------------------------------------------------
-    # Module 1: Core Setup (HARD FILTERS)
+    # Core Setup (HARD FILTERS)
     # -------------------------------------------------------------------------
     categories: List[str] = Field(
         default_factory=list,
-        description="Selected broad categories: tops, bottoms, one_piece, outerwear, dresses, skirts"
-    )
-    sizes: List[str] = Field(
-        default_factory=list,
-        description="User's sizes: XS, S, M, L, XL, XXL"
+        description="Selected broad categories: tops, bottoms, outerwear, dresses"
     )
     birthdate: Optional[str] = Field(
         default=None,
         description="User's birthdate (YYYY-MM-DD format)"
     )
+
+    # V3: Split sizes by category
+    top_sizes: List[str] = Field(
+        default_factory=list,
+        description="Top sizes: XS, S, M, L, XL, XXL"
+    )
+    bottom_sizes: List[str] = Field(
+        default_factory=list,
+        description="Bottom sizes: 0, 2, 4, 6, 8, 10, etc. or XS, S, M, L"
+    )
+    outerwear_sizes: List[str] = Field(
+        default_factory=list,
+        description="Outerwear sizes: XS, S, M, L, XL, XXL"
+    )
+
+    # Legacy: Single sizes array (for backward compat)
+    sizes: List[str] = Field(
+        default_factory=list,
+        description="[DEPRECATED] Use top_sizes, bottom_sizes, outerwear_sizes instead"
+    )
+
     colors_to_avoid: List[str] = Field(
         default_factory=list,
         description="Colors to exclude from recommendations"
@@ -191,7 +211,105 @@ class OnboardingProfile(BaseModel):
     )
 
     # -------------------------------------------------------------------------
-    # Modules 2-7: Per-Category Soft Preferences
+    # V3: Flat Attribute Preferences with Category Mappings
+    # -------------------------------------------------------------------------
+    preferred_fits: List[str] = Field(
+        default_factory=list,
+        description="Fit preferences: slim, regular, relaxed, oversized"
+    )
+    fit_category_mapping: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Maps fitId to categories: [{fitId: 'regular', categories: ['tops', 'bottoms']}]"
+    )
+
+    preferred_sleeves: List[str] = Field(
+        default_factory=list,
+        description="Sleeve preferences: short, long, sleeveless, 3/4"
+    )
+    sleeve_category_mapping: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Maps sleeveId to categories"
+    )
+
+    preferred_lengths: List[str] = Field(
+        default_factory=list,
+        description="Length preferences for tops/bottoms: cropped, standard, long"
+    )
+    length_category_mapping: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Maps lengthId to categories"
+    )
+
+    preferred_lengths_dresses: List[str] = Field(
+        default_factory=list,
+        description="Length preferences for skirts/dresses: mini, midi, maxi"
+    )
+    length_dresses_category_mapping: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Maps lengthId to dress/skirt categories"
+    )
+
+    preferred_rises: List[str] = Field(
+        default_factory=list,
+        description="Rise preferences for bottoms: high, mid, low"
+    )
+
+    # -------------------------------------------------------------------------
+    # V3: Simplified Type Preferences
+    # -------------------------------------------------------------------------
+    top_types: List[str] = Field(
+        default_factory=list,
+        description="Preferred top types: tee, blouse, sweater, cardigan-top, etc."
+    )
+    bottom_types: List[str] = Field(
+        default_factory=list,
+        description="Preferred bottom types: jeans, pants, shorts + skirt types merged"
+    )
+    dress_types: List[str] = Field(
+        default_factory=list,
+        description="Preferred dress types: a-line-dress, wrap-dress + jumpsuit/romper merged"
+    )
+    outerwear_types: List[str] = Field(
+        default_factory=list,
+        description="Preferred outerwear types: jackets, blazers, coats"
+    )
+
+    # -------------------------------------------------------------------------
+    # Lifestyle Preferences (HARD FILTERS)
+    # -------------------------------------------------------------------------
+    occasions: List[str] = Field(
+        default_factory=list,
+        description="Occasions to include: casual, office, evening, beach"
+    )
+    styles_to_avoid: List[str] = Field(
+        default_factory=list,
+        description="Coverage styles to exclude: deep-necklines, sheer, cutouts, backless, strapless"
+    )
+    patterns_liked: List[str] = Field(
+        default_factory=list,
+        description="Liked patterns: stripes, plaid, floral, etc."
+    )
+    patterns_avoided: List[str] = Field(
+        default_factory=list,
+        description="Avoided patterns: animal-print, paisley, etc."
+    )
+    style_persona: List[str] = Field(
+        default_factory=list,
+        description="Style personas: classic, minimal, trendy, bohemian, etc."
+    )
+
+    # Legacy pattern fields (for backward compat)
+    patterns_to_avoid: List[str] = Field(
+        default_factory=list,
+        description="[DEPRECATED] Use patterns_avoided instead"
+    )
+    patterns_preferred: List[str] = Field(
+        default_factory=list,
+        description="[DEPRECATED] Use patterns_liked instead"
+    )
+
+    # -------------------------------------------------------------------------
+    # Legacy: Per-Category Soft Preferences (for backward compat)
     # -------------------------------------------------------------------------
     tops: Optional[TopsPrefs] = None
     bottoms: Optional[BottomsPrefs] = None
@@ -201,19 +319,19 @@ class OnboardingProfile(BaseModel):
     outerwear: Optional[OuterwearPrefs] = None
 
     # -------------------------------------------------------------------------
-    # Module 8: Style Preferences (SOFT)
+    # Legacy: Style Preferences (for backward compat)
     # -------------------------------------------------------------------------
     style_directions: List[str] = Field(
         default_factory=list,
-        description="Style directions: minimal, classic, trendy, statement"
+        description="[DEPRECATED] Use style_persona instead"
     )
     modesty: Optional[str] = Field(
         default=None,
-        description="Modesty preference: modest, balanced, revealing"
+        description="[DEPRECATED] Modesty preference"
     )
 
     # -------------------------------------------------------------------------
-    # Module 9: Brand Preferences (MIXED)
+    # Brand Preferences (MIXED)
     # -------------------------------------------------------------------------
     preferred_brands: List[str] = Field(
         default_factory=list,
@@ -229,8 +347,22 @@ class OnboardingProfile(BaseModel):
     )
 
     # -------------------------------------------------------------------------
-    # Module 10: Style Discovery (Tinder test results)
+    # V3: Simplified Style Discovery
     # -------------------------------------------------------------------------
+    style_discovery_complete: bool = Field(
+        default=False,
+        description="Whether style discovery is complete"
+    )
+    swiped_items: List[str] = Field(
+        default_factory=list,
+        description="Item IDs that were liked in style discovery"
+    )
+    taste_vector: Optional[List[float]] = Field(
+        default=None,
+        description="512-dim FashionCLIP embedding from style discovery"
+    )
+
+    # Legacy: Full style discovery module (for backward compat)
     style_discovery: Optional[StyleDiscoveryModule] = None
 
     # -------------------------------------------------------------------------
@@ -336,6 +468,7 @@ class Candidate(BaseModel):
     length: Optional[str] = None
     sleeve: Optional[str] = None
     neckline: Optional[str] = None
+    rise: Optional[str] = None
     style_tags: List[str] = Field(default_factory=list)
     image_url: Optional[str] = ""
     gallery_images: List[str] = Field(default_factory=list)
@@ -367,6 +500,18 @@ class HardFilters(BaseModel):
     max_price: Optional[float] = None
     exclude_product_ids: Optional[List[str]] = None
 
+    # Lifestyle filters (NEW)
+    exclude_styles: Optional[List[str]] = None  # Coverage styles to avoid: deep-necklines, sheer, cutouts, backless, strapless
+    include_occasions: Optional[List[str]] = None  # Occasions to include: casual, office, evening, beach
+    include_article_types: Optional[List[str]] = None  # Specific article types user wants (positive filter)
+    style_threshold: float = 0.25  # Threshold for style exclusion
+    occasion_threshold: float = 0.20  # Threshold for occasion matching
+
+    # Pattern filters (NEW)
+    include_patterns: Optional[List[str]] = None  # Patterns to include: solid, stripes, floral, etc.
+    exclude_patterns: Optional[List[str]] = None  # Patterns to exclude: animal-print, paisley, etc.
+    pattern_threshold: float = 0.30  # Threshold for pattern matching
+
     @classmethod
     def from_user_state(cls, user_state: UserState, gender: str = "female") -> "HardFilters":
         """Build hard filters from user state."""
@@ -381,6 +526,14 @@ class HardFilters(BaseModel):
                 exclude_product_ids=exclude_ids if exclude_ids else None
             )
 
+        # Handle patterns - combine legacy and V3 fields
+        include_patterns = profile.patterns_liked if profile.patterns_liked else (
+            profile.patterns_preferred if profile.patterns_preferred else None
+        )
+        exclude_patterns = profile.patterns_avoided if profile.patterns_avoided else (
+            profile.patterns_to_avoid if profile.patterns_to_avoid else None
+        )
+
         return cls(
             gender=gender,
             categories=profile.categories if profile.categories else None,
@@ -389,7 +542,13 @@ class HardFilters(BaseModel):
             exclude_brands=profile.brands_to_avoid if profile.brands_to_avoid else None,
             min_price=profile.global_min_price,
             max_price=profile.global_max_price,
-            exclude_product_ids=exclude_ids if exclude_ids else None
+            exclude_product_ids=exclude_ids if exclude_ids else None,
+            # Lifestyle filters
+            exclude_styles=profile.styles_to_avoid if profile.styles_to_avoid else None,
+            include_occasions=profile.occasions if profile.occasions else None,
+            # Pattern filters
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
         )
 
 
