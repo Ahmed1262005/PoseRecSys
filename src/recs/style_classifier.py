@@ -33,7 +33,7 @@ class StyleClassifierConfig:
 
     # Default thresholds (can be overridden at query time in SQL)
     default_style_threshold: float = 0.25
-    default_occasion_threshold: float = 0.20
+    default_occasion_threshold: float = 0.18  # Lowered - median occasion score is ~0.19
     default_pattern_threshold: float = 0.30
 
     # Coverage/Style concepts (things user might want to avoid)
@@ -92,42 +92,88 @@ class StyleClassifierConfig:
     })
 
     # Occasion concepts - matches frontend: casual, office, smart-casual, evening, events, beach
+    # EXPANDED vocabulary for better discrimination - especially office vs active
     occasion_concepts: Dict[str, List[str]] = field(default_factory=lambda: {
         'casual': [
-            'casual everyday outfit',
-            'relaxed weekend wear',
-            'comfortable casual clothes',
-            'laid-back casual style',
+            'casual everyday t-shirt and jeans outfit',
+            'relaxed weekend wear sweatshirt',
+            'comfortable casual loungewear',
+            'laid-back casual hoodie style',
+            'informal everyday streetwear',
+            'cozy at-home casual clothes',
+            'effortless casual denim look',
+            'weekend errand running outfit',
         ],
         'office': [
-            'professional office wear',
-            'business casual outfit',
-            'work appropriate clothing',
-            'corporate professional attire',
+            # Highly specific professional office items
+            'formal business suit blazer and dress pants',
+            'corporate professional button-down shirt and slacks',
+            'office workwear tailored blouse and pencil skirt',
+            'boardroom meeting professional attire',
+            'conservative office appropriate dress',
+            'executive business formal clothing',
+            'structured tailored professional jacket',
+            'crisp dress shirt with collar for office',
+            # Explicitly NOT athletic/casual
+            'non-athletic formal work clothing',
+            'traditional office professional wear',
+            'polished business meeting attire',
+            'sophisticated workplace fashion',
         ],
         'smart-casual': [
-            'smart casual outfit',
-            'polished casual wear',
-            'elevated everyday style',
-            'dressed up casual look',
+            'smart casual dinner outfit',
+            'polished casual blazer with jeans',
+            'elevated everyday chinos and button-up',
+            'dressed up casual brunch look',
+            'refined casual date night outfit',
+            'nice restaurant casual attire',
+            'sophisticated weekend outing clothes',
+            'upscale casual social gathering wear',
         ],
         'evening': [
-            'evening cocktail dress',
-            'night out outfit',
-            'party wear dress',
-            'formal evening attire',
+            'evening cocktail dress formal',
+            'night out party dress',
+            'glamorous evening gown',
+            'formal evening black tie attire',
+            'upscale dinner date outfit',
+            'elegant nightclub party wear',
+            'sophisticated evening event dress',
+            'dressy going out nighttime look',
         ],
         'events': [
-            'special event dress',
-            'party occasion outfit',
-            'celebration wear',
-            'festive event clothing',
+            'special event formal dress',
+            'party occasion cocktail outfit',
+            'celebration wedding guest wear',
+            'festive event holiday clothing',
+            'graduation ceremony dress',
+            'gala event formal attire',
+            'birthday party outfit',
+            'special occasion dressy look',
         ],
         'beach': [
-            'beach vacation outfit',
-            'resort wear clothing',
-            'summer beach clothes',
-            'tropical vacation style',
+            'beach vacation swimwear cover-up',
+            'resort wear tropical outfit',
+            'summer beach casual clothes',
+            'tropical vacation linen clothing',
+            'seaside holiday outfit',
+            'poolside resort wear',
+            'coastal beach day attire',
+            'sunny beach vacation look',
+        ],
+        'active': [
+            # Highly specific athletic/activewear items
+            'athletic gym workout leggings',
+            'sports performance running clothes',
+            'yoga studio fitness wear',
+            'moisture-wicking athletic apparel',
+            'stretchy exercise workout clothes',
+            'sweat-wicking gym training outfit',
+            'high-performance athletic sportswear',
+            'breathable running jogging attire',
+            'compression athletic training gear',
+            'flexible yoga pilates clothes',
+            'sporty athletic brand activewear',
+            'technical fitness performance wear',
         ],
     })
 
@@ -180,6 +226,22 @@ class StyleClassifierConfig:
             'abstract geometric shapes fabric',
             'triangles circles geometric print',
             'modern geometric design',
+        ],
+        'logo': [
+            'clothing with visible brand logo',
+            'shirt with logo emblem on chest',
+            'garment with brand name text printed',
+            'polo shirt with small brand logo',
+            'sportswear with athletic brand logo',
+            'clothing with company logo marking',
+        ],
+        'graphic': [
+            't-shirt with graphic print artwork',
+            'clothing with printed illustration design',
+            'shirt with text slogan graphic print',
+            'top with decorative picture print',
+            'garment with artistic graphic design',
+            'tee with screen printed graphic image',
         ],
     })
 
@@ -401,6 +463,87 @@ class StyleClassifierConfig:
         ],
     })
 
+    # =================================================================
+    # NEGATIVE OCCASION CONCEPTS - What each occasion is NOT
+    # Used for contrastive scoring to improve hard gating accuracy
+    # =================================================================
+    occasion_concepts_negative: Dict[str, List[str]] = field(default_factory=lambda: {
+        'office': [
+            # Athletic/activewear - explicitly NOT office
+            'athletic gym workout leggings activewear',
+            'sports performance running clothes',
+            'yoga studio fitness wear stretchy',
+            'moisture-wicking athletic sportswear',
+            'compression athletic training gear',
+            # Casual beach/vacation - NOT office
+            'casual beach vacation swimwear',
+            'pool party resort wear',
+            'tropical vacation casual outfit',
+            # Revealing/casual items - NOT office
+            'crop top tank top sleeveless casual',
+            'sexy bodycon mini dress nightclub',
+            'distressed ripped jeans casual weekend',
+            'hoodie sweatshirt athleisure lounge',
+            # Athletic brands product style
+            'sporty athletic brand activewear',
+            'gym training workout clothes',
+        ],
+        'casual': [
+            # Formal business wear - NOT casual
+            'formal business suit blazer',
+            'corporate professional attire',
+            'boardroom meeting executive clothing',
+            # Evening formal - NOT casual
+            'elegant evening gown cocktail dress',
+            'black tie formal event attire',
+            'glamorous party sequin dress',
+        ],
+        'evening': [
+            # Daytime casual - NOT evening
+            'casual everyday t-shirt jeans',
+            'weekend relaxed loungewear',
+            'athletic gym workout clothes',
+            # Office business - NOT evening
+            'conservative office workwear',
+            'professional business meeting attire',
+        ],
+        'active': [
+            # Formal/office - NOT active
+            'formal business suit office wear',
+            'elegant evening cocktail dress',
+            'professional corporate attire',
+            'conservative work appropriate dress',
+            # Dressy items - NOT active
+            'silk blouse formal shirt',
+            'structured blazer jacket',
+            'pencil skirt dress pants',
+        ],
+        'beach': [
+            # Office/formal - NOT beach
+            'formal business office attire',
+            'corporate professional clothing',
+            'executive boardroom wear',
+            # Winter/covered items - NOT beach
+            'heavy coat winter jacket',
+            'formal evening gown',
+        ],
+        'smart-casual': [
+            # Very formal - NOT smart-casual
+            'black tie formal evening gown',
+            'full business suit formal',
+            # Very casual - NOT smart-casual
+            'athletic gym workout wear',
+            'distressed ripped casual clothes',
+            'beach swimwear vacation',
+        ],
+        'events': [
+            # Everyday casual - NOT events
+            'casual everyday loungewear',
+            'athletic gym workout clothes',
+            'basic t-shirt jeans weekend',
+        ],
+    })
+
 
 class StyleClassifier:
     """
@@ -426,6 +569,7 @@ class StyleClassifier:
         # Pre-computed concept embeddings (lazily loaded)
         self._style_embeddings: Optional[Dict[str, np.ndarray]] = None
         self._occasion_embeddings: Optional[Dict[str, np.ndarray]] = None
+        self._occasion_negative_embeddings: Optional[Dict[str, np.ndarray]] = None  # NEW: Negative occasion concepts
         self._pattern_embeddings: Optional[Dict[str, np.ndarray]] = None
         # Fit embeddings by category
         self._fit_embeddings_tops: Optional[Dict[str, np.ndarray]] = None
@@ -477,6 +621,7 @@ class StyleClassifier:
 
         self._style_embeddings = {}
         self._occasion_embeddings = {}
+        self._occasion_negative_embeddings = {}  # NEW: Negative occasion concepts
         self._pattern_embeddings = {}
         self._fit_embeddings_tops = {}
         self._fit_embeddings_bottoms = {}
@@ -496,6 +641,11 @@ class StyleClassifier:
         for occasion_name, text_descriptions in self.config.occasion_concepts.items():
             embedding = self._get_text_embedding(text_descriptions)
             self._occasion_embeddings[occasion_name] = embedding
+
+        # Compute NEGATIVE occasion concept embeddings (what each occasion is NOT)
+        for occasion_name, text_descriptions in self.config.occasion_concepts_negative.items():
+            embedding = self._get_text_embedding(text_descriptions)
+            self._occasion_negative_embeddings[occasion_name] = embedding
 
         # Compute pattern concept embeddings
         for pattern_name, text_descriptions in self.config.pattern_concepts.items():
@@ -539,7 +689,8 @@ class StyleClassifier:
             self._rise_embeddings[rise_name] = embedding
 
         print(f"[StyleClassifier] Pre-computed {len(self._style_embeddings)} style embeddings")
-        print(f"[StyleClassifier] Pre-computed {len(self._occasion_embeddings)} occasion embeddings")
+        print(f"[StyleClassifier] Pre-computed {len(self._occasion_embeddings)} occasion embeddings (positive)")
+        print(f"[StyleClassifier] Pre-computed {len(self._occasion_negative_embeddings)} occasion embeddings (negative)")
         print(f"[StyleClassifier] Pre-computed {len(self._pattern_embeddings)} pattern embeddings")
         print(f"[StyleClassifier] Pre-computed fit embeddings: tops={len(self._fit_embeddings_tops)}, bottoms={len(self._fit_embeddings_bottoms)}, dresses={len(self._fit_embeddings_dresses)}")
         print(f"[StyleClassifier] Pre-computed length embeddings: tops={len(self._length_embeddings_tops)}, bottoms={len(self._length_embeddings_bottoms)}, dresses={len(self._length_embeddings_dresses)}")
@@ -582,6 +733,7 @@ class StyleClassifier:
         self,
         product_embedding: Any,
         include_patterns: bool = True,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Classify a product's styles, occasions, and patterns based on its embedding.
@@ -590,6 +742,8 @@ class StyleClassifier:
             product_embedding: Product's FashionCLIP image embedding.
                 Can be a list (from JSON), numpy array, or torch tensor.
             include_patterns: Whether to include pattern classification (default True)
+            metadata: Optional dict with 'name', 'brand', 'article_type', 'broad_category'
+                      If provided, applies intelligent occasion score adjustments
 
         Returns:
             {
@@ -614,6 +768,12 @@ class StyleClassifier:
         for occasion_name, concept_embedding in self._occasion_embeddings.items():
             similarity = float(np.dot(product_emb, concept_embedding))
             occasion_scores[occasion_name] = round(similarity, 4)
+
+        # Apply metadata-based adjustments if provided
+        if metadata:
+            occasion_scores = self._adjust_occasion_scores(
+                occasion_scores, style_scores, metadata
+            )
 
         result = {
             'styles': style_scores,
@@ -737,6 +897,7 @@ class StyleClassifier:
         product_embeddings: List[Any],
         batch_size: int = 100,
         include_patterns: bool = True,
+        product_metadata: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Dict[str, float]]]:
         """
         Classify multiple products efficiently.
@@ -745,6 +906,8 @@ class StyleClassifier:
             product_embeddings: List of product embeddings
             batch_size: Process in batches for memory efficiency
             include_patterns: Whether to include pattern classification
+            product_metadata: Optional list of dicts with 'name', 'brand', 'article_type', 'broad_category'
+                              If provided, applies category-based and keyword-based adjustments
 
         Returns:
             List of classification results, one per product
@@ -755,6 +918,7 @@ class StyleClassifier:
 
         for i in range(0, len(product_embeddings), batch_size):
             batch = product_embeddings[i:i + batch_size]
+            batch_metadata = product_metadata[i:i + batch_size] if product_metadata else None
 
             # Convert batch to matrix
             emb_matrix = np.stack([
@@ -790,6 +954,13 @@ class StyleClassifier:
                     for k, name in enumerate(occasion_names)
                 }
 
+                # Apply metadata-based adjustments if provided
+                if batch_metadata and j < len(batch_metadata):
+                    metadata = batch_metadata[j] or {}
+                    occasion_scores = self._adjust_occasion_scores(
+                        occasion_scores, style_scores, metadata
+                    )
+
                 result = {
                     'styles': style_scores,
                     'occasions': occasion_scores
@@ -803,6 +974,442 @@ class StyleClassifier:
                     result['patterns'] = pattern_scores
 
                 results.append(result)
+
+        return results
+
+    def _adjust_occasion_scores(
+        self,
+        occasion_scores: Dict[str, float],
+        style_scores: Dict[str, float],
+        metadata: Dict[str, Any],
+    ) -> Dict[str, float]:
+        """
+        Adjust occasion scores based on product metadata and style signals.
+
+        This fixes misclassifications where casual items (crop tops, shorts)
+        incorrectly score high for office/professional occasions.
+
+        Args:
+            occasion_scores: Raw CLIP-based occasion scores
+            style_scores: Style scores (crop-tops, mini-lengths, etc.)
+            metadata: Product metadata with 'name', 'brand', 'article_type', 'broad_category'
+
+        Returns:
+            Adjusted occasion scores
+        """
+        adjusted = occasion_scores.copy()
+
+        name = (metadata.get('name') or '').lower()
+        brand = (metadata.get('brand') or '').lower()
+        article_type = (metadata.get('article_type') or '').lower()
+        broad_category = (metadata.get('broad_category') or '').lower()
+
+        # =================================================================
+        # BRAND-BASED ADJUSTMENTS (Check first - brand is strong signal)
+        # =================================================================
+
+        # Athletic/Activewear brands - should NOT be office-appropriate
+        athletic_brands = {
+            'alo', 'alo yoga', 'lululemon', 'athleta', 'fabletics',
+            'outdoor voices', 'beyond yoga', 'sweaty betty', 'gymshark',
+            'nike', 'adidas', 'puma', 'under armour', 'reebok',
+            'new balance', 'asics', 'brooks', 'champion', 'fila',
+            'gap fit', 'old navy active', 'zella', 'vuori', 'rhone',
+            'ten thousand', 'tracksmith', 'on running', 'hoka',
+            'allbirds', 'nobull', 'rogue fitness', 'lorna jane',
+            'carbon38', 'bandier', 'varley', 'splits59', 'year of ours',
+            'girlfriend collective', 'girlfriend', 'oiselle', 'janji',
+            'cotopaxi', 'patagonia', 'the north face', 'arc\'teryx',
+            'salomon', 'columbia sportswear', 'marmot',
+        }
+
+        # Check if brand is athletic
+        brand_is_athletic = False
+        for athletic_brand in athletic_brands:
+            if athletic_brand in brand:
+                brand_is_athletic = True
+                adjusted['active'] = max(adjusted['active'], 0.40)
+                adjusted['office'] = min(adjusted['office'], 0.12)
+                adjusted['smart-casual'] = min(adjusted['smart-casual'], 0.15)
+                break
+
+        # Professional/Office brands - boost office score
+        professional_brands = {
+            'theory', 'hugo boss', 'brooks brothers', 'ann taylor',
+            'banana republic', 'j.crew', 'express', 'calvin klein',
+            'ralph lauren', 'tommy hilfiger', 'club monaco', 'ted baker',
+            'reiss', 'cos', 'massimo dutti', 'uniqlo', 'everlane',
+            'aritzia', 'reformation', 'vince', 'equipment', 'frame',
+            'eileen fisher', 'madewell', 'anthropologie', 'nordstrom',
+        }
+
+        # Only boost office if brand is explicitly professional (not athletic)
+        if not brand_is_athletic:
+            for prof_brand in professional_brands:
+                if prof_brand in brand:
+                    adjusted['office'] = max(adjusted['office'], 0.30)
+                    adjusted['smart-casual'] = max(adjusted['smart-casual'], 0.28)
+                    break
+
+        # =================================================================
+        # ARTICLE TYPE BASED ADJUSTMENTS
+        # =================================================================
+
+        # Items that should NEVER be office-appropriate
+        non_office_types = {
+            'crop top', 'crop', 'bralette', 'bikini', 'swimsuit', 'swimwear',
+            'sports bra', 'athletic shorts', 'running shorts', 'yoga pants',
+            'leggings', 'sweatpants', 'joggers', 'pajamas', 'sleepwear',
+            'robe', 'lingerie', 'underwear', 'bodysuit', 'romper',
+            'tube top', 'halter', 'bandeau',
+        }
+
+        # Items that are inherently office-appropriate
+        office_types = {
+            'blazer', 'suit', 'dress shirt', 'button-up', 'button-down',
+            'blouse', 'dress pants', 'slacks', 'trousers', 'pencil skirt',
+            'midi skirt', 'cardigan', 'sweater', 'turtleneck', 'polo',
+            'sheath dress', 'wrap dress', 'shirt dress', 'a-line dress',
+        }
+
+        # Items that are casual-only
+        casual_types = {
+            'graphic tee', 'band tee', 'vintage tee', 'distressed',
+            'ripped jeans', 'cutoff', 'denim shorts', 'beach cover',
+            'flip flop', 'slides', 'sneakers', 'hoodie', 'sweatshirt',
+        }
+
+        # Items that are evening/events
+        evening_types = {
+            'cocktail', 'evening gown', 'formal', 'sequin', 'glitter',
+            'party dress', 'maxi gown', 'ball gown', 'prom',
+        }
+
+        # Items that are active/athletic (expanded vocabulary)
+        active_types = {
+            # Core athletic terms
+            'athletic', 'activewear', 'sports', 'workout', 'gym',
+            'yoga', 'running', 'fitness', 'tennis', 'golf',
+            'track', 'performance', 'moisture-wicking', 'training',
+            # Athletic product types
+            'legging', 'sports bra', 'tank', 'racerback', 'compression',
+            'sweat-wicking', 'breathable mesh', 'stretch fabric',
+            # Athleisure terms (often from athletic brands)
+            'athleisure', 'studio', 'flow', 'flex', 'move',
+            'sculpt', 'align', 'energy', 'power', 'boost',
+            # Athletic brand product line names
+            'accolade', 'airlift', 'airbrush', 'alosoft', 'alolux',
+            'wunder', 'align', 'swiftly', 'define', 'scuba',
+            'powersoft', 'breathe', 'supersonic',
+            # Common athletic styling terms
+            'half-zip', 'quarter-zip', 'pullover crew', 'jogger',
+            'warm-up', 'cool-down', 'recovery', 'lounge set',
+        }
+
+        # Athletic brand product line prefixes (common in athleisure naming)
+        athletic_product_lines = {
+            'accolade', 'airlift', 'airbrush', 'alosoft', 'alolux',  # Alo Yoga
+            'wunder', 'align', 'swiftly', 'define', 'scuba', 'groove',  # Lululemon
+            'elation', 'transcend', 'momentum', 'salutation',  # Athleta
+            'powersoft', 'breathe on', 'elevate',  # Old Navy Active
+            'dri-fit', 'pro', 'therma',  # Nike
+            'climalite', 'climacool', 'techfit',  # Adidas
+            'heatgear', 'coldgear', 'rush',  # Under Armour
+        }
+
+        # Check article type and name against categories
+        combined_text = f"{article_type} {name}"
+
+        # Non-office items: cap office score at 0.15
+        for term in non_office_types:
+            if term in combined_text:
+                adjusted['office'] = min(adjusted['office'], 0.15)
+                adjusted['smart-casual'] = min(adjusted['smart-casual'], 0.18)
+                break
+
+        # Office items: boost office score
+        for term in office_types:
+            if term in combined_text:
+                adjusted['office'] = max(adjusted['office'], 0.35)
+                adjusted['smart-casual'] = max(adjusted['smart-casual'], 0.30)
+                break
+
+        # Casual items: boost casual, reduce office
+        for term in casual_types:
+            if term in combined_text:
+                adjusted['casual'] = max(adjusted['casual'], 0.35)
+                adjusted['office'] = min(adjusted['office'], 0.12)
+                break
+
+        # Evening items: boost evening/events
+        for term in evening_types:
+            if term in combined_text:
+                adjusted['evening'] = max(adjusted['evening'], 0.40)
+                adjusted['events'] = max(adjusted['events'], 0.40)
+                break
+
+        # Active items: boost active, reduce office
+        for term in active_types:
+            if term in combined_text:
+                adjusted['active'] = max(adjusted['active'], 0.40)
+                adjusted['office'] = min(adjusted['office'], 0.10)
+                adjusted['smart-casual'] = min(adjusted['smart-casual'], 0.12)
+                break
+
+        # Also check athletic product line names (e.g., "Accolade" from Alo Yoga)
+        for product_line in athletic_product_lines:
+            if product_line in combined_text:
+                adjusted['active'] = max(adjusted['active'], 0.35)
+                adjusted['office'] = min(adjusted['office'], 0.12)
+                adjusted['smart-casual'] = min(adjusted['smart-casual'], 0.15)
+                break
+
+        # If brand is athletic AND item has pullover/sweater/crew neck, it's athleisure, not office
+        athleisure_keywords = {'pullover', 'crew neck', 'hoodie', 'sweatshirt', 'half zip', 'quarter zip', 'mock neck'}
+        if brand_is_athletic:
+            for keyword in athleisure_keywords:
+                if keyword in combined_text:
+                    adjusted['active'] = max(adjusted['active'], 0.38)
+                    adjusted['casual'] = max(adjusted['casual'], 0.32)
+                    adjusted['office'] = min(adjusted['office'], 0.10)
+                    break
+
+        # =================================================================
+        # STYLE-BASED CROSS-PENALTIES
+        # =================================================================
+
+        # If item has high "crop-tops" style score, reduce office appropriateness
+        crop_score = style_scores.get('crop-tops', 0)
+        if crop_score > 0.25:
+            penalty = min(0.15, (crop_score - 0.25) * 0.5)
+            adjusted['office'] = max(0, adjusted['office'] - penalty)
+            adjusted['smart-casual'] = max(0, adjusted['smart-casual'] - penalty * 0.5)
+
+        # If item has high "mini-lengths" style score, reduce office appropriateness
+        mini_score = style_scores.get('mini-lengths', 0)
+        if mini_score > 0.28:
+            penalty = min(0.12, (mini_score - 0.28) * 0.4)
+            adjusted['office'] = max(0, adjusted['office'] - penalty)
+
+        # If item has high "cutouts" style score, reduce office appropriateness
+        cutout_score = style_scores.get('cutouts', 0)
+        if cutout_score > 0.25:
+            penalty = min(0.15, (cutout_score - 0.25) * 0.5)
+            adjusted['office'] = max(0, adjusted['office'] - penalty)
+            adjusted['smart-casual'] = max(0, adjusted['smart-casual'] - penalty * 0.5)
+
+        # If item has high "deep-necklines" style score, reduce office appropriateness
+        neckline_score = style_scores.get('deep-necklines', 0)
+        if neckline_score > 0.28:
+            penalty = min(0.12, (neckline_score - 0.28) * 0.4)
+            adjusted['office'] = max(0, adjusted['office'] - penalty)
+
+        # If item has high "sheer" style score, reduce office appropriateness
+        sheer_score = style_scores.get('sheer', 0)
+        if sheer_score > 0.25:
+            penalty = min(0.15, (sheer_score - 0.25) * 0.5)
+            adjusted['office'] = max(0, adjusted['office'] - penalty)
+
+        # =================================================================
+        # KEYWORD-BASED ADJUSTMENTS
+        # =================================================================
+
+        # Keywords that indicate casual wear
+        casual_keywords = ['weekend', 'casual', 'lounge', 'cozy', 'comfy', 'relaxed']
+        for keyword in casual_keywords:
+            if keyword in name:
+                adjusted['casual'] = max(adjusted['casual'], 0.30)
+                adjusted['office'] = min(adjusted['office'], 0.18)
+                break
+
+        # Keywords that indicate work/professional
+        # Note: Use word boundary check to avoid matching "workout" with "work"
+        import re
+        work_keywords = ['professional', 'office', 'business', 'career', 'workwear']
+        for keyword in work_keywords:
+            if keyword in name:
+                adjusted['office'] = max(adjusted['office'], 0.35)
+                adjusted['smart-casual'] = max(adjusted['smart-casual'], 0.30)
+                break
+        # Special handling for "work" - must be standalone word, not part of "workout"
+        if re.search(r'\bwork\b', name) and 'workout' not in name:
+            adjusted['office'] = max(adjusted['office'], 0.35)
+            adjusted['smart-casual'] = max(adjusted['smart-casual'], 0.30)
+
+        # Keywords that indicate party/evening
+        party_keywords = ['party', 'night out', 'cocktail', 'date night', 'going out']
+        for keyword in party_keywords:
+            if keyword in name:
+                adjusted['evening'] = max(adjusted['evening'], 0.35)
+                adjusted['events'] = max(adjusted['events'], 0.30)
+                break
+
+        # Keywords that indicate beach/vacation
+        beach_keywords = ['beach', 'vacation', 'resort', 'tropical', 'pool']
+        for keyword in beach_keywords:
+            if keyword in name:
+                adjusted['beach'] = max(adjusted['beach'], 0.35)
+                adjusted['casual'] = max(adjusted['casual'], 0.30)
+                break
+        # "summer" should boost beach but not override office
+        if 'summer' in name and adjusted['beach'] < 0.30:
+            adjusted['beach'] = max(adjusted['beach'], 0.25)
+
+        # Ensure all scores are non-negative and round
+        return {k: round(max(0, v), 4) for k, v in adjusted.items()}
+
+    def compute_negative_occasion_scores(
+        self,
+        product_embedding: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """
+        Compute NEGATIVE occasion scores (how much an item does NOT fit each occasion).
+
+        This is used for contrastive gating - an item passes the office gate if:
+        - office_positive_score >= threshold AND
+        - office_negative_score <= threshold
+
+        Args:
+            product_embedding: Product's FashionCLIP image embedding.
+            metadata: Optional dict with 'name', 'brand', 'article_type', 'broad_category'
+
+        Returns:
+            Dict mapping occasion names to negative scores (0-1).
+            Higher score = item is MORE like the "negative" concept (NOT appropriate for occasion).
+        """
+        self._ensure_model_loaded()
+
+        # Convert embedding to normalized numpy array
+        product_emb = self._to_normalized_embedding(product_embedding)
+
+        negative_scores = {}
+        for occasion_name, concept_embedding in self._occasion_negative_embeddings.items():
+            similarity = float(np.dot(product_emb, concept_embedding))
+            negative_scores[f"{occasion_name}_negative"] = round(similarity, 4)
+
+        return negative_scores
+
+    def compute_negative_occasion_scores_batch(
+        self,
+        product_embeddings: List[Any],
+        batch_size: int = 100,
+    ) -> List[Dict[str, float]]:
+        """
+        Batch compute NEGATIVE occasion scores.
+
+        Args:
+            product_embeddings: List of product embeddings
+            batch_size: Process in batches for memory efficiency
+
+        Returns:
+            List of negative score dicts, one per product
+        """
+        self._ensure_model_loaded()
+
+        results = []
+
+        for i in range(0, len(product_embeddings), batch_size):
+            batch = product_embeddings[i:i + batch_size]
+
+            # Convert batch to matrix
+            emb_matrix = np.stack([
+                self._to_normalized_embedding(emb) for emb in batch
+            ])
+
+            # Batch compute negative occasion scores
+            if self._occasion_negative_embeddings:
+                negative_matrix = np.stack(list(self._occasion_negative_embeddings.values()))
+                negative_similarities = np.dot(emb_matrix, negative_matrix.T)
+                negative_names = list(self._occasion_negative_embeddings.keys())
+
+                for j in range(len(batch)):
+                    neg_scores = {
+                        f"{name}_negative": round(float(negative_similarities[j, k]), 4)
+                        for k, name in enumerate(negative_names)
+                    }
+                    results.append(neg_scores)
+            else:
+                for _ in range(len(batch)):
+                    results.append({})
+
+        return results
+
+    def classify_product_full(
+        self,
+        product_embedding: Any,
+        include_patterns: bool = True,
+        include_negative_scores: bool = True,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Full product classification including negative occasion scores.
+
+        This is an extended version of classify_product() that also returns
+        negative occasion scores for hard gating.
+
+        Args:
+            product_embedding: Product's FashionCLIP image embedding.
+            include_patterns: Whether to include pattern classification
+            include_negative_scores: Whether to include negative occasion scores
+            metadata: Optional dict with 'name', 'brand', 'article_type', 'broad_category'
+
+        Returns:
+            {
+                'styles': {'sheer': 0.35, 'deep-necklines': 0.12, ...},
+                'occasions': {'casual': 0.45, 'office': 0.32, 'office_negative': 0.28, ...},
+                'patterns': {...}  # if include_patterns
+            }
+        """
+        # Get base classification
+        result = self.classify_product(product_embedding, include_patterns, metadata)
+
+        # Add negative scores to occasions dict
+        if include_negative_scores:
+            negative_scores = self.compute_negative_occasion_scores(product_embedding, metadata)
+            result['occasions'].update(negative_scores)
+
+        return result
+
+    def classify_products_batch_full(
+        self,
+        product_embeddings: List[Any],
+        batch_size: int = 100,
+        include_patterns: bool = True,
+        include_negative_scores: bool = True,
+        product_metadata: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Dict[str, float]]]:
+        """
+        Batch classify products including negative occasion scores.
+
+        Args:
+            product_embeddings: List of product embeddings
+            batch_size: Process in batches for memory efficiency
+            include_patterns: Whether to include pattern classification
+            include_negative_scores: Whether to include negative occasion scores
+            product_metadata: Optional list of metadata dicts
+
+        Returns:
+            List of classification results with negative scores included
+        """
+        # Get base classifications
+        results = self.classify_products_batch(
+            product_embeddings,
+            batch_size=batch_size,
+            include_patterns=include_patterns,
+            product_metadata=product_metadata,
+        )
+
+        # Add negative scores if requested
+        if include_negative_scores:
+            negative_scores_list = self.compute_negative_occasion_scores_batch(
+                product_embeddings,
+                batch_size=batch_size,
+            )
+
+            for i, neg_scores in enumerate(negative_scores_list):
+                if i < len(results):
+                    results[i]['occasions'].update(neg_scores)
 
         return results
 
@@ -1027,7 +1634,7 @@ def test_style_classifier():
     print(f"   Sleeve concepts: {list(classifier._sleeve_embeddings.keys())}")
 
     # Test 2: Create a mock embedding (random for testing)
-    print("\n2. Testing with random embedding...")
+    print("\n2. Testing with random embedding (no metadata)...")
     mock_embedding = np.random.randn(512).astype(np.float32)
 
     result = classifier.classify_product(mock_embedding, include_patterns=True)
@@ -1042,16 +1649,89 @@ def test_style_classifier():
     print(f"   Detected occasions (threshold {classifier.config.default_occasion_threshold}): {tags['occasions']}")
     print(f"   Detected patterns (threshold {classifier.config.default_pattern_threshold}): {tags.get('patterns', [])}")
 
-    # Test 4: Test batch classification
-    print("\n4. Testing batch classification...")
-    batch_embeddings = [np.random.randn(512).astype(np.float32) for _ in range(5)]
-    batch_results = classifier.classify_products_batch(batch_embeddings, include_patterns=True)
-    print(f"   Processed {len(batch_results)} products")
-    if batch_results:
-        print(f"   Sample patterns: {batch_results[0].get('patterns', {})}")
+    # Test 4: Test metadata-based occasion adjustments (NEW)
+    print("\n4. Testing metadata-based occasion adjustments...")
 
-    # Test 5: Test attribute classification
-    print("\n5. Testing attribute classification...")
+    # Test case: Crop top should NOT be office appropriate
+    print("\n   4a. Crop top (should have LOW office score):")
+    result_crop = classifier.classify_product(mock_embedding, include_patterns=False, metadata={
+        'name': 'Sexy Crop Top',
+        'article_type': 'Crop Top',
+        'broad_category': 'tops',
+    })
+    print(f"       Raw office score (no metadata): {result['occasions']['office']:.4f}")
+    print(f"       Adjusted office score: {result_crop['occasions']['office']:.4f}")
+    print(f"       Adjusted casual score: {result_crop['occasions']['casual']:.4f}")
+
+    # Test case: Blazer should be office appropriate
+    print("\n   4b. Blazer (should have HIGH office score):")
+    result_blazer = classifier.classify_product(mock_embedding, include_patterns=False, metadata={
+        'name': 'Professional Wool Blazer',
+        'article_type': 'Blazer',
+        'broad_category': 'outerwear',
+    })
+    print(f"       Raw office score (no metadata): {result['occasions']['office']:.4f}")
+    print(f"       Adjusted office score: {result_blazer['occasions']['office']:.4f}")
+    print(f"       Adjusted smart-casual: {result_blazer['occasions']['smart-casual']:.4f}")
+
+    # Test case: Athletic wear should be active, not office
+    print("\n   4c. Athletic leggings (should have HIGH active, LOW office):")
+    result_active = classifier.classify_product(mock_embedding, include_patterns=False, metadata={
+        'name': 'High-Waist Yoga Leggings',
+        'article_type': 'Leggings',
+        'broad_category': 'bottoms',
+    })
+    print(f"       Adjusted active score: {result_active['occasions']['active']:.4f}")
+    print(f"       Adjusted office score: {result_active['occasions']['office']:.4f}")
+
+    # Test case: Alo Yoga Accolade Crew Neck Pullover (SPECIFIC FIX)
+    print("\n   4c2. Alo Yoga Accolade Pullover (should be ACTIVE, NOT office):")
+    result_alo = classifier.classify_product(mock_embedding, include_patterns=False, metadata={
+        'name': 'Accolade Crew Neck Pullover',
+        'brand': 'Alo Yoga',
+        'article_type': 'Pullover',
+        'broad_category': 'tops',
+    })
+    print(f"       Brand detected: Alo Yoga (athletic brand)")
+    print(f"       Adjusted active score: {result_alo['occasions']['active']:.4f}")
+    print(f"       Adjusted casual score: {result_alo['occasions']['casual']:.4f}")
+    print(f"       Adjusted office score: {result_alo['occasions']['office']:.4f}")
+    assert result_alo['occasions']['office'] <= 0.12, "Alo Yoga pullover should NOT be office!"
+    assert result_alo['occasions']['active'] >= 0.35, "Alo Yoga pullover should be active!"
+    print(f"       ✓ PASS: Office capped at {result_alo['occasions']['office']:.2f}, Active boosted to {result_alo['occasions']['active']:.2f}")
+
+    # Test case: Beach wear
+    print("\n   4d. Beach cover-up (should have HIGH beach/casual):")
+    result_beach = classifier.classify_product(mock_embedding, include_patterns=False, metadata={
+        'name': 'Tropical Beach Cover Up',
+        'article_type': 'Cover Up',
+        'broad_category': 'tops',
+    })
+    print(f"       Adjusted beach score: {result_beach['occasions']['beach']:.4f}")
+    print(f"       Adjusted casual score: {result_beach['occasions']['casual']:.4f}")
+    print(f"       Adjusted office score: {result_beach['occasions']['office']:.4f}")
+
+    # Test 5: Test batch classification with metadata
+    print("\n5. Testing batch classification with metadata...")
+    batch_embeddings = [np.random.randn(512).astype(np.float32) for _ in range(5)]
+    batch_metadata = [
+        {'name': 'Crop Top', 'article_type': 'Crop Top', 'broad_category': 'tops'},
+        {'name': 'Dress Shirt', 'article_type': 'Shirt', 'broad_category': 'tops'},
+        {'name': 'Yoga Pants', 'article_type': 'Leggings', 'broad_category': 'bottoms'},
+        {'name': 'Cocktail Dress', 'article_type': 'Dress', 'broad_category': 'dresses'},
+        {'name': 'Beach Shorts', 'article_type': 'Shorts', 'broad_category': 'bottoms'},
+    ]
+    batch_results = classifier.classify_products_batch(
+        batch_embeddings,
+        include_patterns=False,
+        product_metadata=batch_metadata
+    )
+    print(f"   Processed {len(batch_results)} products")
+    for i, res in enumerate(batch_results):
+        print(f"   {batch_metadata[i]['name']:15} | office: {res['occasions']['office']:.2f} | casual: {res['occasions']['casual']:.2f} | active: {res['occasions']['active']:.2f}")
+
+    # Test 6: Test attribute classification
+    print("\n6. Testing attribute classification...")
     attributes_top = classifier.classify_attributes(mock_embedding, 'tops')
     attributes_dress = classifier.classify_attributes(mock_embedding, 'dresses')
     attributes_bottom = classifier.classify_attributes(mock_embedding, 'bottoms')
@@ -1060,16 +1740,16 @@ def test_style_classifier():
     print(f"   Dress attributes: {attributes_dress}")
     print(f"   Bottom attributes: {attributes_bottom}")
 
-    # Test 6: Test batch attribute classification
-    print("\n6. Testing batch attribute classification...")
+    # Test 7: Test batch attribute classification
+    print("\n7. Testing batch attribute classification...")
     categories = ['tops', 'bottoms', 'dresses', 'tops', 'bottoms']
     batch_attrs = classifier.classify_attributes_batch(batch_embeddings, categories)
     print(f"   Processed {len(batch_attrs)} products")
     for i, attrs in enumerate(batch_attrs):
         print(f"   {categories[i]}: {attrs}")
 
-    # Test 7: Test various input formats
-    print("\n7. Testing input format handling...")
+    # Test 8: Test various input formats
+    print("\n8. Testing input format handling...")
 
     # List format (from JSON/Supabase)
     list_emb = mock_embedding.tolist()

@@ -37,6 +37,7 @@ from recs.models import (
 from recs.candidate_selection import CandidateSelectionModule, CandidateSelectionConfig
 from recs.sasrec_ranker import SASRecRanker, SASRecRankerConfig
 from recs.session_state import SessionStateService
+from recs.occasion_gate import check_occasion_gate, filter_candidates_by_occasion
 
 
 # =============================================================================
@@ -164,12 +165,14 @@ class RecommendationPipeline:
         paginated = final_candidates[offset:offset + limit]
 
         # Determine strategy used
-        if user_state.state_type == UserStateType.WARM_USER:
-            strategy = "sasrec"
-        elif user_state.state_type == UserStateType.TINDER_COMPLETE:
-            strategy = "seed_vector"
-        else:
-            strategy = "trending"
+        # EXPERIMENT: Always exploration (taste_vector disabled)
+        # if user_state.state_type == UserStateType.WARM_USER:
+        #     strategy = "sasrec"
+        # elif user_state.state_type == UserStateType.TINDER_COMPLETE:
+        #     strategy = "seed_vector"
+        # else:
+        #     strategy = "exploration"
+        strategy = "exploration"
 
         # Convert to response
         results = []
@@ -311,12 +314,14 @@ class RecommendationPipeline:
         has_more = len(page_results) >= page_size and len(candidates) > page_size
 
         # Determine strategy used
-        if user_state.state_type == UserStateType.WARM_USER:
-            strategy = "sasrec"
-        elif user_state.state_type == UserStateType.TINDER_COMPLETE:
-            strategy = "seed_vector"
-        else:
-            strategy = "trending"
+        # EXPERIMENT: Always exploration (taste_vector disabled)
+        # if user_state.state_type == UserStateType.WARM_USER:
+        #     strategy = "sasrec"
+        # elif user_state.state_type == UserStateType.TINDER_COMPLETE:
+        #     strategy = "seed_vector"
+        # else:
+        #     strategy = "exploration"
+        strategy = "exploration"
 
         # Convert to response format
         results = []
@@ -378,6 +383,23 @@ class RecommendationPipeline:
         gender: str = "female",
         categories: Optional[List[str]] = None,
         article_types: Optional[List[str]] = None,
+        exclude_styles: Optional[List[str]] = None,
+        include_occasions: Optional[List[str]] = None,
+        # New filters
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        exclude_brands: Optional[List[str]] = None,
+        preferred_brands: Optional[List[str]] = None,
+        exclude_colors: Optional[List[str]] = None,
+        include_colors: Optional[List[str]] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        # Attribute filters (soft scoring)
+        fit: Optional[List[str]] = None,
+        length: Optional[List[str]] = None,
+        sleeves: Optional[List[str]] = None,
+        neckline: Optional[List[str]] = None,
+        rise: Optional[List[str]] = None,
         cursor: Optional[str] = None,
         page_size: int = 50
     ) -> Dict[str, Any]:
@@ -389,6 +411,7 @@ class RecommendationPipeline:
         2. O(1) pagination regardless of page depth
         3. Feed versioning for stable ordering within session
         4. Still tracks seen items for authoritative dedup
+        5. Lifestyle filtering (styles_to_avoid, occasions)
 
         Args:
             user_id: Logged-in user UUID
@@ -397,6 +420,8 @@ class RecommendationPipeline:
             gender: Target gender
             categories: Optional broad category filter (tops, bottoms, dresses, outerwear)
             article_types: Optional specific article type filter (jeans, t-shirts, mini dresses, etc.)
+            exclude_styles: Optional list of coverage styles to exclude (deep-necklines, sheer, cutouts, backless, strapless)
+            include_occasions: Optional list of occasions to include (casual, office, evening, beach)
             cursor: Base64 encoded keyset cursor (None for first page)
             page_size: Items per page (default 50)
 
@@ -404,12 +429,22 @@ class RecommendationPipeline:
             Dict with results, cursor, pagination, and session_id
         """
         from recs.session_state import KeysetCursor
+        import hashlib
 
-        # Generate session_id if not provided (new session)
+        # Session ID logic:
+        # - If session_id provided: use it (explicit session tracking)
+        # - If cursor provided but no session_id: derive from anon_id/user_id (auto-link)
+        # - If neither: generate new session
         is_new_session = session_id is None
         if is_new_session:
-            session_id = SessionStateService.generate_session_id()
-            print(f"[Pipeline] New keyset session created: {session_id}")
+            if cursor and (anon_id or user_id):
+                # Auto-link session to user for pagination continuity
+                seed = user_id or anon_id
+                session_id = f"sess_{hashlib.md5(seed.encode()).hexdigest()[:12]}"
+            else:
+                # New feed request - generate fresh session
+                session_id = SessionStateService.generate_session_id()
+                print(f"[Pipeline] New keyset session created: {session_id}")
 
         # Validate page_size
         page_size = min(page_size, self.config.MAX_LIMIT)
@@ -441,6 +476,57 @@ class RecommendationPipeline:
                     categories=categories
                 )
 
+        # Override filters from request
+        has_any_filter = any([
+            exclude_styles, include_occasions, min_price, max_price,
+            exclude_brands, preferred_brands, exclude_colors, include_colors,
+            include_patterns, exclude_patterns,
+            fit, length, sleeves, neckline, rise
+        ])
+        if has_any_filter:
+            if not user_state.onboarding_profile:
+                from src.recs.models import OnboardingProfile
+                user_state.onboarding_profile = OnboardingProfile(
+                    user_id=user_state.user_id
+                )
+            profile = user_state.onboarding_profile
+            # Lifestyle filters
+            if exclude_styles:
+                profile.styles_to_avoid = exclude_styles
+            if include_occasions:
+                profile.occasions = include_occasions
+            # Price filters
+            if min_price is not None:
+                profile.global_min_price = min_price
+            if max_price is not None:
+                profile.global_max_price = max_price
+            # Brand filters
+            if exclude_brands:
+                profile.brands_to_avoid = exclude_brands
+            if preferred_brands:
+                profile.preferred_brands = preferred_brands
+            # Color filters
+            if exclude_colors:
+                profile.colors_to_avoid = exclude_colors
+            if include_colors:
+                profile.colors_preferred = include_colors
+            # Pattern filters
+            if include_patterns:
+                profile.patterns_liked = include_patterns
+            if exclude_patterns:
+                profile.patterns_avoided = exclude_patterns
+            # Attribute filters (soft scoring)
+            if fit:
+                profile.preferred_fits = fit
+            if length:
+                profile.preferred_lengths = length
+            if sleeves:
+                profile.preferred_sleeves = sleeves
+            if neckline:
+                profile.preferred_necklines = neckline
+            if rise:
+                profile.preferred_rises = rise
+
         # Step 3: Set feed version on first page (for stable ordering)
         if is_new_session or not self.session_service.has_feed_version(session_id):
             self.session_service.set_feed_version(
@@ -460,8 +546,11 @@ class RecommendationPipeline:
         # Calculate how many candidates to fetch
         # Need to fetch extra to account for exclusions done in Python
         # Fetch enough to skip past seen items while maintaining keyset cursor pagination
-        fetch_size = page_size + db_history_count + 100
-        fetch_size = min(fetch_size, 2000)  # Increased cap for large histories
+        # Increased multiplier to account for Python-level filtering (colors, brands, article_types)
+        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types)
+        filter_multiplier = 3 if has_python_filters else 1  # Fetch 3x more if filtering
+        fetch_size = (page_size + db_history_count + 100) * filter_multiplier
+        fetch_size = min(fetch_size, 3000)  # Increased cap for filtering scenarios
 
         # Step 5: Get candidates using keyset cursor (or endless if we have exclude_ids)
         candidates = self.candidate_module.get_candidates_keyset(
@@ -474,13 +563,50 @@ class RecommendationPipeline:
             article_types=article_types
         )
 
-        # Step 5: Rank candidates (lightweight re-scoring)
+        # Step 5b: Apply Python-level hard filters (colors, brands, article_types)
+        # These are more reliable than SQL-level filtering
+        pre_filter_count = len(candidates)
+
+        # Apply color filter
+        if include_colors or exclude_colors:
+            candidates = self._apply_color_filter(candidates, include_colors, exclude_colors)
+
+        # Apply brand filter (preferred_brands = hard include filter)
+        if preferred_brands or exclude_brands:
+            candidates = self._apply_brand_filter(candidates, preferred_brands, exclude_brands)
+
+        # Apply article_type filter (name-based matching)
+        if article_types:
+            candidates = self._apply_article_type_filter(candidates, article_types)
+
+        post_filter_count = len(candidates)
+        if pre_filter_count != post_filter_count:
+            print(f"[Pipeline] Python filters: {pre_filter_count} -> {post_filter_count} candidates")
+
+        # Step 5c: Apply occasion gate (multi-signal CLIP-based filtering)
+        # This uses positive + negative scores, cross-occasion scores, and style scores
+        occasion_gate_reasons = {}
+        if include_occasions:
+            pre_occasion_count = len(candidates)
+            candidates, occasion_gate_reasons = filter_candidates_by_occasion(
+                candidates, include_occasions, verbose=False
+            )
+            post_occasion_count = len(candidates)
+            if pre_occasion_count != post_occasion_count:
+                print(f"[Pipeline] Occasion gate ({include_occasions}): {pre_occasion_count} -> {post_occasion_count} candidates")
+                # Log top blocked reasons for debugging
+                if occasion_gate_reasons:
+                    top_reasons = sorted(occasion_gate_reasons.items(), key=lambda x: -x[1])[:3]
+                    for reason, count in top_reasons:
+                        print(f"  - {reason}: {count}")
+
+        # Step 6: Rank candidates (lightweight re-scoring)
         ranked_candidates = self.ranker.rank_candidates(user_state, candidates)
 
-        # Step 6: Apply diversity constraints
+        # Step 7: Apply diversity constraints
         diverse_candidates = self._apply_diversity(ranked_candidates, user_state)
 
-        # Step 7: Get seen items and filter duplicates (session + DB history)
+        # Step 8: Get seen items and filter duplicates (session + DB history)
         # Load from session (current page views)
         session_seen_ids = self.session_service.get_seen_items(session_id)
 
@@ -489,13 +615,13 @@ class RecommendationPipeline:
         all_seen_ids = session_seen_ids | db_seen_ids
         filtered_candidates = [c for c in diverse_candidates if c.item_id not in all_seen_ids]
 
-        # Step 7b: Deduplicate by image hash to remove same products across different brands
+        # Step 8b: Deduplicate by image hash to remove same products across different brands
         filtered_candidates = self._deduplicate_by_image(filtered_candidates)
 
-        # Step 8: Take top N for this page
+        # Step 9: Take top N for this page
         page_results = filtered_candidates[:page_size]
 
-        # Step 9: Update session state
+        # Step 10: Update session state
         if page_results:
             # Add to seen items
             shown_ids = [c.item_id for c in page_results]
@@ -513,7 +639,7 @@ class RecommendationPipeline:
                 page=page
             )
 
-        # Step 10: Get next cursor
+        # Step 11: Get next cursor
         next_cursor = None
         if page_results:
             last_item = page_results[-1]
@@ -531,12 +657,14 @@ class RecommendationPipeline:
         has_more = len(filtered_candidates) > page_size or len(candidates) >= fetch_size
 
         # Determine strategy used
-        if user_state.state_type == UserStateType.WARM_USER:
-            strategy = "sasrec"
-        elif user_state.state_type == UserStateType.TINDER_COMPLETE:
-            strategy = "seed_vector"
-        else:
-            strategy = "trending"
+        # EXPERIMENT: Always exploration (taste_vector disabled)
+        # if user_state.state_type == UserStateType.WARM_USER:
+        #     strategy = "sasrec"
+        # elif user_state.state_type == UserStateType.TINDER_COMPLETE:
+        #     strategy = "seed_vector"
+        # else:
+        #     strategy = "exploration"
+        strategy = "exploration"
 
         # Get total seen count (session only for this response, DB history is permanent)
         total_seen = len(session_seen_ids) + len(page_results)
@@ -579,7 +707,9 @@ class RecommendationPipeline:
                 "has_more": has_more
             },
             "metadata": {
-                "candidates_retrieved": len(candidates),
+                "candidates_retrieved": pre_filter_count,
+                "candidates_after_python_filters": post_filter_count,
+                "candidates_after_occasion_gate": len(candidates) if include_occasions else None,
                 "candidates_after_diversity": len(diverse_candidates),
                 "candidates_after_dedup": len(filtered_candidates),
                 "sasrec_available": self.ranker.model is not None,
@@ -590,6 +720,17 @@ class RecommendationPipeline:
                 "keyset_pagination": True,
                 "db_seen_history_count": db_history_count,
                 "fetch_size_used": fetch_size,
+                "python_filters_applied": {
+                    "include_colors": include_colors,
+                    "exclude_colors": exclude_colors,
+                    "include_brands": preferred_brands,
+                    "exclude_brands": exclude_brands,
+                    "article_types": article_types
+                } if has_python_filters else None,
+                "occasion_gate_applied": {
+                    "occasions": include_occasions,
+                    "blocked_reasons": occasion_gate_reasons
+                } if include_occasions else None,
                 "feed_version": self.session_service.get_feed_version(session_id).version_id if self.session_service.get_feed_version(session_id) else None
             }
         }
@@ -682,6 +823,216 @@ class RecommendationPipeline:
         return deduped
 
     # =========================================================
+    # Python-Level Hard Filters (Colors, Article Types)
+    # =========================================================
+
+    def _apply_color_filter(
+        self,
+        candidates: List[Candidate],
+        include_colors: Optional[List[str]] = None,
+        exclude_colors: Optional[List[str]] = None
+    ) -> List[Candidate]:
+        """
+        Apply hard color filtering in Python.
+
+        Args:
+            candidates: List of candidates to filter
+            include_colors: Colors that MUST be present (item must have at least one)
+            exclude_colors: Colors that must NOT be present
+
+        Returns:
+            Filtered list of candidates
+        """
+        if not include_colors and not exclude_colors:
+            return candidates
+
+        # Normalize color names for comparison
+        def normalize_color(color: str) -> str:
+            return color.lower().strip()
+
+        include_set = {normalize_color(c) for c in include_colors} if include_colors else None
+        exclude_set = {normalize_color(c) for c in exclude_colors} if exclude_colors else None
+
+        filtered = []
+        for candidate in candidates:
+            item_colors = [normalize_color(c) for c in (candidate.colors or [])]
+
+            # Check exclude_colors - skip if ANY excluded color is present
+            if exclude_set:
+                has_excluded = any(
+                    any(exc in item_color for exc in exclude_set)
+                    for item_color in item_colors
+                )
+                if has_excluded:
+                    continue
+
+            # Check include_colors - skip if NONE of the included colors are present
+            if include_set:
+                has_included = any(
+                    any(inc in item_color for inc in include_set)
+                    for item_color in item_colors
+                )
+                if not has_included:
+                    continue
+
+            filtered.append(candidate)
+
+        return filtered
+
+    def _apply_brand_filter(
+        self,
+        candidates: List[Candidate],
+        include_brands: Optional[List[str]] = None,
+        exclude_brands: Optional[List[str]] = None
+    ) -> List[Candidate]:
+        """
+        Apply hard brand filtering in Python.
+
+        Args:
+            candidates: List of candidates to filter
+            include_brands: Brands that MUST match (item brand must be one of these)
+            exclude_brands: Brands that must NOT match
+
+        Returns:
+            Filtered list of candidates
+        """
+        if not include_brands and not exclude_brands:
+            return candidates
+
+        # Normalize brand names for comparison
+        def normalize_brand(brand: str) -> str:
+            return brand.lower().strip()
+
+        include_set = {normalize_brand(b) for b in include_brands} if include_brands else None
+        exclude_set = {normalize_brand(b) for b in exclude_brands} if exclude_brands else None
+
+        filtered = []
+        for candidate in candidates:
+            item_brand = normalize_brand(candidate.brand or '')
+
+            # Check exclude_brands - skip if brand matches any excluded
+            if exclude_set and item_brand:
+                is_excluded = any(exc in item_brand or item_brand in exc for exc in exclude_set)
+                if is_excluded:
+                    continue
+
+            # Check include_brands - skip if brand doesn't match any included
+            if include_set:
+                if not item_brand:
+                    continue  # No brand info, skip
+                is_included = any(inc in item_brand or item_brand in inc for inc in include_set)
+                if not is_included:
+                    continue
+
+            filtered.append(candidate)
+
+        return filtered
+
+    def _apply_article_type_filter(
+        self,
+        candidates: List[Candidate],
+        article_types: Optional[List[str]] = None
+    ) -> List[Candidate]:
+        """
+        Apply article type filtering using name/category matching.
+
+        Uses TYPE_MAPPINGS to expand user-friendly type names to database values,
+        then matches against item name and category.
+
+        Args:
+            candidates: List of candidates to filter
+            article_types: List of article types to include (e.g., ['knitwear', 'jeans', 'sweatpants'])
+
+        Returns:
+            Filtered list of candidates
+        """
+        if not article_types:
+            return candidates
+
+        from recs.candidate_selection import TYPE_MAPPINGS
+
+        # Expand article_types using TYPE_MAPPINGS
+        expanded_types = set()
+        for article_type in article_types:
+            type_key = article_type.lower().replace(' ', '-')
+            if type_key in TYPE_MAPPINGS:
+                expanded_types.update(TYPE_MAPPINGS[type_key])
+            else:
+                expanded_types.add(article_type.lower())
+
+        # Also add the original types for direct matching
+        for t in article_types:
+            expanded_types.add(t.lower())
+
+        # Keywords to look for in item names
+        # Map expanded types to search keywords
+        search_keywords = set()
+        for t in expanded_types:
+            # Add the type itself
+            search_keywords.add(t.lower())
+            # Add variations
+            search_keywords.add(t.lower().replace('-', ' '))
+            search_keywords.add(t.lower().replace(' ', ''))
+
+        # Special keyword mappings for common types
+        keyword_mappings = {
+            'knitwear': ['knit', 'sweater', 'cardigan', 'pullover', 'turtleneck', 'jumper'],
+            'sweaters': ['sweater', 'knit', 'pullover', 'jumper'],
+            'cardigans': ['cardigan', 'cardi'],
+            'turtlenecks': ['turtleneck', 'turtle neck', 'mock neck'],
+            'sweatpants': ['sweatpant', 'jogger', 'track pant', 'jogging'],
+            'joggers': ['jogger', 'sweatpant', 'track pant'],
+            't-shirts': ['t-shirt', 'tee', 'tshirt'],
+            'tees': ['tee', 't-shirt', 'tshirt'],
+            'tank tops': ['tank', 'cami', 'camisole', 'sleeveless top'],
+            'jeans': ['jean', 'denim pant'],
+            'leggings': ['legging', 'tight'],
+            'hoodies': ['hoodie', 'hoody', 'hood'],
+            'blouses': ['blouse'],
+            'crop tops': ['crop top', 'cropped top'],
+            'bodysuits': ['bodysuit', 'body suit'],
+        }
+
+        for t in expanded_types:
+            if t in keyword_mappings:
+                search_keywords.update(keyword_mappings[t])
+
+        filtered = []
+        for candidate in candidates:
+            name_lower = (candidate.name or '').lower()
+            category_lower = (candidate.category or '').lower()
+            article_type_lower = (candidate.article_type or '').lower()
+
+            # Check if any keyword matches
+            matches = False
+
+            # Direct article_type match (if populated)
+            if article_type_lower:
+                for keyword in search_keywords:
+                    if keyword in article_type_lower:
+                        matches = True
+                        break
+
+            # Name-based matching
+            if not matches:
+                for keyword in search_keywords:
+                    if keyword in name_lower:
+                        matches = True
+                        break
+
+            # Category-based matching (looser)
+            if not matches:
+                for keyword in search_keywords:
+                    if keyword in category_lower:
+                        matches = True
+                        break
+
+            if matches:
+                filtered.append(candidate)
+
+        return filtered
+
+    # =========================================================
     # Diversity Constraints
     # =========================================================
 
@@ -691,22 +1042,30 @@ class RecommendationPipeline:
 
         Ensures no more than MAX_PER_CATEGORY items from any single category.
         When user has few categories selected, allows more items per category.
-        """
-        # Calculate dynamic limit based on user's selected categories
-        user_categories = []
-        if user_state.onboarding_profile and user_state.onboarding_profile.categories:
-            user_categories = user_state.onboarding_profile.categories
 
-        # If user has 1-2 categories, allow more items per category
-        # Default limit of 8 is for users with many categories
-        if len(user_categories) <= 1:
-            max_per_cat = self.config.DEFAULT_LIMIT  # Allow up to 50 items for single category
-        elif len(user_categories) == 2:
-            max_per_cat = 25  # 25 per category for 2 categories
-        elif len(user_categories) == 3:
-            max_per_cat = 16  # 16 per category for 3 categories
+        For seed_vector users: More lenient since similarity search naturally
+        clusters in liked categories - let users see more of what they like.
+        """
+        # For seed_vector users, be more lenient - they should see what they like
+        # Similarity search already biases toward liked categories
+        if user_state.taste_vector is not None:
+            max_per_cat = 50  # Effectively no cap per category for warm users
         else:
-            max_per_cat = self.config.MAX_PER_CATEGORY  # Default 8 for 4+ categories
+            # Calculate dynamic limit based on user's selected categories
+            user_categories = []
+            if user_state.onboarding_profile and user_state.onboarding_profile.categories:
+                user_categories = user_state.onboarding_profile.categories
+
+            # If user has 1-2 categories, allow more items per category
+            # Default limit of 8 is for users with many categories
+            if len(user_categories) <= 1:
+                max_per_cat = self.config.DEFAULT_LIMIT  # Allow up to 50 items for single category
+            elif len(user_categories) == 2:
+                max_per_cat = 25  # 25 per category for 2 categories
+            elif len(user_categories) == 3:
+                max_per_cat = 16  # 16 per category for 3 categories
+            else:
+                max_per_cat = self.config.MAX_PER_CATEGORY  # Default 8 for 4+ categories
 
         result = []
         category_counts = defaultdict(int)
@@ -775,15 +1134,28 @@ class RecommendationPipeline:
         if candidate.preference_score > 0.5:
             return "preference_matched"
 
-        return "trending"
+        return "exploration"
 
     # =========================================================
     # Onboarding Profile Management
     # =========================================================
 
     def save_onboarding(self, profile: OnboardingProfile, gender: str = "female") -> Dict[str, Any]:
-        """Save user's onboarding profile."""
+        """Save user's onboarding profile (legacy V2 format)."""
         return self.candidate_module.save_onboarding_profile(profile, gender=gender)
+
+    def save_onboarding_v3(self, profile: OnboardingProfile, gender: str = "female") -> Dict[str, Any]:
+        """
+        Save user's V3 onboarding profile.
+
+        V3 format uses:
+        - Split sizes (top_sizes, bottom_sizes, outerwear_sizes)
+        - Flat attribute preferences with category mappings
+        - Simplified type preferences
+        - style_persona
+        - Simplified style discovery
+        """
+        return self.candidate_module.save_onboarding_profile_v3(profile, gender=gender)
 
     # =========================================================
     # Utility Methods

@@ -205,6 +205,10 @@ class OnboardingProfile(BaseModel):
         default_factory=list,
         description="Colors to exclude from recommendations"
     )
+    colors_preferred: List[str] = Field(
+        default_factory=list,
+        description="Colors to include (hard filter - item must have at least one)"
+    )
     materials_to_avoid: List[str] = Field(
         default_factory=list,
         description="Materials to exclude (e.g., polyester, wool)"
@@ -252,6 +256,10 @@ class OnboardingProfile(BaseModel):
     preferred_rises: List[str] = Field(
         default_factory=list,
         description="Rise preferences for bottoms: high, mid, low"
+    )
+    preferred_necklines: List[str] = Field(
+        default_factory=list,
+        description="Neckline preferences: crew, v-neck, scoop, turtleneck, mock"
     )
 
     # -------------------------------------------------------------------------
@@ -474,6 +482,25 @@ class Candidate(BaseModel):
     gallery_images: List[str] = Field(default_factory=list)
     name: Optional[str] = ""
 
+    # Computed scores from FashionCLIP classification
+    computed_occasion_scores: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Pre-computed occasion scores including positive and negative scores for hard gating. "
+            "Positive scores: {casual: 0.8, office: 0.6, evening: 0.3, active: 0.2, ...}. "
+            "Negative scores (contrastive): {office_negative: 0.25, active_negative: 0.15, ...}. "
+            "Item passes occasion gate if: positive_score >= threshold AND negative_score <= threshold."
+        )
+    )
+    computed_style_scores: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Pre-computed style/coverage scores: {sheer: 0.1, cutouts: 0.05, sleeveless: 0.8, ...}"
+    )
+    computed_pattern_scores: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Pre-computed pattern scores: {solid: 0.8, stripes: 0.2, floral: 0.1, ...}"
+    )
+
     # Source tracking
     source: str = Field(
         default="taste_vector",
@@ -494,6 +521,7 @@ class HardFilters(BaseModel):
     categories: Optional[List[str]] = None
     article_types: Optional[List[str]] = None  # Specific article types (e.g., jeans, t-shirts)
     exclude_colors: Optional[List[str]] = None
+    include_colors: Optional[List[str]] = None  # Colors to include (item must have at least one)
     exclude_materials: Optional[List[str]] = None
     exclude_brands: Optional[List[str]] = None
     min_price: Optional[float] = None
@@ -505,7 +533,7 @@ class HardFilters(BaseModel):
     include_occasions: Optional[List[str]] = None  # Occasions to include: casual, office, evening, beach
     include_article_types: Optional[List[str]] = None  # Specific article types user wants (positive filter)
     style_threshold: float = 0.25  # Threshold for style exclusion
-    occasion_threshold: float = 0.20  # Threshold for occasion matching
+    occasion_threshold: float = 0.18  # Threshold for occasion matching (lowered - median office score is 0.19)
 
     # Pattern filters (NEW)
     include_patterns: Optional[List[str]] = None  # Patterns to include: solid, stripes, floral, etc.
@@ -538,6 +566,7 @@ class HardFilters(BaseModel):
             gender=gender,
             categories=profile.categories if profile.categories else None,
             exclude_colors=profile.colors_to_avoid if profile.colors_to_avoid else None,
+            include_colors=profile.colors_preferred if profile.colors_preferred else None,
             exclude_materials=profile.materials_to_avoid if profile.materials_to_avoid else None,
             exclude_brands=profile.brands_to_avoid if profile.brands_to_avoid else None,
             min_price=profile.global_min_price,

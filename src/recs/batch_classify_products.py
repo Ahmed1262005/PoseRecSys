@@ -214,6 +214,7 @@ def run_classification(
     verbose: bool = False,
     include_patterns: bool = True,
     include_attributes: bool = False,
+    include_negative_scores: bool = True,
     num_workers: int = 16,
 ):
     """
@@ -227,6 +228,7 @@ def run_classification(
         verbose: Print detailed progress
         include_patterns: Classify patterns (solid, stripes, floral, etc.)
         include_attributes: Classify fit, length, sleeve attributes
+        include_negative_scores: Classify negative occasion scores for hard gating (default True)
         num_workers: Number of parallel workers for DB writes (default 16)
     """
     print("=" * 70)
@@ -264,6 +266,7 @@ def run_classification(
     print(f"Reclassify all: {reclassify_all}")
     print(f"Include patterns: {include_patterns}")
     print(f"Include attributes: {include_attributes}")
+    print(f"Include negative scores: {include_negative_scores}")
 
     if dry_run:
         print("\n*** DRY RUN MODE - No database writes ***\n")
@@ -294,31 +297,57 @@ def run_classification(
                 embeddings.append(row['embedding'])
                 product_ids.append(str(row['sku_id']))
 
-        # Fetch categories for attribute classification if needed
+        # Fetch product metadata (name, brand, article_type, broad_category) for occasion adjustments
+        # Also used for attribute classification
+        metadata_map = {}
         categories = []
-        if include_attributes and product_ids:
-            # Fetch product categories in smaller batches to avoid query limits
-            cat_map = {}
-            cat_batch_size = 200  # Supabase limit for IN clause
-            for i in range(0, len(product_ids), cat_batch_size):
-                batch_ids = product_ids[i:i + cat_batch_size]
-                cat_result = supabase.table('products').select('id, category').in_('id', batch_ids).execute()
-                for r in (cat_result.data or []):
-                    cat_map[str(r['id'])] = r.get('category', '') or ''
-            categories = [cat_map.get(pid, '') for pid in product_ids]
+        if product_ids:
+            # Fetch product metadata in smaller batches to avoid query limits
+            meta_batch_size = 200  # Supabase limit for IN clause
+            for i in range(0, len(product_ids), meta_batch_size):
+                batch_ids = product_ids[i:i + meta_batch_size]
+                meta_result = supabase.table('products').select(
+                    'id, name, brand, article_type, broad_category, category'
+                ).in_('id', batch_ids).execute()
+                for r in (meta_result.data or []):
+                    metadata_map[str(r['id'])] = {
+                        'name': r.get('name', ''),
+                        'brand': r.get('brand', ''),
+                        'article_type': r.get('article_type', ''),
+                        'broad_category': r.get('broad_category', ''),
+                        'category': r.get('category', ''),
+                    }
+
+            # Build ordered lists matching product_ids order
+            categories = [metadata_map.get(pid, {}).get('category', '') for pid in product_ids]
         else:
             categories = [''] * len(product_ids)
+
+        # Build product_metadata list for occasion adjustments
+        product_metadata = [metadata_map.get(pid, {}) for pid in product_ids]
 
         if not embeddings:
             offset += batch_size
             continue
 
-        # Classify batch - styles, occasions, patterns
+        # Classify batch - styles, occasions, patterns (and negative scores if requested)
+        # Pass product_metadata for intelligent occasion scoring adjustments
         try:
-            classifications = classifier.classify_products_batch(
-                embeddings,
-                include_patterns=include_patterns
-            )
+            if include_negative_scores:
+                # Use full classification which includes negative occasion scores
+                classifications = classifier.classify_products_batch_full(
+                    embeddings,
+                    include_patterns=include_patterns,
+                    include_negative_scores=True,
+                    product_metadata=product_metadata,
+                )
+            else:
+                # Standard classification without negative scores
+                classifications = classifier.classify_products_batch(
+                    embeddings,
+                    include_patterns=include_patterns,
+                    product_metadata=product_metadata,
+                )
         except Exception as e:
             print(f"[ERROR] Classification failed for batch at offset {offset}: {e}")
             errors += len(embeddings)
@@ -500,6 +529,10 @@ def main():
                         help='Skip pattern classification')
     parser.add_argument('--include-attributes', action='store_true',
                         help='Classify fit, length, sleeve, rise attributes (requires category data)')
+    parser.add_argument('--include-negative-scores', action='store_true', default=True,
+                        help='Classify negative occasion scores for hard gating (enabled by default)')
+    parser.add_argument('--no-negative-scores', action='store_true',
+                        help='Skip negative occasion score classification')
 
     args = parser.parse_args()
 
@@ -509,6 +542,7 @@ def main():
         return
 
     include_patterns = args.include_patterns and not args.no_patterns
+    include_negative_scores = args.include_negative_scores and not args.no_negative_scores
 
     run_classification(
         batch_size=args.batch_size,
@@ -518,6 +552,7 @@ def main():
         verbose=args.verbose,
         include_patterns=include_patterns,
         include_attributes=args.include_attributes,
+        include_negative_scores=include_negative_scores,
         num_workers=args.workers,
     )
 
