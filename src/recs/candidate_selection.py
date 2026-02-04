@@ -37,6 +37,7 @@ from recs.models import (
     OnePiecePrefs,
     OuterwearPrefs,
 )
+from recs.feasibility_filter import canonicalize_article_type, canonicalize_name
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
 
@@ -57,10 +58,16 @@ TYPE_MAPPINGS = {
     'cardigan-top': ['cardigans'],
     'tank': ['tank tops', 'camisoles'],
     'tank-top': ['tank tops', 'camisoles'],
+    'camisole': ['camisoles', 'tank tops'],
     'crop-top': ['crop tops'],
     'bodysuit': ['bodysuits'],
     'hoodie': ['hoodies', 'sweatshirts'],
     'sweatshirt': ['sweatshirts', 'hoodies'],
+
+    # Knitwear mappings (virtual category - sweaters/cardigans grouped together)
+    'knitwear': ['sweaters', 'cardigans', 'knitwear', 'turtlenecks', 'pullovers'],
+    'turtleneck': ['turtlenecks', 'turtle necks', 'sweaters'],
+    'pullover': ['pullovers', 'sweaters'],
 
     # Bottoms mappings
     'jeans': ['jeans', 'denim'],
@@ -68,19 +75,29 @@ TYPE_MAPPINGS = {
     'trousers': ['pants', 'trousers'],
     'shorts': ['shorts'],
     'leggings': ['leggings'],
+    'sweatpants': ['sweatpants', 'joggers', 'track pants'],
+    'joggers': ['joggers', 'sweatpants', 'track pants'],
 
-    # Skirt mappings
+    # Skirt mappings (V6: single "skirts" option maps to all skirt types)
+    'skirts': ['skirts', 'a-line skirts', 'pencil skirts', 'mini skirts', 'midi skirts', 'maxi skirts', 'pleated skirts', 'wrap skirts'],
+    # Legacy individual skirt mappings (backward compat)
     'a-line-skirt': ['skirts', 'a-line skirts'],
     'pencil-skirt': ['skirts', 'pencil skirts'],
     'mini-skirt': ['skirts', 'mini skirts'],
     'midi-skirt': ['skirts', 'midi skirts'],
     'maxi-skirt': ['skirts', 'maxi skirts'],
+    'pleated-skirt': ['skirts', 'pleated skirts'],
+    'wrap-skirt': ['skirts', 'wrap skirts'],
 
-    # Dress mappings
+    # Dress mappings (V6: single "dresses" option maps to all dress types)
+    'dresses': ['dresses', 'mini dresses', 'midi dresses', 'maxi dresses', 'wrap dresses', 'a-line dresses', 'bodycon dresses', 'shift dresses', 'slip dresses', 'shirt dresses'],
+    # Legacy individual dress mappings (backward compat)
     'wrap-dress': ['dresses', 'wrap dresses'],
     'a-line-dress': ['dresses', 'a-line dresses'],
     'bodycon': ['dresses', 'bodycon dresses'],
     'shift': ['dresses', 'shift dresses'],
+    'slip-dress': ['dresses', 'slip dresses'],
+    'shirt-dress': ['dresses', 'shirt dresses'],
     'maxi-dress': ['maxi dresses', 'dresses'],
     'midi-dress': ['midi dresses', 'dresses'],
     'mini-dress': ['mini dresses', 'dresses'],
@@ -249,8 +266,59 @@ def get_include_article_types(profile: OnboardingProfile) -> Optional[List[str]]
 
 
 # =============================================================================
+# Occasion Mapping (Frontend → Database)
+# =============================================================================
+
+# The frontend uses different occasion names than the product_attributes table.
+# This mapping expands user-facing occasion names to database values.
+OCCASION_MAP = {
+    'office': ['Office', 'Work'],
+    'casual': ['Everyday', 'Casual', 'Weekend', 'Lounging'],
+    'evening': ['Date Night', 'Party', 'Evening Event'],
+    'smart-casual': ['Brunch', 'Vacation'],
+    'beach': ['Vacation', 'Beach'],
+    'active': ['Workout'],
+    # Direct mappings (DB values passed through)
+    'everyday': ['Everyday'],
+    'date night': ['Date Night'],
+    'party': ['Party'],
+    'brunch': ['Brunch'],
+    'vacation': ['Vacation'],
+    'workout': ['Workout'],
+}
+
+
+def expand_occasions(user_occasions: List[str]) -> List[str]:
+    """
+    Expand frontend occasion names to DB values.
+
+    Args:
+        user_occasions: List of occasion names from frontend/profile
+
+    Returns:
+        List of expanded occasion names matching product_attributes.occasions
+    """
+    if not user_occasions:
+        return []
+
+    expanded = set()
+    for occ in user_occasions:
+        occ_lower = occ.lower().strip()
+        if occ_lower in OCCASION_MAP:
+            expanded.update(OCCASION_MAP[occ_lower])
+        else:
+            # Pass through unknown occasion names as-is (title case)
+            expanded.add(occ.title())
+    return list(expanded)
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
+
+# NOTE: For simple attribute boost/demote scoring (fit, sleeve, length) used in
+# search results, see filter_utils.SoftScoringWeights. The weights below are for
+# direct database attribute matching (occasions array, pattern field, etc.).
 
 @dataclass
 class CandidateSelectionConfig:
@@ -261,7 +329,8 @@ class CandidateSelectionConfig:
     EXPLORATION_CANDIDATES: int = 50   # Random diverse for discovery
 
     # Soft preference scoring weights (OR logic - any match adds to score)
-    # Brand weight increased to 0.40 to give preferred brands significant boost
+    # These weights are for feed ranking with computed CLIP scores.
+    # For simpler search result boosting, see filter_utils.SoftScoringWeights.
     SOFT_WEIGHTS: Dict[str, float] = None
 
     # Brand boost multipliers based on brand_openness setting
@@ -270,24 +339,46 @@ class CandidateSelectionConfig:
     def __post_init__(self):
         if self.SOFT_WEIGHTS is None:
             self.SOFT_WEIGHTS = {
+                # =============================================================
+                # Brand preferences (INCREASED for stronger brand loyalty)
+                # =============================================================
+                'brand_preferred': 0.80,  # Strong boost for preferred brands
+                'brand_new': 0.15,        # Small boost for new brands (discovery)
+
+                # =============================================================
+                # Occasion scoring (direct array match)
+                # =============================================================
+                'occasion_match': 0.50,        # Strong - lifestyle fit is important
+                'multi_occasion_bonus': 0.20,  # Reward versatile items
+
+                # =============================================================
+                # Pattern scoring (direct string match)
+                # =============================================================
+                'pattern_match': 0.30,         # Boost for preferred patterns (e.g., Solid, Stripes)
+                'pattern_avoid_penalty': -0.20,  # Penalty for disliked patterns (e.g., Floral)
+
+                # =============================================================
+                # Attribute matches (direct field comparison)
+                # =============================================================
+                'type_match': 0.25,       # Boost for matching type preferences
                 'fit': 0.15,
-                'style': 0.20,
                 'length': 0.10,
                 'neckline': 0.10,
                 'sleeve': 0.10,
                 'rise': 0.10,
-                'brand_preferred': 0.40,  # Strong boost for preferred brands
-                'brand_new': 0.10,        # Small boost for new brands (discovery)
-                'type_match': 0.25,       # Boost for matching type preferences
             }
+
+        # Brand diversity cap - prevents single brand from dominating feed
+        self.BRAND_DIVERSITY_CAP: float = 0.25  # Max 25% of results from any single brand
+
         if self.BRAND_OPENNESS_MULTIPLIERS is None:
             self.BRAND_OPENNESS_MULTIPLIERS = {
-                'stick_to_favorites': 2.0,    # Double the brand boost
+                'stick_to_favorites': 2.0,    # Strong brand loyalty
                 'stick-to-favorites': 2.0,
-                'mix': 1.0,                   # Normal brand boost
-                'mix-favorites-new': 0.8,    # Slightly reduced to allow discovery
-                'discover_new': 0.5,          # Half brand boost for max discovery
-                'discover-new': 0.5,
+                'mix': 1.2,                   # Boosted brand preference
+                'mix-favorites-new': 1.0,     # Normal brand boost with discovery
+                'discover_new': 0.7,          # Still respect some brand pref
+                'discover-new': 0.7,
             }
 
 
@@ -408,7 +499,11 @@ class CandidateSelectionModule:
         cursor_id: Optional[str] = None,
         page_size: int = 50,
         exclude_ids: Optional[Set[str]] = None,
-        article_types: Optional[List[str]] = None
+        article_types: Optional[List[str]] = None,
+        # NEW: Sale/New arrivals filters
+        on_sale_only: bool = False,
+        new_arrivals_only: bool = False,
+        new_arrivals_days: int = 7
     ) -> List[Candidate]:
         """
         Get candidates using keyset cursor for O(1) pagination.
@@ -424,6 +519,9 @@ class CandidateSelectionModule:
             page_size: Number of items to return
             exclude_ids: Set of product IDs to exclude (e.g., seen history)
             article_types: Optional list of specific article types to filter by (e.g., ['jeans', 't-shirts'])
+            on_sale_only: If True, only return items on sale (original_price > price)
+            new_arrivals_only: If True, only return items added in last N days
+            new_arrivals_days: Number of days to consider for new arrivals (default 7)
 
         Returns:
             List of Candidate objects, sorted by score descending
@@ -481,12 +579,22 @@ class CandidateSelectionModule:
         # Always use exploration (deterministic random) with keyset cursor
         # Use user_id as seed for consistent ordering across pages
         random_seed = user_state.user_id or user_state.anon_id or "default"
+
+        # Get preferred brands from profile for brand-priority retrieval
+        preferred_brands = None
+        if user_state.onboarding_profile and user_state.onboarding_profile.preferred_brands:
+            preferred_brands = user_state.onboarding_profile.preferred_brands
+
         candidates = self._retrieve_exploration_keyset(
             hard_filters=hard_filters,
             random_seed=random_seed,
             cursor_score=cursor_score,
             cursor_id=cursor_id,
-            limit=page_size
+            limit=page_size,
+            preferred_brands=preferred_brands,
+            on_sale_only=on_sale_only,
+            new_arrivals_only=new_arrivals_only,
+            new_arrivals_days=new_arrivals_days
         )
 
         # Step 2b: Filter out excluded items in Python (preserves keyset cursor pagination)
@@ -535,25 +643,27 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
-                # Lifestyle filters (NEW)
+                # Lifestyle filters - occasions now filtered in Python via product_attributes
                 'exclude_styles': hard_filters.exclude_styles,
-                'include_occasions': hard_filters.include_occasions,
-                'include_article_types': hard_filters.include_article_types,
-                'style_threshold': hard_filters.style_threshold,
-                'occasion_threshold': hard_filters.occasion_threshold,
-                # Pattern filters (NEW)
-                'include_patterns': hard_filters.include_patterns,
-                'exclude_patterns': hard_filters.exclude_patterns,
-                'pattern_threshold': hard_filters.pattern_threshold,
+                'include_occasions': None,  # Filtered in Python via product_attributes.occasions
+                'include_article_types': None,  # Python handles article_type filtering via name matching
+                'style_threshold': 0.25,  # Default for backward compat with SQL functions
+                'occasion_threshold': 0.18,
+                # Pattern filters - patterns now filtered in Python via product_attributes.pattern
+                'include_patterns': None,  # Filtered in Python via product_attributes.pattern
+                'exclude_patterns': None,
+                'pattern_threshold': 0.30,
             }
             result = self.supabase.rpc('match_products_keyset', params).execute()
-            return [self._row_to_candidate(row, source="taste_vector") for row in (result.data or [])]
+            candidates = [self._row_to_candidate(row, source="taste_vector") for row in (result.data or [])]
+            return self._enrich_with_attributes(candidates)
         except Exception as e:
             error_str = str(e)
             if 'PGRST202' in error_str or 'could not find' in error_str.lower():
                 print(f"[CandidateSelection] Keyset function not found, falling back to endless function")
                 # Fall back to endless function
-                return self._retrieve_by_taste_vector(taste_vector, hard_filters, limit, use_endless=True)
+                candidates = self._retrieve_by_taste_vector(taste_vector, hard_filters, limit, use_endless=True)
+                return self._enrich_with_attributes(candidates)
             else:
                 print(f"[CandidateSelection] Error in taste_vector keyset retrieval: {e}")
                 return []
@@ -579,24 +689,26 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
-                # Lifestyle filters (NEW)
+                # Lifestyle filters - occasions now filtered in Python via product_attributes
                 'exclude_styles': hard_filters.exclude_styles,
-                'include_occasions': hard_filters.include_occasions,
-                'include_article_types': hard_filters.include_article_types,
-                'style_threshold': hard_filters.style_threshold,
-                'occasion_threshold': hard_filters.occasion_threshold,
-                # Pattern filters (NEW)
-                'include_patterns': hard_filters.include_patterns,
-                'exclude_patterns': hard_filters.exclude_patterns,
-                'pattern_threshold': hard_filters.pattern_threshold,
+                'include_occasions': None,  # Filtered in Python via product_attributes.occasions
+                'include_article_types': None,  # Python handles article_type filtering via name matching
+                'style_threshold': 0.25,  # Default for backward compat with SQL functions
+                'occasion_threshold': 0.18,
+                # Pattern filters - patterns now filtered in Python via product_attributes.pattern
+                'include_patterns': None,  # Filtered in Python via product_attributes.pattern
+                'exclude_patterns': None,
+                'pattern_threshold': 0.30,
             }
             result = self.supabase.rpc('get_trending_keyset', params).execute()
-            return [self._row_to_candidate(row, source="trending") for row in (result.data or [])]
+            candidates = [self._row_to_candidate(row, source="trending") for row in (result.data or [])]
+            return self._enrich_with_attributes(candidates)
         except Exception as e:
             error_str = str(e)
             if 'PGRST202' in error_str or 'could not find' in error_str.lower():
                 print(f"[CandidateSelection] Trending keyset function not found, falling back to endless function")
-                return self._retrieve_trending(hard_filters, limit, use_endless=True)
+                candidates = self._retrieve_trending(hard_filters, limit, use_endless=True)
+                return self._enrich_with_attributes(candidates)
             else:
                 print(f"[CandidateSelection] Error in trending keyset retrieval: {e}")
                 return []
@@ -607,9 +719,29 @@ class CandidateSelectionModule:
         random_seed: str,
         cursor_score: Optional[float],
         cursor_id: Optional[str],
-        limit: int
+        limit: int,
+        preferred_brands: Optional[List[str]] = None,
+        # NEW: Sale/New arrivals filters
+        on_sale_only: bool = False,
+        new_arrivals_only: bool = False,
+        new_arrivals_days: int = 7
     ) -> List[Candidate]:
-        """Retrieve exploration items with deterministic ordering."""
+        """Retrieve exploration items with deterministic ordering.
+
+        If preferred_brands is provided, uses brand-priority function to
+        boost preferred brands to the top of results.
+
+        Args:
+            hard_filters: Hard filters from user state
+            random_seed: Seed for deterministic random ordering
+            cursor_score: Score from last item for keyset pagination
+            cursor_id: ID from last item for keyset pagination
+            limit: Number of items to fetch
+            preferred_brands: Brands to boost in results
+            on_sale_only: If True, only return items on sale
+            new_arrivals_only: If True, only return items added in last N days
+            new_arrivals_days: Number of days to consider for new arrivals
+        """
 
         try:
             params = {
@@ -624,24 +756,45 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
-                # Lifestyle filters (NEW)
+                # Lifestyle filters - occasions now filtered in Python via product_attributes
                 'exclude_styles': hard_filters.exclude_styles,
-                'include_occasions': hard_filters.include_occasions,
-                'include_article_types': hard_filters.include_article_types,
-                'style_threshold': hard_filters.style_threshold,
-                'occasion_threshold': hard_filters.occasion_threshold,
-                # Pattern filters (NEW)
-                'include_patterns': hard_filters.include_patterns,
-                'exclude_patterns': hard_filters.exclude_patterns,
-                'pattern_threshold': hard_filters.pattern_threshold,
+                'include_occasions': None,  # Filtered in Python via product_attributes.occasions
+                'include_article_types': None,  # Python handles article_type filtering via name matching
+                'style_threshold': 0.25,  # Default for backward compat with SQL functions
+                'occasion_threshold': 0.18,
+                # Pattern filters - patterns now filtered in Python via product_attributes.pattern
+                'include_patterns': None,  # Filtered in Python via product_attributes.pattern
+                'exclude_patterns': None,
+                'pattern_threshold': 0.30,
+                # Sale/New arrivals filters
+                'on_sale_only': on_sale_only,
+                'new_arrivals_only': new_arrivals_only,
+                'new_arrivals_days': new_arrivals_days,
             }
 
             # Debug log article type filtering
             if hard_filters.include_article_types:
                 print(f"[CandidateSelection] SQL filter include_article_types: {hard_filters.include_article_types}")
 
-            result = self.supabase.rpc('get_exploration_keyset', params).execute()
-            return [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
+            # Log sale/new filters
+            if on_sale_only:
+                print(f"[CandidateSelection] Sale filter enabled")
+            if new_arrivals_only:
+                print(f"[CandidateSelection] New arrivals filter enabled ({new_arrivals_days} days)")
+
+            # Use brand-boosted function if preferred brands are provided
+            # This gives +0.5 SQL-level boost to preferred brands, ensuring they appear in results
+            if preferred_brands:
+                print(f"[CandidateSelection] Preferred brands (SQL + Python boost): {preferred_brands}")
+                params['preferred_brands'] = preferred_brands
+                result = self.supabase.rpc('get_exploration_keyset_with_brands', params).execute()
+            else:
+                result = self.supabase.rpc('get_exploration_keyset', params).execute()
+
+            candidates = [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
+
+            # Enrich with product_attributes for direct attribute filtering
+            return self._enrich_with_attributes(candidates)
         except Exception as e:
             print(f"[CandidateSelection] Error in exploration keyset retrieval: {e}")
             return []
@@ -894,11 +1047,108 @@ class CandidateSelectionModule:
             return candidates
 
     # =========================================================
+    # Product Attributes Enrichment
+    # =========================================================
+
+    def _enrich_with_attributes(self, candidates: List[Candidate], require_attributes: bool = True) -> List[Candidate]:
+        """
+        Fetch product_attributes for candidates and enrich them.
+
+        This replaces the CLIP-based computed scores with direct database fields:
+        - occasions: text[] (e.g., ['Office', 'Everyday', 'Date Night'])
+        - style_tags: text[] (e.g., ['Casual', 'Trendy', 'Chic'])
+        - pattern: text (e.g., 'Solid', 'Floral', 'Striped')
+        - formality: text (e.g., 'Casual', 'Smart Casual', 'Semi-Formal', 'Formal')
+        - fit_type: text (e.g., 'Regular', 'Fitted', 'Slim', 'Relaxed', 'Loose')
+        - color_family: text (e.g., 'Neutrals', 'Blues', 'Browns')
+        - seasons: text[] (e.g., ['Spring', 'Summer', 'Fall', 'Winter'])
+        - construction: jsonb (contains neckline, sleeve_type, length)
+
+        Args:
+            candidates: List of candidates to enrich
+            require_attributes: If True, filter out candidates without product_attributes data
+        """
+        if not candidates:
+            return candidates
+
+        # Get all product IDs
+        product_ids = [c.item_id for c in candidates]
+
+        try:
+            # Query product_attributes table directly
+            result = self.supabase.table('product_attributes') \
+                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, construction') \
+                .in_('sku_id', product_ids) \
+                .execute()
+
+            # Build lookup dict
+            attrs_by_id = {str(r['sku_id']): r for r in (result.data or [])}
+
+            # Track enrichment stats
+            enriched_count = 0
+            enriched_candidates = []
+
+            # Enrich candidates
+            for c in candidates:
+                attrs = attrs_by_id.get(c.item_id)
+                if attrs:
+                    enriched_count += 1
+                    c.occasions = attrs.get('occasions') or []
+                    c.style_tags = attrs.get('style_tags') or []
+                    c.pattern = attrs.get('pattern')
+                    c.formality = attrs.get('formality')
+                    c.color_family = attrs.get('color_family')
+                    c.seasons = attrs.get('seasons') or []
+
+                    # Override fit from product_attributes if available
+                    if attrs.get('fit_type'):
+                        c.fit = attrs.get('fit_type')
+
+                    # Extract from construction jsonb
+                    construction = attrs.get('construction') or {}
+                    if construction.get('neckline') and not c.neckline:
+                        c.neckline = construction.get('neckline')
+                    if construction.get('sleeve_type') and not c.sleeve:
+                        c.sleeve = construction.get('sleeve_type')
+                    if construction.get('length') and not c.length:
+                        c.length = construction.get('length')
+
+                    enriched_candidates.append(c)
+                elif not require_attributes:
+                    # Keep candidates without attributes if not required
+                    enriched_candidates.append(c)
+
+            filtered_count = len(candidates) - len(enriched_candidates)
+            print(f"[CandidateSelection] Enriched {enriched_count}/{len(candidates)} candidates with product_attributes")
+            if require_attributes and filtered_count > 0:
+                print(f"[CandidateSelection] Filtered out {filtered_count} candidates without product_attributes")
+
+            return enriched_candidates
+
+        except Exception as e:
+            print(f"[CandidateSelection] Error enriching with product_attributes: {e}")
+            # On error, return original candidates if attributes not required, else empty
+            return [] if require_attributes else candidates
+
+    # =========================================================
     # Row to Candidate Conversion
     # =========================================================
 
     def _row_to_candidate(self, row: Dict[str, Any], source: str) -> Candidate:
         """Convert a database row to a Candidate object."""
+        # Compute canonical type for FeasibilityFilter
+        article_type_raw = row.get('article_type', '') or ''
+        name_raw = row.get('name', '') or ''
+        canonical_type = canonicalize_article_type(article_type_raw)
+        if canonical_type == "unknown":
+            canonical_type = canonicalize_name(name_raw)
+
+        # Sale/New arrival fields
+        original_price = row.get('original_price')
+        is_on_sale = row.get('is_on_sale', False)
+        discount_percent = row.get('discount_percent')
+        is_new = row.get('is_new', False)
+
         return Candidate(
             item_id=str(row.get('product_id', '')),
             embedding_score=float(row.get('similarity', 0.0)),
@@ -908,7 +1158,8 @@ class CandidateSelectionModule:
             is_oov=False,
             category=row.get('category', ''),
             broad_category=row.get('broad_category', ''),
-            article_type=row.get('article_type', ''),
+            article_type=article_type_raw,
+            canonical_type=canonical_type,
             brand=row.get('brand', ''),
             price=float(row.get('price', 0) or 0),
             colors=row.get('colors', []) or [],
@@ -921,8 +1172,19 @@ class CandidateSelectionModule:
             style_tags=row.get('style_tags', []) or [],
             image_url=row.get('primary_image_url') or '',
             gallery_images=row.get('gallery_images', []) or [],
-            name=row.get('name', ''),
-            source=source
+            name=name_raw,
+            source=source,
+            # Sale/New arrival fields
+            original_price=float(original_price) if original_price else None,
+            is_on_sale=bool(is_on_sale),
+            discount_percent=int(discount_percent) if discount_percent else None,
+            is_new=bool(is_new),
+            # product_attributes fields - will be populated by _enrich_with_attributes()
+            occasions=[],
+            pattern=None,
+            formality=None,
+            color_family=None,
+            seasons=[],
         )
 
     # =========================================================
@@ -946,7 +1208,8 @@ class CandidateSelectionModule:
 
         Key scoring factors:
         - Type match: Does item type match user's selected types? (+0.25)
-        - Brand match: Is this a preferred brand? (+0.40, modified by brand_openness)
+        - Brand match: Is this a preferred brand? (+0.60, modified by brand_openness)
+        - Occasion match: Does item match user's preferred occasions? (+0.30)
         - Fit match: Does fit match preferences? (+0.15)
         - Style match: Does item style match user's style directions? (+0.20)
         - Attribute matches: Length, sleeve, neckline, rise (+0.10 each)
@@ -1063,12 +1326,58 @@ class CandidateSelectionModule:
                             score += weights['rise']
 
             # =================================================================
-            # Style match (works for both V3 and legacy)
+            # Occasion match - simple array intersection using product_attributes
+            # =================================================================
+            if profile.occasions and c.occasions:
+                # Expand user occasions to match DB values
+                user_occasions_expanded = expand_occasions(profile.occasions)
+                user_occasions_set = set(o.lower() for o in user_occasions_expanded)
+                item_occasions_set = set(o.lower() for o in c.occasions)
+
+                # Check for intersection
+                matched_occasions = user_occasions_set & item_occasions_set
+                if matched_occasions:
+                    # Apply occasion boost
+                    score += weights['occasion_match']
+
+                    # Multi-occasion bonus: extra boost for items that match multiple user occasions
+                    if len(matched_occasions) >= 2:
+                        bonus_factor = min(1.0, len(matched_occasions) / len(user_occasions_expanded))
+                        score += weights['multi_occasion_bonus'] * bonus_factor
+
+            # =================================================================
+            # Pattern preference scoring - simple string match
+            # =================================================================
+            # Get user's pattern preferences (V3 or legacy)
+            patterns_liked = profile.patterns_liked or profile.patterns_preferred or []
+            patterns_avoided = profile.patterns_avoided or profile.patterns_to_avoid or []
+
+            if c.pattern:
+                item_pattern_lower = c.pattern.lower()
+
+                # Boost for liked patterns - simple string comparison
+                if patterns_liked:
+                    patterns_liked_lower = [p.lower() for p in patterns_liked]
+                    if item_pattern_lower in patterns_liked_lower:
+                        score += weights['pattern_match']
+
+                # Penalty for avoided patterns
+                if patterns_avoided:
+                    patterns_avoided_lower = [p.lower() for p in patterns_avoided]
+                    if item_pattern_lower in patterns_avoided_lower:
+                        score += weights['pattern_avoid_penalty']
+
+            # =================================================================
+            # Style tag matching using product_attributes.style_tags
             # =================================================================
             style_prefs = profile.style_persona if profile.style_persona else profile.style_directions
             if style_prefs and c.style_tags:
-                if any(s.lower() in [t.lower() for t in c.style_tags] for s in style_prefs):
-                    score += weights['style']
+                style_prefs_lower = set(s.lower() for s in style_prefs)
+                item_styles_lower = set(t.lower() for t in c.style_tags)
+
+                # Check for intersection - any style match gets full boost
+                if style_prefs_lower & item_styles_lower:
+                    score += weights.get('style', 0.30)
 
             # =================================================================
             # Brand preference match

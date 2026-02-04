@@ -197,13 +197,14 @@ class RecommendationService:
         product_id: str,
         gender: str = "female",
         category: Optional[str] = None,
-        limit: int = 20
+        limit: int = 20,
+        offset: int = 0
     ) -> List[Dict]:
-        """Find products similar to a given product."""
+        """Find products similar to a given product with pagination support."""
 
         try:
-            # Fetch extra to account for deduplication
-            fetch_limit = limit + 20
+            # Fetch extra to account for deduplication and offset
+            fetch_limit = limit + offset + 50
             result = self.supabase.rpc('get_similar_products', {
                 'source_product_id': product_id,
                 'match_count': fetch_limit,
@@ -213,7 +214,9 @@ class RecommendationService:
 
             products = result.data or []
             deduped = self._deduplicate_products(products)
-            return deduped[:limit]
+
+            # Apply offset pagination
+            return deduped[offset:offset + limit]
 
         except Exception as e:
             print(f"Error getting similar products: {e}")

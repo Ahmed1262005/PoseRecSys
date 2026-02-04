@@ -264,15 +264,29 @@ async def get_feed(
     Find products visually similar to the given product using pgvector.
 
     Uses FashionCLIP embeddings for similarity matching.
+
+    **Pagination:**
+    - Use `offset` for infinite scroll (0, 20, 40, ...)
+    - `has_more` indicates if more results are available
+    - Each item has a `rank` field (1-indexed, continuous across pages)
+
+    **Carousel Usage:**
+    - Just use `limit=10` without offset for top 10 similar items
+
+    **Feed/Infinite Scroll Usage:**
+    - Page 1: `?limit=20&offset=0`
+    - Page 2: `?limit=20&offset=20`
+    - Continue until `has_more=false`
     """
 )
 async def get_similar(
     product_id: str,
     gender: str = Query("female", description="Gender filter"),
     category: Optional[str] = Query(None, description="Category filter"),
-    limit: int = Query(20, ge=1, le=100, description="Number of results")
+    limit: int = Query(20, ge=1, le=100, description="Number of results"),
+    offset: int = Query(0, ge=0, description="Number of results to skip (for pagination)")
 ):
-    """Get similar products."""
+    """Get similar products with pagination support."""
 
     service = get_service()
 
@@ -280,24 +294,48 @@ async def get_similar(
         product_id=product_id,
         gender=gender,
         category=category,
-        limit=limit
+        limit=limit,
+        offset=offset
     )
 
-    if not results:
-        # Check if product exists
+    if not results and offset == 0:
+        # Check if product exists (only on first page)
         product = service.get_product(product_id)
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {product_id}")
         # Product exists but no embedding
         return {
             "product_id": product_id,
-            "similar": [],
+            "results": [],
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "returned": 0,
+                "has_more": False
+            },
             "message": "Product has no embedding for similarity search"
         }
 
+    # Add rank to each result (1-indexed, continuous across pages)
+    ranked_results = []
+    for i, item in enumerate(results):
+        ranked_results.append({
+            **item,
+            "rank": offset + i + 1
+        })
+
+    # Check if there are more results
+    has_more = len(results) == limit
+
     return {
         "product_id": product_id,
-        "similar": results
+        "results": ranked_results,
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "returned": len(ranked_results),
+            "has_more": has_more
+        }
     }
 
 
@@ -549,9 +587,223 @@ class FrontendStyleDiscoveryModule(BaseModel):
     enabled: bool = True
 
 
+class FrontendLifestyleModule(BaseModel):
+    """Module 11: Lifestyle preferences - exactly as sent by frontend."""
+    occasions: List[str] = Field(default_factory=list)  # ["casual", "office", "evening", "beach"]
+    stylesToAvoid: List[str] = Field(default_factory=list)  # ["deep-necklines", "sheer", "cutouts", "backless", "strapless"]
+    patterns: Dict[str, str] = Field(default_factory=dict)  # {"floral": "like", "animal-print": "avoid"}
+    stylePersona: List[str] = Field(default_factory=list)  # ["classic", "minimal", "trendy"]
+    enabled: bool = True
+
+
+# =============================================================================
+# V3 Frontend Models (NEW SPEC)
+# =============================================================================
+
+class FrontendCoreSetupV3(BaseModel):
+    """V3 Core Setup - split sizes by category."""
+    categories: List[str] = Field(default_factory=list)  # Renamed from selectedCategories
+    birthdate: Optional[str] = None
+    topSize: List[str] = Field(default_factory=list)  # NEW: split from sizes
+    bottomSize: List[str] = Field(default_factory=list)  # NEW: split from sizes
+    outerwearSize: List[str] = Field(default_factory=list)  # NEW: split from sizes
+    colorsToAvoid: List[str] = Field(default_factory=list)
+    materialsToAvoid: List[str] = Field(default_factory=list)
+
+
+class FrontendFitCategoryMapping(BaseModel):
+    """Maps a fit ID to the categories it applies to."""
+    fitId: str
+    categories: List[str] = Field(default_factory=list)
+
+
+class FrontendSleeveCategoryMapping(BaseModel):
+    """Maps a sleeve ID to the categories it applies to."""
+    sleeveId: str
+    categories: List[str] = Field(default_factory=list)
+
+
+class FrontendLengthCategoryMapping(BaseModel):
+    """Maps a length ID to the categories it applies to."""
+    lengthId: str
+    categories: List[str] = Field(default_factory=list)
+
+
+class FrontendAttributePreferences(BaseModel):
+    """V3 Flat attribute preferences with category mappings."""
+    # Fit preferences
+    fit: List[str] = Field(default_factory=list)  # ["regular", "relaxed"]
+    fitCategories: List[Dict[str, Any]] = Field(default_factory=list)  # [{fitId, categories}]
+
+    # Sleeve preferences
+    sleeve: List[str] = Field(default_factory=list)  # ["short", "long"]
+    sleeveCategories: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Length preferences (for tops/bottoms)
+    length: List[str] = Field(default_factory=list)  # ["cropped", "standard", "long"]
+    lengthCategories: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Length preferences for skirts/dresses
+    lengthSkirtsDresses: List[str] = Field(default_factory=list)  # ["mini", "midi", "maxi"]
+    lengthSkirtsDressesCategories: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Rise preferences
+    rise: List[str] = Field(default_factory=list)  # ["high", "mid", "low"]
+
+
+class FrontendTypePreferencesCategory(BaseModel):
+    """Types for a single category."""
+    types: List[str] = Field(default_factory=list)
+
+
+class FrontendTypePreferences(BaseModel):
+    """V3 Simplified type preferences - skirts merged into bottoms, one-piece into dresses."""
+    tops: Optional[FrontendTypePreferencesCategory] = None
+    bottoms: Optional[FrontendTypePreferencesCategory] = None  # Now includes skirt types
+    dresses: Optional[FrontendTypePreferencesCategory] = None  # Now includes jumpsuit/romper
+    outerwear: Optional[FrontendTypePreferencesCategory] = None
+
+
+class FrontendLifestyleV3(BaseModel):
+    """V3 Lifestyle preferences with separate pattern arrays."""
+    occasions: List[str] = Field(default_factory=list)
+    stylesToAvoid: List[str] = Field(default_factory=list)
+    patternsLiked: List[str] = Field(default_factory=list)  # NEW: was dict
+    patternsAvoided: List[str] = Field(default_factory=list)  # NEW: was dict
+    stylePersona: List[str] = Field(default_factory=list)  # NOW STORED
+
+
+class FrontendBrandsV3(BaseModel):
+    """V3 Brands - renamed fields."""
+    preferred: List[str] = Field(default_factory=list)  # Renamed from preferredBrands
+    toAvoid: List[str] = Field(default_factory=list)  # Renamed from brandsToAvoid
+    openness: Optional[str] = None  # Renamed from brandOpenness
+
+
+class FrontendStyleDiscoveryV3(BaseModel):
+    """V3 Simplified style discovery."""
+    completed: bool = False  # Renamed from sessionComplete
+    swipedItems: List[str] = Field(default_factory=list)  # Simplified from selections
+
+
+class FrontendStyleDiscoverySummaryV3(BaseModel):
+    """V3 Style discovery summary - primarily for taste_vector."""
+    taste_vector: Optional[List[float]] = None  # 512-dim FashionCLIP embedding
+
+
+class FullOnboardingRequestV3(BaseModel):
+    """
+    V3 Complete onboarding request - NEW frontend spec.
+
+    Key changes from V2:
+    - coreSetup has split sizes (topSize, bottomSize, outerwearSize)
+    - attributePreferences is flat with category mappings
+    - typePreferences simplified (skirts -> bottoms, one-piece -> dresses)
+    - lifestyle has separate patternsLiked/patternsAvoided arrays
+    - brands has renamed fields
+    - styleDiscovery simplified to completed + swipedItems
+    """
+    # User identification
+    userId: str
+    gender: str = "female"
+
+    # All modules with new structure
+    coreSetup: FrontendCoreSetupV3
+    attributePreferences: Optional[FrontendAttributePreferences] = None
+    typePreferences: Optional[FrontendTypePreferences] = None
+    lifestyle: Optional[FrontendLifestyleV3] = None
+    brands: Optional[FrontendBrandsV3] = None
+    styleDiscovery: Optional[FrontendStyleDiscoveryV3] = None
+
+    # Summary containing taste_vector (sent separately)
+    summary: Optional[FrontendStyleDiscoverySummaryV3] = None
+
+    # Metadata
+    completedAt: Optional[str] = None
+
+
+def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> OnboardingProfile:
+    """
+    Transform V3 frontend request structure to internal OnboardingProfile.
+
+    This handles the NEW frontend spec:
+    - Split sizes -> top_sizes, bottom_sizes, outerwear_sizes
+    - Flat attributePreferences -> preferred_fits, fit_category_mapping, etc.
+    - Simplified typePreferences -> top_types, bottom_types, dress_types, outerwear_types
+    - Separate pattern arrays -> patterns_liked, patterns_avoided
+    - stylePersona is now stored
+    """
+    profile = OnboardingProfile(user_id=request.userId)
+
+    # Core Setup
+    profile.categories = request.coreSetup.categories
+    profile.birthdate = request.coreSetup.birthdate
+    profile.top_sizes = request.coreSetup.topSize
+    profile.bottom_sizes = request.coreSetup.bottomSize
+    profile.outerwear_sizes = request.coreSetup.outerwearSize
+    profile.colors_to_avoid = request.coreSetup.colorsToAvoid
+    profile.materials_to_avoid = request.coreSetup.materialsToAvoid
+
+    # Attribute Preferences (flat with category mappings)
+    if request.attributePreferences:
+        ap = request.attributePreferences
+        profile.preferred_fits = ap.fit
+        profile.fit_category_mapping = ap.fitCategories
+        profile.preferred_sleeves = ap.sleeve
+        profile.sleeve_category_mapping = ap.sleeveCategories
+        profile.preferred_lengths = ap.length
+        profile.length_category_mapping = ap.lengthCategories
+        profile.preferred_lengths_dresses = ap.lengthSkirtsDresses
+        profile.length_dresses_category_mapping = ap.lengthSkirtsDressesCategories
+        profile.preferred_rises = ap.rise
+
+    # Type Preferences (simplified)
+    if request.typePreferences:
+        tp = request.typePreferences
+        if tp.tops:
+            profile.top_types = tp.tops.types
+        if tp.bottoms:
+            profile.bottom_types = tp.bottoms.types  # Now includes skirt types
+        if tp.dresses:
+            profile.dress_types = tp.dresses.types  # Now includes jumpsuit/romper
+        if tp.outerwear:
+            profile.outerwear_types = tp.outerwear.types
+
+    # Lifestyle
+    if request.lifestyle:
+        lf = request.lifestyle
+        profile.occasions = lf.occasions
+        profile.styles_to_avoid = lf.stylesToAvoid
+        profile.patterns_liked = lf.patternsLiked
+        profile.patterns_avoided = lf.patternsAvoided
+        profile.style_persona = lf.stylePersona
+
+    # Brands
+    if request.brands:
+        br = request.brands
+        profile.preferred_brands = br.preferred
+        profile.brands_to_avoid = br.toAvoid
+        profile.brand_openness = br.openness
+
+    # Style Discovery (simplified)
+    if request.styleDiscovery:
+        sd = request.styleDiscovery
+        profile.style_discovery_complete = sd.completed
+        profile.swiped_items = sd.swipedItems
+
+    # Taste Vector from summary
+    if request.summary and request.summary.taste_vector:
+        profile.taste_vector = request.summary.taste_vector
+
+    # Metadata
+    profile.completed_at = request.completedAt
+
+    return profile
+
+
 class FullOnboardingRequest(BaseModel):
     """
-    Complete 10-module onboarding request - exactly as sent by frontend.
+    Complete 11-module onboarding request - exactly as sent by frontend.
 
     This model accepts the exact JSON structure from the frontend.
     """
@@ -560,7 +812,7 @@ class FullOnboardingRequest(BaseModel):
     anon_id: Optional[str] = Field(None, alias="anonId")
     gender: str = "female"
 
-    # All 10 modules (using frontend field names with hyphens as Python identifiers)
+    # All 11 modules (using frontend field names with hyphens as Python identifiers)
     core_setup: Optional[FrontendCoreSetup] = Field(None, alias="core-setup")
     tops: Optional[FrontendTopsModule] = None
     bottoms: Optional[FrontendBottomsModule] = None
@@ -571,6 +823,7 @@ class FullOnboardingRequest(BaseModel):
     style: Optional[FrontendStyleModule] = None
     brands: Optional[FrontendBrandsModule] = None
     style_discovery: Optional[FrontendStyleDiscoveryModule] = Field(None, alias="style-discovery")
+    lifestyle: Optional[FrontendLifestyleModule] = None  # NEW: Module 11
 
     # Metadata
     completedAt: Optional[str] = None
@@ -729,6 +982,22 @@ def transform_frontend_to_profile(request: FullOnboardingRequest, user_key: str)
             enabled=True
         )
 
+    # Module 11: Lifestyle preferences (NEW)
+    if request.lifestyle and request.lifestyle.enabled:
+        profile.occasions = request.lifestyle.occasions
+        profile.styles_to_avoid = request.lifestyle.stylesToAvoid
+
+        # Parse patterns into preferred and avoided lists
+        if request.lifestyle.patterns:
+            profile.patterns_to_avoid = [
+                pattern for pattern, preference in request.lifestyle.patterns.items()
+                if preference == 'avoid'
+            ]
+            profile.patterns_preferred = [
+                pattern for pattern, preference in request.lifestyle.patterns.items()
+                if preference == 'like'
+            ]
+
     # Metadata
     profile.completed_at = request.completedAt
 
@@ -791,6 +1060,8 @@ async def save_onboarding(request: FullOnboardingRequest):
     if request.brands and request.brands.enabled:
         modules_saved += 1
     if request.style_discovery and request.style_discovery.enabled:
+        modules_saved += 1
+    if request.lifestyle and request.lifestyle.enabled:
         modules_saved += 1
 
     # Check if we have a taste vector (ensure boolean, not None)
@@ -921,6 +1192,73 @@ async def save_core_setup(request: PartialOnboardingRequest):
     )
 
 
+# =============================================================================
+# V3 Onboarding Endpoint (NEW SPEC)
+# =============================================================================
+
+class OnboardingResponseV3(BaseModel):
+    """Response from saving V3 onboarding profile."""
+    status: str
+    user_id: str
+    categories_selected: List[str]
+    has_taste_vector: bool = False
+    has_attribute_preferences: bool = False
+    has_type_preferences: bool = False
+
+
+@v2_router.post(
+    "/onboarding/v3",
+    response_model=OnboardingResponseV3,
+    summary="Save V3 onboarding profile (NEW SPEC)",
+    description="""
+    Save user's complete onboarding profile using the NEW frontend spec.
+
+    **V3 Changes:**
+    - `coreSetup.categories` (renamed from selectedCategories)
+    - `coreSetup.topSize`, `coreSetup.bottomSize`, `coreSetup.outerwearSize` (split from sizes)
+    - `attributePreferences` - flat structure with category mappings
+    - `typePreferences` - simplified (skirts merged into bottoms, one-piece into dresses)
+    - `lifestyle.patternsLiked` / `lifestyle.patternsAvoided` (was dict)
+    - `lifestyle.stylePersona` - NOW STORED
+    - `brands.preferred` / `brands.toAvoid` / `brands.openness` (renamed)
+    - `styleDiscovery.completed` / `styleDiscovery.swipedItems` (simplified)
+    - `summary.taste_vector` - sent separately
+    """
+)
+async def save_onboarding_v3(request: FullOnboardingRequestV3):
+    """Save V3 onboarding profile."""
+
+    if not request.userId:
+        raise HTTPException(
+            status_code=400,
+            detail="userId is required"
+        )
+
+    # Transform V3 frontend structure to internal profile
+    profile = transform_frontend_to_profile_v3(request)
+
+    # Check what we have
+    has_taste_vector = profile.taste_vector is not None and len(profile.taste_vector) == 512
+    has_attribute_prefs = bool(profile.preferred_fits or profile.preferred_sleeves or profile.preferred_lengths)
+    has_type_prefs = bool(profile.top_types or profile.bottom_types or profile.dress_types or profile.outerwear_types)
+
+    # Save via pipeline
+    pipeline = get_pipeline()
+    result = pipeline.save_onboarding_v3(profile, gender=request.gender)
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("error"))
+
+    return OnboardingResponseV3(
+        status=result.get("status", "success"),
+        user_id=request.userId,
+        categories_selected=profile.categories,
+        has_taste_vector=has_taste_vector,
+        has_attribute_preferences=has_attribute_prefs,
+        has_type_preferences=has_type_prefs
+    )
+
+
 @v2_router.get(
     "/categories/mapping",
     summary="Get category mapping for Tinder test",
@@ -963,11 +1301,12 @@ async def get_category_mapping():
 
     **Pipeline Stages:**
     1. Hard filtering (colors, materials, brands to avoid)
-    2. Candidate retrieval (taste_vector similarity OR trending for cold users)
-    3. Soft preference scoring (fit, style, length matching)
-    4. SASRec ranking (for warm users with 5+ interactions)
-    5. Diversity constraints (max 8 per category)
-    6. Exploration injection (10% for discovery)
+    2. Lifestyle filtering (styles_to_avoid, occasions) using FashionCLIP scores
+    3. Candidate retrieval (taste_vector similarity OR trending for cold users)
+    4. Soft preference scoring (fit, style, length matching)
+    5. SASRec ranking (for warm users with 5+ interactions)
+    6. Diversity constraints (max 8 per category)
+    7. Exploration injection (10% for discovery)
 
     **User States:**
     - `cold_start`: No Tinder test → trending only
@@ -978,6 +1317,34 @@ async def get_category_mapping():
     - First request: Don't send `cursor` or `session_id`
     - Subsequent requests: Send back the `cursor` and `session_id` from previous response
     - No duplicates within session guaranteed
+
+    **Category Filters:**
+    - `categories`: Broad categories (tops, bottoms, dresses, outerwear)
+    - `article_types`: Specific types (jeans, t-shirts, sweaters, knitwear, sweatpants, etc.)
+
+    **Color Filters:**
+    - `exclude_colors`: Colors to avoid (hard filter)
+    - `include_colors`: Colors to include - item must have at least one (hard filter)
+
+    **Lifestyle Filters:**
+    - `exclude_styles`: Coverage styles to avoid (deep-necklines, sheer, cutouts, backless, strapless)
+    - `include_occasions`: Occasions to match (casual, office, evening, beach, active)
+
+    **Pattern Filters:**
+    - `include_patterns`: Preferred patterns (solid, stripes, floral, geometric, animal-print, plaid)
+    - `exclude_patterns`: Patterns to avoid
+
+    **Attribute Filters (soft scoring):**
+    - `fit`: Fit preferences (slim, regular, relaxed, oversized)
+    - `length`: Length preferences (cropped, standard, long)
+    - `sleeves`: Sleeve preferences (short, long, sleeveless, 3/4)
+    - `neckline`: Neckline preferences (crew, v-neck, scoop, turtleneck, mock)
+    - `rise`: Rise preferences for bottoms (high, mid, low)
+
+    **Price & Brand Filters:**
+    - `min_price`, `max_price`: Price range filter
+    - `include_brands`: Brands to include (hard filter - ONLY show these brands)
+    - `exclude_brands`: Brands to avoid (hard filter)
     """
 )
 async def get_pipeline_feed(
@@ -987,6 +1354,24 @@ async def get_pipeline_feed(
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated broad category filter (tops, bottoms, dresses, outerwear)"),
     article_types: Optional[str] = Query(None, description="Comma-separated article type filter (e.g., 'jeans,t-shirts,tank tops')"),
+    exclude_styles: Optional[str] = Query(None, description="Comma-separated styles to avoid (deep-necklines, sheer, cutouts, backless, strapless)"),
+    include_occasions: Optional[str] = Query(None, description="Comma-separated occasions to include (casual, office, evening, beach, active)"),
+    # NEW FILTERS
+    min_price: Optional[float] = Query(None, ge=0, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, ge=0, description="Maximum price filter"),
+    exclude_brands: Optional[str] = Query(None, description="Comma-separated brands to exclude"),
+    include_brands: Optional[str] = Query(None, description="Comma-separated brands to include (hard filter - ONLY these brands)"),
+    preferred_brands: Optional[str] = Query(None, description="[DEPRECATED] Use include_brands instead"),
+    exclude_colors: Optional[str] = Query(None, description="Comma-separated colors to exclude"),
+    include_colors: Optional[str] = Query(None, description="Comma-separated colors to include (hard filter - item must have at least one)"),
+    # Attribute filters (soft scoring)
+    fit: Optional[str] = Query(None, description="Comma-separated fits: slim, regular, relaxed, oversized"),
+    length: Optional[str] = Query(None, description="Comma-separated lengths: cropped, standard, long"),
+    sleeves: Optional[str] = Query(None, description="Comma-separated sleeves: short, long, sleeveless, 3/4"),
+    neckline: Optional[str] = Query(None, description="Comma-separated necklines: crew, v-neck, scoop, turtleneck, mock"),
+    rise: Optional[str] = Query(None, description="Comma-separated rises: high, mid, low"),
+    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer (solid, stripes, floral, geometric, animal-print, plaid)"),
+    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
@@ -1010,6 +1395,65 @@ async def get_pipeline_feed(
     if article_types:
         article_type_list = [a.strip() for a in article_types.split(",")]
 
+    # Parse lifestyle filters
+    exclude_styles_list = None
+    if exclude_styles:
+        exclude_styles_list = [s.strip() for s in exclude_styles.split(",")]
+
+    include_occasions_list = None
+    if include_occasions:
+        include_occasions_list = [o.strip() for o in include_occasions.split(",")]
+
+    # Parse new filters
+    exclude_brands_list = None
+    if exclude_brands:
+        exclude_brands_list = [b.strip() for b in exclude_brands.split(",")]
+
+    # include_brands is the hard filter, preferred_brands is deprecated alias
+    include_brands_list = None
+    if include_brands:
+        include_brands_list = [b.strip() for b in include_brands.split(",")]
+    elif preferred_brands:
+        # Backward compat: use preferred_brands as include_brands
+        include_brands_list = [b.strip() for b in preferred_brands.split(",")]
+
+    exclude_colors_list = None
+    if exclude_colors:
+        exclude_colors_list = [c.strip() for c in exclude_colors.split(",")]
+
+    include_colors_list = None
+    if include_colors:
+        include_colors_list = [c.strip() for c in include_colors.split(",")]
+
+    # Parse attribute filters
+    fit_list = None
+    if fit:
+        fit_list = [f.strip() for f in fit.split(",")]
+
+    length_list = None
+    if length:
+        length_list = [l.strip() for l in length.split(",")]
+
+    sleeves_list = None
+    if sleeves:
+        sleeves_list = [s.strip() for s in sleeves.split(",")]
+
+    neckline_list = None
+    if neckline:
+        neckline_list = [n.strip() for n in neckline.split(",")]
+
+    rise_list = None
+    if rise:
+        rise_list = [r.strip() for r in rise.split(",")]
+
+    include_patterns_list = None
+    if include_patterns:
+        include_patterns_list = [p.strip() for p in include_patterns.split(",")]
+
+    exclude_patterns_list = None
+    if exclude_patterns:
+        exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")]
+
     # Use keyset pagination internally for O(1) performance
     response = pipeline.get_feed_keyset(
         user_id=user_id,
@@ -1018,11 +1462,192 @@ async def get_pipeline_feed(
         gender=gender,
         categories=cat_list,
         article_types=article_type_list,
+        exclude_styles=exclude_styles_list,
+        include_occasions=include_occasions_list,
+        min_price=min_price,
+        max_price=max_price,
+        exclude_brands=exclude_brands_list,
+        preferred_brands=include_brands_list,  # include_brands is the hard filter
+        exclude_colors=exclude_colors_list,
+        include_colors=include_colors_list,
+        include_patterns=include_patterns_list,
+        exclude_patterns=exclude_patterns_list,
+        # Attribute filters
+        fit=fit_list,
+        length=length_list,
+        sleeves=sleeves_list,
+        neckline=neckline_list,
+        rise=rise_list,
         cursor=cursor,
         page_size=page_size
     )
 
     return response
+
+
+@v2_router.get(
+    "/sale",
+    summary="Picks on Sale - Personalized sale items",
+    description="""
+    Get personalized sale items (items where original_price > price).
+
+    **Features:**
+    - Calls the same pipeline as /feed with on_sale_only=true
+    - All existing filters work (categories, occasions, colors, brands, patterns)
+    - Sale items ordered by highest discount percentage first
+    - Returns original_price, discount_percent, is_on_sale fields
+
+    **Response includes:**
+    - `original_price`: Original price before discount
+    - `discount_percent`: Discount as integer percentage (e.g., 25 for 25% off)
+    - `is_on_sale`: Always true for this endpoint
+    """
+)
+async def get_sale_items(
+    user_id: Optional[str] = Query(None, description="UUID user ID"),
+    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    session_id: Optional[str] = Query(None, description="Session ID (returned in response, send back for pagination)"),
+    gender: str = Query("female", description="Gender filter"),
+    categories: Optional[str] = Query(None, description="Comma-separated broad category filter"),
+    article_types: Optional[str] = Query(None, description="Comma-separated article type filter"),
+    exclude_styles: Optional[str] = Query(None, description="Comma-separated styles to avoid"),
+    include_occasions: Optional[str] = Query(None, description="Comma-separated occasions to include"),
+    min_price: Optional[float] = Query(None, ge=0, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, ge=0, description="Maximum price filter"),
+    exclude_brands: Optional[str] = Query(None, description="Comma-separated brands to exclude"),
+    include_brands: Optional[str] = Query(None, description="Comma-separated brands to include"),
+    exclude_colors: Optional[str] = Query(None, description="Comma-separated colors to exclude"),
+    include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
+    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
+    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+):
+    """Get personalized sale items."""
+
+    if not user_id and not anon_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Either user_id or anon_id must be provided"
+        )
+
+    pipeline = get_pipeline()
+
+    # Parse comma-separated filters
+    cat_list = [c.strip() for c in categories.split(",")] if categories else None
+    article_type_list = [a.strip() for a in article_types.split(",")] if article_types else None
+    exclude_styles_list = [s.strip() for s in exclude_styles.split(",")] if exclude_styles else None
+    include_occasions_list = [o.strip() for o in include_occasions.split(",")] if include_occasions else None
+    exclude_brands_list = [b.strip() for b in exclude_brands.split(",")] if exclude_brands else None
+    include_brands_list = [b.strip() for b in include_brands.split(",")] if include_brands else None
+    exclude_colors_list = [c.strip() for c in exclude_colors.split(",")] if exclude_colors else None
+    include_colors_list = [c.strip() for c in include_colors.split(",")] if include_colors else None
+    include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
+    exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
+
+    return pipeline.get_feed_keyset(
+        user_id=user_id,
+        anon_id=anon_id,
+        session_id=session_id,
+        gender=gender,
+        categories=cat_list,
+        article_types=article_type_list,
+        exclude_styles=exclude_styles_list,
+        include_occasions=include_occasions_list,
+        min_price=min_price,
+        max_price=max_price,
+        exclude_brands=exclude_brands_list,
+        preferred_brands=include_brands_list,
+        exclude_colors=exclude_colors_list,
+        include_colors=include_colors_list,
+        include_patterns=include_patterns_list,
+        exclude_patterns=exclude_patterns_list,
+        cursor=cursor,
+        page_size=page_size,
+        on_sale_only=True,  # <-- Only difference from /feed
+    )
+
+
+@v2_router.get(
+    "/new-arrivals",
+    summary="Just In - Personalized new arrivals",
+    description="""
+    Get personalized new arrivals (items added in the last 7 days).
+
+    **Features:**
+    - Calls the same pipeline as /feed with new_arrivals_only=true
+    - All existing filters work (categories, occasions, colors, brands, patterns)
+    - Items ordered by most recent first
+    - Returns is_new field (always true for this endpoint)
+
+    **Response includes:**
+    - `is_new`: Always true for this endpoint
+    - Items from the last 7 days
+    """
+)
+async def get_new_arrivals(
+    user_id: Optional[str] = Query(None, description="UUID user ID"),
+    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    session_id: Optional[str] = Query(None, description="Session ID (returned in response, send back for pagination)"),
+    gender: str = Query("female", description="Gender filter"),
+    categories: Optional[str] = Query(None, description="Comma-separated broad category filter"),
+    article_types: Optional[str] = Query(None, description="Comma-separated article type filter"),
+    exclude_styles: Optional[str] = Query(None, description="Comma-separated styles to avoid"),
+    include_occasions: Optional[str] = Query(None, description="Comma-separated occasions to include"),
+    min_price: Optional[float] = Query(None, ge=0, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, ge=0, description="Maximum price filter"),
+    exclude_brands: Optional[str] = Query(None, description="Comma-separated brands to exclude"),
+    include_brands: Optional[str] = Query(None, description="Comma-separated brands to include"),
+    exclude_colors: Optional[str] = Query(None, description="Comma-separated colors to exclude"),
+    include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
+    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
+    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+):
+    """Get personalized new arrivals."""
+
+    if not user_id and not anon_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Either user_id or anon_id must be provided"
+        )
+
+    pipeline = get_pipeline()
+
+    # Parse comma-separated filters
+    cat_list = [c.strip() for c in categories.split(",")] if categories else None
+    article_type_list = [a.strip() for a in article_types.split(",")] if article_types else None
+    exclude_styles_list = [s.strip() for s in exclude_styles.split(",")] if exclude_styles else None
+    include_occasions_list = [o.strip() for o in include_occasions.split(",")] if include_occasions else None
+    exclude_brands_list = [b.strip() for b in exclude_brands.split(",")] if exclude_brands else None
+    include_brands_list = [b.strip() for b in include_brands.split(",")] if include_brands else None
+    exclude_colors_list = [c.strip() for c in exclude_colors.split(",")] if exclude_colors else None
+    include_colors_list = [c.strip() for c in include_colors.split(",")] if include_colors else None
+    include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
+    exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
+
+    return pipeline.get_feed_keyset(
+        user_id=user_id,
+        anon_id=anon_id,
+        session_id=session_id,
+        gender=gender,
+        categories=cat_list,
+        article_types=article_type_list,
+        exclude_styles=exclude_styles_list,
+        include_occasions=include_occasions_list,
+        min_price=min_price,
+        max_price=max_price,
+        exclude_brands=exclude_brands_list,
+        preferred_brands=include_brands_list,
+        exclude_colors=exclude_colors_list,
+        include_colors=include_colors_list,
+        include_patterns=include_patterns_list,
+        exclude_patterns=exclude_patterns_list,
+        cursor=cursor,
+        page_size=page_size,
+        new_arrivals_only=True,  # <-- Only difference from /feed
+    )
 
 
 @v2_router.get(

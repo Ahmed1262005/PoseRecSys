@@ -18,9 +18,18 @@ from supabase import create_client, Client
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
-# Import occasion gate for multi-signal filtering
-from recs.occasion_gate import check_occasion_gate, filter_candidates_by_occasion
+# Import occasion expansion for simple array filtering
+from recs.candidate_selection import expand_occasions
 from recs.models import Candidate
+from recs.filter_utils import (
+    extract_image_hash,
+    deduplicate_dicts,
+    apply_diversity_dicts,
+    apply_soft_scoring,
+    SoftScoringWeights,
+    DEFAULT_SOFT_WEIGHTS,
+)
+from recs.candidate_factory import candidate_from_dict
 
 
 class WomenSearchEngine:
@@ -186,170 +195,9 @@ class WomenSearchEngine:
     ) -> List[Dict]:
         """
         Apply soft preference scoring to boost/demote items based on user preferences.
-
-        IMPORTANT: Boosts are CAPPED to prevent overriding semantic relevance.
-        - MAX_TOTAL_BOOST = 0.15 (positive boosts never exceed this)
-        - SEMANTIC_FLOOR = 0.50 (items below this get no boosts)
-
-        BOOST weights (positive preferences) - REDUCED from previous values:
-        - Fit match: +0.03 (was 0.05)
-        - Sleeve match: +0.03
-        - Length match: +0.03
-        - Rise match: +0.02
-        - Preferred brand: +0.05 (was 0.08)
-        - Type match: +0.03 (was 0.04)
-
-        DEMOTE weights (things to avoid) - unchanged:
-        - Color to avoid: -0.15
-        - Style to avoid: -0.12
-        - Material to avoid: -0.10
-        - Brand to avoid: -0.15
+        Uses shared filter_utils for consistent scoring logic.
         """
-        if not soft_prefs and not type_prefs and not user_hard:
-            return results
-
-        user_hard = user_hard or {}
-
-        # === CAPS to prevent boosts from overriding semantic relevance ===
-        MAX_TOTAL_BOOST = 0.15  # Positive boosts never exceed this
-        SEMANTIC_FLOOR = 0.25  # Items below this semantic score get no boosts
-        # Note: Text-to-image CLIP scores typically range 0.28-0.40, not 0.70-0.95
-
-        # === BOOST preferences (positive) ===
-        preferred_fits = {f.lower() for f in soft_prefs.get('preferred_fits', [])}
-        preferred_sleeves = {s.lower() for s in soft_prefs.get('preferred_sleeves', [])}
-        preferred_lengths = {l.lower() for l in soft_prefs.get('preferred_lengths', [])}
-        preferred_lengths_dresses = {l.lower() for l in soft_prefs.get('preferred_lengths_dresses', [])}
-        preferred_rises = {r.lower() for r in soft_prefs.get('preferred_rises', [])}
-        preferred_brands = {b.lower() for b in soft_prefs.get('preferred_brands', [])}
-
-        # Type preferences by category
-        all_type_prefs = set()
-        for types in type_prefs.values():
-            all_type_prefs.update(t.lower() for t in (types or []))
-
-        # === DEMOTE preferences (things to avoid) ===
-        colors_to_avoid = {c.lower() for c in user_hard.get('exclude_colors', []) or []}
-        styles_to_avoid = {s.lower() for s in user_hard.get('exclude_styles', []) or []}
-        materials_to_avoid = {m.lower() for m in user_hard.get('exclude_materials', []) or []}
-        brands_to_avoid = {b.lower() for b in user_hard.get('exclude_brands', []) or []}
-
-        # Scoring weights - BOOSTS (REDUCED to prevent override)
-        BOOST_FIT = 0.03      # was 0.05
-        BOOST_SLEEVE = 0.03
-        BOOST_LENGTH = 0.03
-        BOOST_RISE = 0.02
-        BOOST_BRAND = 0.05    # was 0.08
-        BOOST_TYPE = 0.03     # was 0.04
-
-        # Scoring weights - DEMOTES (negative) - unchanged
-        DEMOTE_COLOR = -0.15
-        DEMOTE_STYLE = -0.12
-        DEMOTE_MATERIAL = -0.10
-        DEMOTE_BRAND = -0.15
-
-        for item in results:
-            positive_boost = 0.0
-            negative_boost = 0.0
-            match_reasons = []
-            demote_reasons = []
-
-            # Get base semantic score (before any boosts)
-            base_semantic = item.get('base_similarity', item.get('similarity', 0))
-
-            item_brand = (item.get('brand') or '').lower()
-            item_colors = [c.lower() for c in (item.get('colors') or [])]
-            item_materials = [m.lower() for m in (item.get('materials') or [])]
-
-            # === BOOSTS (only apply if semantic score meets floor) ===
-            if base_semantic >= SEMANTIC_FLOOR:
-                # Fit match
-                item_fit = (item.get('fit') or '').lower()
-                if item_fit and item_fit in preferred_fits:
-                    positive_boost += BOOST_FIT
-                    match_reasons.append('fit')
-
-                # Sleeve match
-                item_sleeve = (item.get('sleeve') or '').lower()
-                if item_sleeve and item_sleeve in preferred_sleeves:
-                    positive_boost += BOOST_SLEEVE
-                    match_reasons.append('sleeve')
-
-                # Length match (use dress lengths for dresses, regular for others)
-                item_length = (item.get('length') or '').lower()
-                item_category = (item.get('broad_category') or '').lower()
-                if item_length:
-                    if item_category in ['dresses', 'skirts']:
-                        if item_length in preferred_lengths_dresses:
-                            positive_boost += BOOST_LENGTH
-                            match_reasons.append('length')
-                    else:
-                        if item_length in preferred_lengths:
-                            positive_boost += BOOST_LENGTH
-                            match_reasons.append('length')
-
-                # Rise match (for bottoms)
-                item_rise = (item.get('rise') or '').lower()
-                if item_rise and item_rise in preferred_rises:
-                    positive_boost += BOOST_RISE
-                    match_reasons.append('rise')
-
-                # Brand match (boost preferred brands)
-                if item_brand and item_brand in preferred_brands:
-                    positive_boost += BOOST_BRAND
-                    match_reasons.append('brand')
-
-                # Type match
-                item_type = (item.get('article_type') or '').lower()
-                if item_type and item_type in all_type_prefs:
-                    positive_boost += BOOST_TYPE
-                    match_reasons.append('type')
-
-            # === DEMOTES (always apply, no floor) ===
-
-            # Demote colors to avoid (partial match - "red" matches "Wine Red", "Cherry Red", etc.)
-            if colors_to_avoid and item_colors:
-                for item_color in item_colors:
-                    if any(avoided in item_color for avoided in colors_to_avoid):
-                        negative_boost += DEMOTE_COLOR
-                        demote_reasons.append('color_avoid')
-                        break  # Only demote once per item
-
-            # Demote styles to avoid (would need style_tags field)
-            # Note: style scores are complex, simplified check here
-            # if styles_to_avoid:
-            #     # Check if item has avoided styles - requires style_tags field
-            #     pass
-
-            # Demote materials to avoid (partial match - "wool" matches "82% Wool", etc.)
-            if materials_to_avoid and item_materials:
-                for item_material in item_materials:
-                    if any(avoided in item_material for avoided in materials_to_avoid):
-                        negative_boost += DEMOTE_MATERIAL
-                        demote_reasons.append('material_avoid')
-                        break  # Only demote once per item
-
-            # Demote brands to avoid
-            if brands_to_avoid and item_brand:
-                if item_brand in brands_to_avoid:
-                    negative_boost += DEMOTE_BRAND
-                    demote_reasons.append('brand_avoid')
-
-            # Cap positive boosts to prevent overriding semantic relevance
-            capped_positive_boost = min(MAX_TOTAL_BOOST, positive_boost)
-            total_boost = capped_positive_boost + negative_boost  # negative_boost is already negative
-
-            # Apply boost to similarity score (clamp to 0-1 range)
-            original_similarity = item.get('similarity', 0)
-            item['similarity'] = max(0.0, min(1.0, original_similarity + total_boost))
-            item['preference_boost'] = round(total_boost, 4)
-            item['preference_matches'] = match_reasons
-            item['preference_demotes'] = demote_reasons
-
-        # Re-sort by boosted similarity
-        results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
-
-        return results
+        return apply_soft_scoring(results, soft_prefs, type_prefs, user_hard, DEFAULT_SOFT_WEIGHTS)
 
     # =========================================================================
     # Diversity Constraints
@@ -362,21 +210,9 @@ class WomenSearchEngine:
     ) -> List[Dict]:
         """
         Apply category diversity constraints.
-
-        Ensures varied results by limiting items from any single category.
-        Uses broad_category for grouping (tops, bottoms, dresses, outerwear).
+        Uses shared filter_utils for consistent diversity logic.
         """
-        category_counts = defaultdict(int)
-        diverse_results = []
-
-        for item in results:
-            cat = item.get('broad_category') or item.get('category') or 'unknown'
-
-            if category_counts[cat] < max_per_category:
-                diverse_results.append(item)
-                category_counts[cat] += 1
-
-        return diverse_results
+        return apply_diversity_dicts(results, max_per_category)
 
     # =========================================================================
     # Occasion Gate Integration
@@ -389,15 +225,9 @@ class WomenSearchEngine:
         verbose: bool = False
     ) -> Tuple[List[Dict], Dict[str, int]]:
         """
-        Apply multi-signal occasion gate to search results.
+        Apply occasion filter to search results using product_attributes.occasions.
 
-        This provides the same hard gating logic as the feed pipeline:
-        - Positive occasion score threshold
-        - Negative occasion score threshold (contrastive)
-        - Cross-occasion blocking (high active blocks office)
-        - Style score blocking (high sleeveless blocks office)
-        - Sleeve/length hard blocks
-        - Brand/keyword blocks
+        Uses simple array membership check instead of CLIP-based scoring.
 
         Args:
             results: List of search result dicts
@@ -405,71 +235,38 @@ class WomenSearchEngine:
             verbose: Print debug info
 
         Returns:
-            (filtered_results, blocked_reasons) - blocked_reasons is count by reason
+            (filtered_results, blocked_stats) - stats include filtered count
         """
         if not include_occasions:
             return results, {}
 
-        # Check if any results have computed scores
-        # If SQL function doesn't return them, we can only use hard blockers (brand, keywords)
-        has_scores = any(item.get('computed_occasion_scores') for item in results[:10])
-
-        if not has_scores and verbose:
-            print("[WomenSearchEngine] Note: computed_occasion_scores not available from SQL")
-            print("  Applying brand/keyword blockers only. Run SQL migration 036 to enable full gate.")
+        # Expand user occasions to match DB values
+        expanded_occasions = expand_occasions(include_occasions)
+        required_set = set(o.lower() for o in expanded_occasions)
 
         filtered = []
-        blocked_reasons = defaultdict(int)
+        blocked_count = 0
 
         for item in results:
-            # Convert dict to Candidate-like object for occasion gate
-            # If scores are missing, pass empty dicts - gate will use hard blockers only
-            occasion_scores = item.get('computed_occasion_scores')
-            style_scores = item.get('computed_style_scores')
+            # Get occasions from the item (product_attributes.occasions)
+            item_occasions = item.get('occasions') or []
 
-            # Handle None and convert JSONB to dict if needed
-            if occasion_scores is None:
-                occasion_scores = {}
-            elif isinstance(occasion_scores, str):
-                import json
-                try:
-                    occasion_scores = json.loads(occasion_scores)
-                except:
-                    occasion_scores = {}
-
-            if style_scores is None:
-                style_scores = {}
-            elif isinstance(style_scores, str):
-                import json
-                try:
-                    style_scores = json.loads(style_scores)
-                except:
-                    style_scores = {}
-
-            candidate = Candidate(
-                item_id=item.get('product_id', ''),
-                name=item.get('name'),
-                brand=item.get('brand'),
-                article_type=item.get('article_type'),
-                sleeve=item.get('sleeve'),
-                length=item.get('length'),
-                fit=item.get('fit'),
-                computed_occasion_scores=occasion_scores,
-                computed_style_scores=style_scores,
-            )
-
-            passes, reason = check_occasion_gate(candidate, include_occasions, verbose=False)
-            if passes:
-                filtered.append(item)
+            # Check for intersection
+            if item_occasions:
+                item_occasions_set = set(o.lower() for o in item_occasions)
+                if required_set & item_occasions_set:
+                    filtered.append(item)
+                else:
+                    blocked_count += 1
             else:
-                blocked_reasons[reason] += 1
+                # No occasion data - exclude when filtering by occasion
+                blocked_count += 1
 
-        if verbose and blocked_reasons:
-            print(f"[WomenSearchEngine] Occasion gate: {len(results)} -> {len(filtered)} results")
-            for reason, count in sorted(blocked_reasons.items(), key=lambda x: -x[1])[:3]:
-                print(f"  - {reason}: {count}")
+        if verbose and blocked_count > 0:
+            print(f"[WomenSearchEngine] Occasion filter: {len(results)} -> {len(filtered)} results")
+            print(f"  - Blocked {blocked_count} items without matching occasion")
 
-        return filtered, dict(blocked_reasons)
+        return filtered, {"blocked": blocked_count}
 
     # =========================================================================
     # Helper Methods
@@ -600,52 +397,15 @@ class WomenSearchEngine:
         }
 
     def _get_image_hash(self, url: str) -> Optional[str]:
-        """Extract image hash from URL like .../original_0_85a218f8.jpg -> 85a218f8"""
-        import re
-        if not url:
-            return None
-        match = re.search(r'original_\d+_([a-f0-9]+)\.', url)
-        return match.group(1) if match else None
+        """Extract image hash from URL. Uses shared filter_utils for consistent logic."""
+        return extract_image_hash(url)
 
     def _deduplicate_results(self, results: List[Dict], limit: Optional[int] = None) -> List[Dict]:
         """
         Remove duplicate products based on image hash and (name, brand).
-
-        Handles two types of duplicates:
-        1. Same image across different brands (e.g., Boohoo/Nasty Gal selling identical items)
-        2. Same name+brand with different IDs (same product scraped multiple times)
-
-        Keeps the first (highest similarity) occurrence.
+        Uses shared filter_utils for consistent deduplication logic.
         """
-        seen_image_hashes = set()
-        seen_name_brand = set()
-        unique_results = []
-
-        for item in results:
-            # Primary dedup: image hash (catches cross-brand duplicates like Boohoo/Nasty Gal)
-            img_url = item.get('image_url') or item.get('primary_image_url')
-            img_hash = self._get_image_hash(img_url)
-            if img_hash and img_hash in seen_image_hashes:
-                continue  # Same image already shown
-
-            # Secondary dedup: (name, brand) for products without matching image hash
-            name = (item.get('name') or '').lower().strip()
-            brand = (item.get('brand') or '').lower().strip()
-            name_brand_key = (name, brand) if name and brand else None
-            if name_brand_key and name_brand_key in seen_name_brand:
-                continue  # Same name+brand already shown
-
-            unique_results.append(item)
-            if img_hash:
-                seen_image_hashes.add(img_hash)
-            if name_brand_key:
-                seen_name_brand.add(name_brand_key)
-
-            # Stop if we have enough results
-            if limit and len(unique_results) >= limit:
-                break
-
-        return unique_results
+        return deduplicate_dicts(results, limit=limit)
 
     def search(
         self,
@@ -954,9 +714,10 @@ class WomenSearchEngine:
                     "fit": row.get('fit'),
                     "length": row.get('length'),
                     "sleeve": row.get('sleeve'),
-                    # Computed scores for occasion gate (multi-signal filtering)
-                    "computed_occasion_scores": row.get('computed_occasion_scores', {}),
-                    "computed_style_scores": row.get('computed_style_scores', {}),
+                    # product_attributes fields for occasion filtering
+                    "occasions": row.get('occasions', []) or [],
+                    "style_tags": row.get('style_tags', []) or [],
+                    "pattern": row.get('pattern'),
                 })
 
             # Filter out session-seen items
@@ -981,16 +742,16 @@ class WomenSearchEngine:
                 unique_results = self._apply_diversity(unique_results, max_per_category)
 
             # =========================================
-            # STEP 8.5: Apply occasion gate (multi-signal filtering)
+            # STEP 8.5: Apply occasion filter (simple array membership)
             # =========================================
-            occasion_gate_reasons = {}
+            occasion_filter_stats = {}
             if occasions:
-                pre_gate_count = len(unique_results)
-                unique_results, occasion_gate_reasons = self._apply_occasion_gate(
+                pre_filter_count = len(unique_results)
+                unique_results, occasion_filter_stats = self._apply_occasion_gate(
                     unique_results, occasions, verbose=True
                 )
-                if pre_gate_count != len(unique_results):
-                    print(f"[WomenSearchEngine] Occasion gate ({occasions}): {pre_gate_count} -> {len(unique_results)}")
+                if pre_filter_count != len(unique_results):
+                    print(f"[WomenSearchEngine] Occasion filter ({occasions}): {pre_filter_count} -> {len(unique_results)}")
 
             # =========================================
             # STEP 9: Paginate
@@ -1023,9 +784,9 @@ class WomenSearchEngine:
                 "user_prefs_applied": has_user_prefs,
                 "hybrid_search": use_hybrid_search,
                 "session_id": session_id,
-                "occasion_gate_applied": {
+                "occasion_filter_applied": {
                     "occasions": occasions,
-                    "blocked_reasons": occasion_gate_reasons
+                    "filtered_count": occasion_filter_stats.get("blocked", 0)
                 } if occasions else None,
                 "pagination": {
                     "page": page,
@@ -1220,7 +981,10 @@ class WomenSearchEngine:
     def complete_the_fit(
         self,
         product_id: str,
-        items_per_category: int = 4
+        items_per_category: int = 4,
+        target_category: Optional[str] = None,
+        offset: int = 0,
+        limit: Optional[int] = None
     ) -> Dict:
         """
         Find complementary items using CLIP semantic search.
@@ -1234,7 +998,10 @@ class WomenSearchEngine:
 
         Args:
             product_id: UUID of the source product
-            items_per_category: Number of items to return per category (default 4)
+            items_per_category: Number of items to return per category (default 4) - for carousel mode
+            target_category: If specified, only return items from this category (for feed/pagination mode)
+            offset: Number of items to skip (for pagination in feed mode)
+            limit: Number of items to return (for pagination in feed mode, overrides items_per_category)
 
         Returns:
             Dict with source product, recommendations by category, and complete outfit
@@ -1260,10 +1027,20 @@ class WomenSearchEngine:
             source_category = source_product.get('category', '')
 
             # 2. Determine complementary categories
-            target_categories = self.COMPLEMENTARY_CATEGORIES.get(
+            all_target_categories = self.COMPLEMENTARY_CATEGORIES.get(
                 source_category,
                 ['tops_knitwear', 'tops_woven', 'bottoms_trousers', 'outerwear']
             )
+
+            # If specific category requested, filter to just that one
+            if target_category:
+                if target_category in all_target_categories:
+                    target_categories = [target_category]
+                else:
+                    # Allow any category for feed mode
+                    target_categories = [target_category]
+            else:
+                target_categories = all_target_categories
 
             if not target_categories:
                 return {
@@ -1271,6 +1048,15 @@ class WomenSearchEngine:
                     "recommendations": {},
                     "message": f"No complementary categories defined for {source_category}"
                 }
+
+            # Determine fetch size based on mode
+            if target_category and limit:
+                # Feed/pagination mode - fetch more for the specific category
+                fetch_size = offset + limit + 20  # Extra for dedup
+            else:
+                # Carousel mode - use items_per_category
+                fetch_size = items_per_category * 3
+                limit = items_per_category
 
             # 3. For each target category, do CLIP text search
             recommendations = {}
@@ -1286,20 +1072,59 @@ class WomenSearchEngine:
                 search_result = self.search(
                     query=query,
                     page=1,
-                    page_size=items_per_category * 3,  # Get more for filtering
+                    page_size=fetch_size,
                     categories=[target_cat]
                 )
 
-                # Filter out source product and take top items
-                items = []
+                # Filter out source product
+                all_items = []
                 for item in search_result.get('results', []):
                     if item.get('product_id') != product_id:
-                        items.append(item)
-                    if len(items) >= items_per_category:
-                        break
+                        all_items.append(item)
 
-                recommendations[target_cat] = items
-                all_recommended_items.extend(items)
+                # Apply pagination if in feed mode (specific category)
+                if target_category:
+                    paginated_items = all_items[offset:offset + limit]
+                    has_more = len(all_items) > offset + limit
+
+                    # Add rank to each item (1-indexed, continuous across pages)
+                    ranked_items = []
+                    for i, item in enumerate(paginated_items):
+                        ranked_items.append({
+                            **item,
+                            "rank": offset + i + 1
+                        })
+
+                    recommendations[target_cat] = {
+                        "items": ranked_items,
+                        "pagination": {
+                            "offset": offset,
+                            "limit": limit,
+                            "returned": len(ranked_items),
+                            "has_more": has_more
+                        }
+                    }
+                    all_recommended_items.extend(ranked_items)
+                else:
+                    # Carousel mode - just top N items with rank
+                    items = all_items[:limit]
+                    ranked_items = []
+                    for i, item in enumerate(items):
+                        ranked_items.append({
+                            **item,
+                            "rank": i + 1
+                        })
+
+                    recommendations[target_cat] = {
+                        "items": ranked_items,
+                        "pagination": {
+                            "offset": 0,
+                            "limit": limit,
+                            "returned": len(ranked_items),
+                            "has_more": len(all_items) > limit
+                        }
+                    }
+                    all_recommended_items.extend(ranked_items)
 
             # 4. Build complete outfit response
             total_price = float(source_product.get('price', 0) or 0)

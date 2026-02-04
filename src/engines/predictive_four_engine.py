@@ -352,6 +352,54 @@ class PredictiveFourEngine(SwipeEngine):
 
         return True
 
+    def _is_preferred_brand(self, item_id: str, prefs: PredictivePreferences) -> bool:
+        """Check if an item is from a preferred brand."""
+        if not prefs.preferred_brands:
+            return False
+        info = self.get_item_info(item_id)
+        item_brand = (info.get('brand', '') or '').lower()
+        return item_brand and item_brand in prefs.preferred_brands
+
+    def _select_item_from_cluster_with_brand_priority(
+        self,
+        eligible_items: List[str],
+        prefs: PredictivePreferences,
+        already_selected: List[str]
+    ) -> Optional[str]:
+        """
+        Select an item from eligible items, prioritizing preferred brands.
+
+        Priority order:
+        1. Items from preferred brands (if taste vector available, prefer closest to taste)
+        2. Items closest to taste vector (if available)
+        3. Random selection
+
+        This ensures that when user has preferred brands, the Tinder test
+        shows more items from those brands to learn their style properly.
+        """
+        # Remove already selected items
+        eligible = [i for i in eligible_items if i not in already_selected]
+        if not eligible:
+            return None
+
+        # Separate preferred brand items from others
+        preferred_brand_items = [i for i in eligible if self._is_preferred_brand(i, prefs)]
+        other_items = [i for i in eligible if not self._is_preferred_brand(i, prefs)]
+
+        # Try preferred brand items first (with 70% probability if available)
+        # This ensures good brand coverage while still showing variety
+        use_preferred = preferred_brand_items and (not other_items or random.random() < 0.7)
+
+        pool = preferred_brand_items if use_preferred else (other_items if other_items else eligible)
+
+        # Select from pool
+        if prefs.taste_vector is not None:
+            # Prefer item closest to taste vector
+            return self._select_taste_aligned(pool, prefs.taste_vector)
+        else:
+            # Random selection
+            return random.choice(pool)
+
     def get_four_items(
         self,
         prefs: PredictivePreferences
@@ -409,14 +457,15 @@ class PredictiveFourEngine(SwipeEngine):
                         and self._item_passes_onboarding_filters(i, prefs)]
 
             if eligible:
-                # Select item closest to taste vector if available, else random
-                if prefs.taste_vector is not None:
-                    item = self._select_taste_aligned(eligible, prefs.taste_vector)
-                else:
-                    item = random.choice(eligible)
+                # Select item with brand priority + taste alignment
+                # This ensures preferred brands are well-represented in the test
+                item = self._select_item_from_cluster_with_brand_priority(
+                    eligible, prefs, selected_items
+                )
 
-                selected_items.append(item)
-                actual_clusters.append(cluster)
+                if item:
+                    selected_items.append(item)
+                    actual_clusters.append(cluster)
 
             if len(selected_items) >= 4:
                 break
@@ -1175,9 +1224,10 @@ class PredictiveFourEngine(SwipeEngine):
                 # ============================================
                 onboarding_bonus = 0.0
 
-                # Preferred brand boost (+0.15)
+                # Preferred brand boost (+0.40) - STRONG boost for user's favorite brands
+                # This ensures the feed prioritizes items from brands the user loves
                 if prefs.preferred_brands and item_brand and item_brand in prefs.preferred_brands:
-                    onboarding_bonus += 0.15
+                    onboarding_bonus += 0.40
 
                 # Per-category preference matching
                 if cat_onboarding_prefs:
@@ -1231,13 +1281,14 @@ class PredictiveFourEngine(SwipeEngine):
                 if cluster and cat_counts.get(cluster, 0) > 0:
                     cluster_score = (cat_scores.get(cluster, 0) + 1) / (cat_counts.get(cluster, 0) + 2)
 
-                # Combined score: prioritize attribute matching + onboarding preferences
-                # Updated formula with onboarding bonus
+                # Combined score: prioritize onboarding preferences + learned attributes
+                # Updated formula with stronger onboarding bonus for brand prioritization
+                # onboarding_bonus can be up to 0.85 (brand=0.40, fit=0.20, sleeve=0.10, neckline=0.15)
                 combined_score = (
-                    0.4 * item_attr_score +
-                    0.25 * taste_sim +
-                    0.15 * cluster_score +
-                    0.20 * onboarding_bonus
+                    0.30 * item_attr_score +      # Learned attribute preferences
+                    0.20 * taste_sim +             # Visual taste similarity
+                    0.10 * cluster_score +         # Cluster preference (legacy)
+                    0.40 * min(onboarding_bonus, 1.0)  # Onboarding preferences (capped)
                 )
 
                 scored_items.append({

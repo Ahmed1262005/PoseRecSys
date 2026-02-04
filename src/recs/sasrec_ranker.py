@@ -5,7 +5,7 @@ Sequential model ranking with OOV median score fallback.
 
 Scoring:
 - WARM users (5+ interactions): sasrec=0.40, embedding=0.35, preference=0.25
-- COLD/TINDER users: embedding=0.60, preference=0.40
+- COLD/TINDER users: embedding=0.40, preference=0.60 (preference-first ranking)
 
 OOV Handling:
 - Items not in SASRec vocabulary receive median(all_scores) as fallback
@@ -45,14 +45,85 @@ class SASRecRankerConfig:
     })
 
     # Score weights for COLD/TINDER users (no SASRec)
+    # Preference weight increased to 60% to prioritize user's brand/attribute preferences
     COLD_WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
-        'embedding': 0.60,
-        'preference': 0.40
+        'embedding': 0.40,
+        'preference': 0.60
     })
 
     # Sequence configuration
     MAX_SEQ_LENGTH: int = 50
     MIN_SEQUENCE_FOR_SASREC: int = 5
+
+    # Brand diversity cap - prevents single brand from dominating results
+    # Set to 0.25 = max 25% of results from any single brand
+    BRAND_DIVERSITY_CAP: float = 0.25
+
+    # Sportswear frequency cap - artificially limits sportswear regardless of user prefs
+    # Set to 0.15 = max 15% sportswear items in feed
+    SPORTSWEAR_FREQUENCY_CAP: float = 0.15
+
+    # What counts as "sportswear" for the frequency cap
+    # Matches against broad_category (case-insensitive)
+    SPORTSWEAR_BROAD_CATEGORIES: tuple = (
+        'sportswear',
+        'activewear',
+        'athletic',
+    )
+    # Also matches against article_type (case-insensitive)
+    SPORTSWEAR_ARTICLE_TYPES: tuple = (
+        'sports bras',
+        'athletic shorts',
+        'yoga pants',
+        'track pants',
+        'running shorts',
+        'gym tops',
+        'workout tops',
+        'leggings',
+        'bike shorts',
+        'joggers',
+    )
+    # Brands that are primarily sportswear/activewear
+    SPORTSWEAR_BRANDS: tuple = (
+        'athleta',
+        'alo yoga',
+        'lululemon',
+        'fabletics',
+        'gymshark',
+        'under armour',
+        'nike',
+        'adidas',
+        'puma',
+        'reebok',
+        'new balance',
+        'outdoor voices',
+        'beyond yoga',
+        'vuori',
+        'sweaty betty',
+        'girlfriend collective',
+    )
+    # Name keywords that indicate sportswear (partial match)
+    SPORTSWEAR_NAME_KEYWORDS: tuple = (
+        'legging',
+        'bike short',
+        'jogger',
+        'sports bra',
+        'yoga',
+        'athletic',
+        'activewear',
+        'workout',
+        'gym',
+        'running',
+        'sport ',  # space to avoid matching "transport", etc.
+        'sports',
+        'track pant',
+        'sweatpant',
+        'compression',
+        'moisture-wicking',
+        'performance',
+        ' bra ',  # sports bras often just called "bra" in activewear context
+        'offline by aerie',  # Aerie's activewear line
+    )
 
     # Model paths
     CHECKPOINT_PATH: str = "/home/ubuntu/recSys/outfitTransformer/models/SASRec-Dec-11-2025_18-20-35.pth"
@@ -75,7 +146,7 @@ class SASRecRanker:
 
     For cold/tinder users:
     - No SASRec scoring
-    - Combines: embedding * 0.60 + preference * 0.40
+    - Combines: embedding * 0.40 + preference * 0.60 (preference-first)
     """
 
     def __init__(self, config: Optional[SASRecRankerConfig] = None, load_model: bool = True):
@@ -185,7 +256,7 @@ class SASRecRanker:
             final_score = 0.40 * sasrec + 0.35 * embedding + 0.25 * preference
 
         For cold/tinder users:
-            final_score = 0.60 * embedding + 0.40 * preference
+            final_score = 0.40 * embedding + 0.60 * preference
 
         Args:
             user_state: User's state with interaction_sequence
@@ -244,7 +315,169 @@ class SASRecRanker:
 
         # Sort by final_score (descending)
         candidates.sort(key=lambda c: c.final_score, reverse=True)
+
+        # Apply brand diversity cap to prevent single brand domination
+        # Use target_count of 50 (typical page view) for cap calculation
+        candidates = self._apply_brand_diversity_cap(candidates, target_count=50)
+
+        # Apply sportswear frequency cap to prevent sportswear domination
+        # Artificially limits sportswear to 15% regardless of user preferences
+        candidates = self._apply_sportswear_cap(candidates, target_count=50)
+
         return candidates
+
+    def _apply_brand_diversity_cap(
+        self,
+        candidates: List[Candidate],
+        cap: Optional[float] = None,
+        target_count: Optional[int] = None
+    ) -> List[Candidate]:
+        """
+        Apply brand diversity cap to prevent single brand from dominating results.
+
+        Strategy:
+        1. Iterate through candidates in score order
+        2. Accept items until a brand hits its cap
+        3. Skip items from capped brands until we have enough diverse items
+        4. Append skipped items at the end (they still appear, just demoted)
+
+        Args:
+            candidates: Sorted list of candidates (by final_score)
+            cap: Max fraction of results from any single brand (default 0.25)
+            target_count: Number of items to apply cap to (default: len(candidates))
+
+        Returns:
+            Reordered candidates with brand diversity enforced
+        """
+        if not candidates:
+            return candidates
+
+        cap = cap or self.config.BRAND_DIVERSITY_CAP
+        if cap >= 1.0:
+            return candidates  # No cap
+
+        from collections import defaultdict
+
+        # Target is the number of items we're building diversity for
+        target = target_count or len(candidates)
+        max_per_brand = max(2, int(target * cap))
+
+        brand_counts: dict = defaultdict(int)
+        result = []
+        deferred = []
+
+        # First pass: collect items respecting brand cap
+        for c in candidates:
+            brand = (c.brand or "unknown").lower()
+
+            if brand_counts[brand] < max_per_brand:
+                result.append(c)
+                brand_counts[brand] += 1
+            else:
+                # Brand is at cap - defer this item
+                deferred.append(c)
+
+        # Append deferred items at the end (they're demoted but still included)
+        result.extend(deferred)
+
+        return result
+
+    def _is_sportswear(self, candidate: Candidate) -> bool:
+        """
+        Check if a candidate is considered sportswear.
+
+        Matches against:
+        1. broad_category (e.g., "sportswear", "activewear")
+        2. article_type (e.g., "sports bras", "yoga pants", "leggings")
+        3. brand (e.g., "Athleta", "Lululemon", "Alo Yoga")
+        4. product name keywords (e.g., "legging", "jogger", "bike short")
+
+        Returns:
+            True if the item is sportswear
+        """
+        # Check broad_category
+        broad_cat = (candidate.broad_category or "").lower()
+        if any(sw in broad_cat for sw in self.config.SPORTSWEAR_BROAD_CATEGORIES):
+            return True
+
+        # Check article_type
+        article = (candidate.article_type or "").lower()
+        if any(sw in article for sw in self.config.SPORTSWEAR_ARTICLE_TYPES):
+            return True
+
+        # Check brand - if brand is primarily sportswear/activewear
+        brand = (candidate.brand or "").lower()
+        if any(sw_brand in brand for sw_brand in self.config.SPORTSWEAR_BRANDS):
+            return True
+
+        # Check product name for sportswear keywords
+        name = (candidate.name or "").lower()
+        if any(kw in name for kw in self.config.SPORTSWEAR_NAME_KEYWORDS):
+            return True
+
+        return False
+
+    def _apply_sportswear_cap(
+        self,
+        candidates: List[Candidate],
+        cap: Optional[float] = None,
+        target_count: Optional[int] = None
+    ) -> List[Candidate]:
+        """
+        Apply sportswear frequency cap to artificially limit sportswear items.
+
+        This ensures sportswear doesn't dominate feeds even when users select it.
+
+        Strategy:
+        1. Iterate through candidates in score order
+        2. Accept sportswear items until the cap is reached
+        3. Defer excess sportswear items to the end
+        4. Non-sportswear items are always accepted in order
+
+        Args:
+            candidates: Sorted list of candidates (by final_score)
+            cap: Max fraction of sportswear items (default 0.15)
+            target_count: Number of items to apply cap to (default 50)
+
+        Returns:
+            Reordered candidates with sportswear frequency capped
+        """
+        if not candidates:
+            return candidates
+
+        cap = cap or self.config.SPORTSWEAR_FREQUENCY_CAP
+        if cap >= 1.0:
+            return candidates  # No cap
+
+        # Target is the number of items we're building for
+        target = target_count or 50
+        max_sportswear = max(2, int(target * cap))
+
+        sportswear_count = 0
+        result = []
+        deferred_sportswear = []
+
+        for c in candidates:
+            if self._is_sportswear(c):
+                if sportswear_count < max_sportswear:
+                    result.append(c)
+                    sportswear_count += 1
+                else:
+                    # Sportswear cap reached - defer
+                    deferred_sportswear.append(c)
+            else:
+                # Non-sportswear - always accept in order
+                result.append(c)
+
+        # Append deferred sportswear at the end
+        result.extend(deferred_sportswear)
+
+        # Log if we deferred any sportswear
+        if deferred_sportswear:
+            print(f"[SASRecRanker] Sportswear cap: deferred {len(deferred_sportswear)} items "
+                  f"(kept {sportswear_count}/{max_sportswear} max)")
+
+        return result
 
     # =========================================================
     # SASRec Scoring
@@ -439,7 +672,7 @@ def test_sasrec_ranker():
     )
 
     ranked_cold = ranker.rank_candidates(cold_state, test_candidates.copy())
-    print(f"   Cold ranking (embedding * 0.60 + preference * 0.40):")
+    print(f"   Cold ranking (embedding * 0.40 + preference * 0.60):")
     for i, c in enumerate(ranked_cold[:3]):
         print(f"   {i+1}. {c.item_id[:15]}... final={c.final_score:.3f} (emb={c.embedding_score:.2f}, pref={c.preference_score:.2f})")
 

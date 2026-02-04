@@ -293,6 +293,31 @@ class OnboardingProfile(BaseModel):
         default_factory=list,
         description="Coverage styles to exclude: deep-necklines, sheer, cutouts, backless, strapless"
     )
+
+    # -------------------------------------------------------------------------
+    # Hard Exclusions (boolean flags for FeasibilityFilter)
+    # -------------------------------------------------------------------------
+    no_sleeveless: bool = Field(
+        default=False,
+        description="Hard exclusion: no sleeveless items (tanks, camis, halters)"
+    )
+    no_tanks: bool = Field(
+        default=False,
+        description="Hard exclusion: no tank tops specifically"
+    )
+    no_crop: bool = Field(
+        default=False,
+        description="Hard exclusion: no crop tops"
+    )
+    no_athletic: bool = Field(
+        default=False,
+        description="Hard exclusion: no athletic wear (sports bras, leggings, joggers)"
+    )
+    no_revealing: bool = Field(
+        default=False,
+        description="Hard exclusion: no revealing items (bralettes, bandeaus, deep cuts)"
+    )
+
     patterns_liked: List[str] = Field(
         default_factory=list,
         description="Liked patterns: stripes, plaid, floral, etc."
@@ -384,6 +409,26 @@ class OnboardingProfile(BaseModel):
     # -------------------------------------------------------------------------
     completed_at: Optional[str] = None
 
+    def get_user_exclusions(self) -> List[str]:
+        """
+        Get list of user exclusion keys for FeasibilityFilter.
+
+        Returns list of exclusion keys like ["no_tanks", "no_crop", "no_sleeveless"]
+        based on the boolean flags set in the profile.
+        """
+        exclusions = []
+        if self.no_sleeveless:
+            exclusions.append("no_sleeveless")
+        if self.no_tanks:
+            exclusions.append("no_tanks")
+        if self.no_crop:
+            exclusions.append("no_crop")
+        if self.no_athletic:
+            exclusions.append("no_athletic")
+        if self.no_revealing:
+            exclusions.append("no_revealing")
+        return exclusions
+
 
 # =============================================================================
 # User State (Recommendation Context)
@@ -468,6 +513,7 @@ class Candidate(BaseModel):
     category: Optional[str] = ""
     broad_category: Optional[str] = ""
     article_type: Optional[str] = ""  # Specific article type (e.g., jeans, t-shirts)
+    canonical_type: Optional[str] = None  # Canonicalized article type (e.g., tank_top, blouse)
     brand: Optional[str] = ""
     price: float = 0.0
     colors: List[str] = Field(default_factory=list)
@@ -482,29 +528,51 @@ class Candidate(BaseModel):
     gallery_images: List[str] = Field(default_factory=list)
     name: Optional[str] = ""
 
-    # Computed scores from FashionCLIP classification
-    computed_occasion_scores: Dict[str, float] = Field(
-        default_factory=dict,
-        description=(
-            "Pre-computed occasion scores including positive and negative scores for hard gating. "
-            "Positive scores: {casual: 0.8, office: 0.6, evening: 0.3, active: 0.2, ...}. "
-            "Negative scores (contrastive): {office_negative: 0.25, active_negative: 0.15, ...}. "
-            "Item passes occasion gate if: positive_score >= threshold AND negative_score <= threshold."
-        )
+    # Direct database fields from product_attributes table
+    # These replace the CLIP-computed scores for simpler, human-labeled filtering
+    occasions: List[str] = Field(
+        default_factory=list,
+        description="Occasions from product_attributes: ['Office', 'Everyday', 'Date Night', etc.]"
     )
-    computed_style_scores: Dict[str, float] = Field(
-        default_factory=dict,
-        description="Pre-computed style/coverage scores: {sheer: 0.1, cutouts: 0.05, sleeveless: 0.8, ...}"
+    pattern: Optional[str] = Field(
+        default=None,
+        description="Pattern from product_attributes: 'Solid', 'Floral', 'Striped', etc."
     )
-    computed_pattern_scores: Dict[str, float] = Field(
-        default_factory=dict,
-        description="Pre-computed pattern scores: {solid: 0.8, stripes: 0.2, floral: 0.1, ...}"
+    formality: Optional[str] = Field(
+        default=None,
+        description="Formality level: 'Casual', 'Smart Casual', 'Semi-Formal', 'Formal'"
+    )
+    color_family: Optional[str] = Field(
+        default=None,
+        description="Color family from product_attributes: 'Neutrals', 'Blues', 'Browns', etc."
+    )
+    seasons: List[str] = Field(
+        default_factory=list,
+        description="Seasons from product_attributes: ['Spring', 'Summer', 'Fall', 'Winter']"
     )
 
     # Source tracking
     source: str = Field(
         default="taste_vector",
         description="Candidate source: taste_vector, trending, exploration"
+    )
+
+    # Sale/New arrival fields
+    original_price: Optional[float] = Field(
+        default=None,
+        description="Original price before discount (if on sale)"
+    )
+    is_on_sale: bool = Field(
+        default=False,
+        description="True if item is on sale (original_price > price)"
+    )
+    discount_percent: Optional[int] = Field(
+        default=None,
+        description="Discount percentage as integer (e.g., 25 for 25% off)"
+    )
+    is_new: bool = Field(
+        default=False,
+        description="True if item was added in the last 7 days"
     )
 
 
@@ -528,17 +596,14 @@ class HardFilters(BaseModel):
     max_price: Optional[float] = None
     exclude_product_ids: Optional[List[str]] = None
 
-    # Lifestyle filters (NEW)
+    # Lifestyle filters - now using direct product_attributes arrays
     exclude_styles: Optional[List[str]] = None  # Coverage styles to avoid: deep-necklines, sheer, cutouts, backless, strapless
-    include_occasions: Optional[List[str]] = None  # Occasions to include: casual, office, evening, beach
+    include_occasions: Optional[List[str]] = None  # Occasions to include (direct array filter)
     include_article_types: Optional[List[str]] = None  # Specific article types user wants (positive filter)
-    style_threshold: float = 0.25  # Threshold for style exclusion
-    occasion_threshold: float = 0.18  # Threshold for occasion matching (lowered - median office score is 0.19)
 
-    # Pattern filters (NEW)
-    include_patterns: Optional[List[str]] = None  # Patterns to include: solid, stripes, floral, etc.
-    exclude_patterns: Optional[List[str]] = None  # Patterns to exclude: animal-print, paisley, etc.
-    pattern_threshold: float = 0.30  # Threshold for pattern matching
+    # Pattern filters - now using direct product_attributes.pattern field
+    include_patterns: Optional[List[str]] = None  # Patterns to include: Solid, Stripes, Floral, etc.
+    exclude_patterns: Optional[List[str]] = None  # Patterns to exclude: Animal Print, Paisley, etc.
 
     @classmethod
     def from_user_state(cls, user_state: UserState, gender: str = "female") -> "HardFilters":
@@ -625,6 +690,11 @@ class FeedItem(BaseModel):
     image_url: str
     gallery_images: List[str] = Field(default_factory=list)
     colors: List[str] = Field(default_factory=list)
+    # Sale/New arrival fields
+    original_price: Optional[float] = None
+    is_on_sale: bool = False
+    discount_percent: Optional[int] = None  # Integer percentage (e.g., 25 for 25% off)
+    is_new: bool = False
 
 
 class FeedResponse(BaseModel):

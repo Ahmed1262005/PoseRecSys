@@ -34,10 +34,16 @@ from recs.models import (
     FeedItem,
     HardFilters,
 )
-from recs.candidate_selection import CandidateSelectionModule, CandidateSelectionConfig
+from recs.candidate_selection import CandidateSelectionModule, CandidateSelectionConfig, expand_occasions
 from recs.sasrec_ranker import SASRecRanker, SASRecRankerConfig
 from recs.session_state import SessionStateService
-from recs.occasion_gate import check_occasion_gate, filter_candidates_by_occasion
+from recs.feasibility_filter import filter_by_feasibility, FeasibilityFilter
+from recs.filter_utils import (
+    deduplicate_candidates,
+    apply_diversity_candidates,
+    get_diversity_limit,
+    DiversityConfig,
+)
 
 
 # =============================================================================
@@ -401,7 +407,11 @@ class RecommendationPipeline:
         neckline: Optional[List[str]] = None,
         rise: Optional[List[str]] = None,
         cursor: Optional[str] = None,
-        page_size: int = 50
+        page_size: int = 50,
+        # NEW: Sale/New arrivals filters
+        on_sale_only: bool = False,
+        new_arrivals_only: bool = False,
+        new_arrivals_days: int = 7
     ) -> Dict[str, Any]:
         """
         Generate feed using keyset cursor for O(1) pagination.
@@ -560,7 +570,10 @@ class RecommendationPipeline:
             cursor_id=cursor_id,
             page_size=fetch_size,
             exclude_ids=db_seen_ids if db_seen_ids else None,
-            article_types=article_types
+            article_types=article_types,
+            on_sale_only=on_sale_only,
+            new_arrivals_only=new_arrivals_only,
+            new_arrivals_days=new_arrivals_days
         )
 
         # Step 5b: Apply Python-level hard filters (colors, brands, article_types)
@@ -583,22 +596,44 @@ class RecommendationPipeline:
         if pre_filter_count != post_filter_count:
             print(f"[Pipeline] Python filters: {pre_filter_count} -> {post_filter_count} candidates")
 
-        # Step 5c: Apply occasion gate (multi-signal CLIP-based filtering)
-        # This uses positive + negative scores, cross-occasion scores, and style scores
-        occasion_gate_reasons = {}
-        if include_occasions:
-            pre_occasion_count = len(candidates)
-            candidates, occasion_gate_reasons = filter_candidates_by_occasion(
-                candidates, include_occasions, verbose=False
+        # Step 5c: Apply FeasibilityFilter (HARD constraint-based filtering)
+        # This runs BEFORE soft scoring and uses canonicalized article types
+        feasibility_stats = {}
+        user_exclusions = []
+        if user_state.onboarding_profile:
+            user_exclusions = user_state.onboarding_profile.get_user_exclusions()
+
+        if include_occasions or user_exclusions:
+            pre_feasibility = len(candidates)
+            candidates, feasibility_stats = filter_by_feasibility(
+                candidates,
+                occasions=include_occasions,
+                user_exclusions=user_exclusions,
+                verbose=False
             )
-            post_occasion_count = len(candidates)
-            if pre_occasion_count != post_occasion_count:
-                print(f"[Pipeline] Occasion gate ({include_occasions}): {pre_occasion_count} -> {post_occasion_count} candidates")
+            post_feasibility = len(candidates)
+            if pre_feasibility != post_feasibility:
+                print(f"[Pipeline] Feasibility filter: {pre_feasibility} -> {post_feasibility} candidates")
                 # Log top blocked reasons for debugging
-                if occasion_gate_reasons:
-                    top_reasons = sorted(occasion_gate_reasons.items(), key=lambda x: -x[1])[:3]
+                if feasibility_stats.get("blocked_reasons"):
+                    top_reasons = sorted(feasibility_stats["blocked_reasons"].items(), key=lambda x: -x[1])[:3]
                     for reason, count in top_reasons:
                         print(f"  - {reason}: {count}")
+
+        # Step 5d: Filter by occasions using product_attributes.occasions array
+        # Simple array membership check - much simpler than old CLIP-based gate
+        occasion_filter_stats = {}
+        if include_occasions:
+            pre_occasion_count = len(candidates)
+            candidates = self._filter_by_occasions(candidates, include_occasions)
+            post_occasion_count = len(candidates)
+            occasion_filter_stats = {
+                'pre_count': pre_occasion_count,
+                'post_count': post_occasion_count,
+                'filtered': pre_occasion_count - post_occasion_count,
+            }
+            if pre_occasion_count != post_occasion_count:
+                print(f"[Pipeline] Occasion filter ({include_occasions}): {pre_occasion_count} -> {post_occasion_count} candidates")
 
         # Step 6: Rank candidates (lightweight re-scoring)
         ranked_candidates = self.ranker.rank_candidates(user_state, candidates)
@@ -685,7 +720,12 @@ class RecommendationPipeline:
                 "image_url": candidate.image_url,
                 "gallery_images": candidate.gallery_images,
                 "colors": candidate.colors,
-                "source": candidate.source
+                "source": candidate.source,
+                # Sale/New arrival fields
+                "original_price": candidate.original_price,
+                "is_on_sale": candidate.is_on_sale,
+                "discount_percent": candidate.discount_percent,
+                "is_new": candidate.is_new,
             })
 
         # Build metadata
@@ -709,7 +749,8 @@ class RecommendationPipeline:
             "metadata": {
                 "candidates_retrieved": pre_filter_count,
                 "candidates_after_python_filters": post_filter_count,
-                "candidates_after_occasion_gate": len(candidates) if include_occasions else None,
+                "candidates_after_feasibility_filter": feasibility_stats.get("passed") if feasibility_stats else post_filter_count,
+                "candidates_after_occasion_filter": len(candidates) if include_occasions else None,
                 "candidates_after_diversity": len(diverse_candidates),
                 "candidates_after_dedup": len(filtered_candidates),
                 "sasrec_available": self.ranker.model is not None,
@@ -727,9 +768,16 @@ class RecommendationPipeline:
                     "exclude_brands": exclude_brands,
                     "article_types": article_types
                 } if has_python_filters else None,
-                "occasion_gate_applied": {
+                "feasibility_filter": {
                     "occasions": include_occasions,
-                    "blocked_reasons": occasion_gate_reasons
+                    "user_exclusions": user_exclusions,
+                    "blocked": feasibility_stats.get("blocked", 0),
+                    "blocked_reasons": feasibility_stats.get("blocked_reasons", {}),
+                    "warnings": feasibility_stats.get("warnings", [])
+                } if feasibility_stats else None,
+                "occasion_filter_applied": {
+                    "occasions": include_occasions,
+                    "filtered_count": occasion_filter_stats.get("filtered", 0),
                 } if include_occasions else None,
                 "feed_version": self.session_service.get_feed_version(session_id).version_id if self.session_service.get_feed_version(session_id) else None
             }
@@ -788,39 +836,9 @@ class RecommendationPipeline:
         Deduplicate candidates by image hash to remove same products across different brands.
 
         Many fashion retailers (e.g., Boohoo/Nasty Gal) sell identical items under different
-        brand names. This catches duplicates by extracting the image hash from URLs like:
-        .../original_0_85a218f8.jpg -> hash is 85a218f8
+        brand names. Uses shared filter_utils for consistent deduplication logic.
         """
-        import re
-
-        def get_image_hash(url):
-            if not url:
-                return None
-            match = re.search(r'original_\d+_([a-f0-9]+)\.', url)
-            return match.group(1) if match else None
-
-        seen_image_hashes = set()
-        seen_name_brand = set()
-        deduped = []
-
-        for c in candidates:
-            # Primary dedup: image hash (catches cross-brand duplicates)
-            img_hash = get_image_hash(c.image_url)
-            if img_hash and img_hash in seen_image_hashes:
-                continue  # Skip - same image already shown
-
-            # Secondary dedup: (name, brand) for products without matching image hash
-            name_brand_key = (c.name, c.brand) if c.name and c.brand else None
-            if name_brand_key and name_brand_key in seen_name_brand:
-                continue  # Skip - same name+brand already shown
-
-            deduped.append(c)
-            if img_hash:
-                seen_image_hashes.add(img_hash)
-            if name_brand_key:
-                seen_name_brand.add(name_brand_key)
-
-        return deduped
+        return deduplicate_candidates(candidates)
 
     # =========================================================
     # Python-Level Hard Filters (Colors, Article Types)
@@ -1033,6 +1051,43 @@ class RecommendationPipeline:
         return filtered
 
     # =========================================================
+    # Occasion Filtering (using product_attributes.occasions)
+    # =========================================================
+
+    def _filter_by_occasions(
+        self,
+        candidates: List[Candidate],
+        required_occasions: Optional[List[str]]
+    ) -> List[Candidate]:
+        """
+        Filter candidates by occasion using direct array membership.
+
+        Much simpler than the old CLIP-score-based occasion gate.
+        Uses product_attributes.occasions array for direct matching.
+
+        Args:
+            candidates: List of candidates to filter
+            required_occasions: List of occasions to filter by (e.g., ['office'])
+
+        Returns:
+            Filtered list of candidates that have at least one matching occasion
+        """
+        if not required_occasions:
+            return candidates
+
+        # Expand user occasions to match DB values
+        expanded_occasions = expand_occasions(required_occasions)
+        required_set = set(o.lower() for o in expanded_occasions)
+
+        def has_occasion(c: Candidate) -> bool:
+            if not c.occasions:
+                return False  # No attributes = excluded when filtering by occasion
+            item_occasions = set(o.lower() for o in c.occasions)
+            return bool(required_set & item_occasions)
+
+        return [c for c in candidates if has_occasion(c)]
+
+    # =========================================================
     # Diversity Constraints
     # =========================================================
 
@@ -1041,43 +1096,27 @@ class RecommendationPipeline:
         Apply category diversity constraints.
 
         Ensures no more than MAX_PER_CATEGORY items from any single category.
-        When user has few categories selected, allows more items per category.
-
-        For seed_vector users: More lenient since similarity search naturally
-        clusters in liked categories - let users see more of what they like.
+        Uses shared filter_utils for consistent diversity logic.
         """
-        # For seed_vector users, be more lenient - they should see what they like
-        # Similarity search already biases toward liked categories
-        if user_state.taste_vector is not None:
-            max_per_cat = 50  # Effectively no cap per category for warm users
-        else:
-            # Calculate dynamic limit based on user's selected categories
-            user_categories = []
-            if user_state.onboarding_profile and user_state.onboarding_profile.categories:
-                user_categories = user_state.onboarding_profile.categories
+        # Get user's selected categories
+        user_categories = []
+        if user_state.onboarding_profile and user_state.onboarding_profile.categories:
+            user_categories = user_state.onboarding_profile.categories
 
-            # If user has 1-2 categories, allow more items per category
-            # Default limit of 8 is for users with many categories
-            if len(user_categories) <= 1:
-                max_per_cat = self.config.DEFAULT_LIMIT  # Allow up to 50 items for single category
-            elif len(user_categories) == 2:
-                max_per_cat = 25  # 25 per category for 2 categories
-            elif len(user_categories) == 3:
-                max_per_cat = 16  # 16 per category for 3 categories
-            else:
-                max_per_cat = self.config.MAX_PER_CATEGORY  # Default 8 for 4+ categories
+        # Calculate dynamic limit based on user state
+        # Uses shared config with pipeline-specific overrides
+        diversity_config = DiversityConfig(
+            default_limit=self.config.MAX_PER_CATEGORY,
+            single_category_limit=self.config.DEFAULT_LIMIT,
+        )
 
-        result = []
-        category_counts = defaultdict(int)
+        max_per_cat = get_diversity_limit(
+            user_categories=user_categories,
+            has_taste_vector=user_state.taste_vector is not None,
+            config=diversity_config
+        )
 
-        for candidate in candidates:
-            cat = candidate.broad_category or candidate.category or "unknown"
-
-            if category_counts[cat] < max_per_cat:
-                result.append(candidate)
-                category_counts[cat] += 1
-
-        return result
+        return apply_diversity_candidates(candidates, max_per_cat)
 
     # =========================================================
     # Exploration Injection

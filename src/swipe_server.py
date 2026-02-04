@@ -139,12 +139,24 @@ REDESIGN_DIR = Path("/home/ubuntu/recSys/outfitTransformer/interface/redesign")
 if REDESIGN_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(REDESIGN_DIR)), name="assets")
 
-# Initialize engines - Men's (default)
-engine = SwipeEngine()
-four_engine = FourChoiceEngine()
-ranking_engine = RankingEngine()
-attribute_engine = AttributeTestEngine()
-predictive_engine = PredictiveFourEngine()  # Predictive category-focused engine (men's)
+# Initialize engines - Men's (default) - Optional, may fail if men's data not available
+engine = None
+four_engine = None
+ranking_engine = None
+attribute_engine = None
+predictive_engine = None
+
+try:
+    engine = SwipeEngine()
+    four_engine = FourChoiceEngine()
+    ranking_engine = RankingEngine()
+    attribute_engine = AttributeTestEngine()
+    predictive_engine = PredictiveFourEngine()
+    print("Men's fashion engines initialized successfully")
+except FileNotFoundError as e:
+    print(f"Warning: Men's fashion engines not initialized (missing data): {e}")
+except Exception as e:
+    print(f"Warning: Men's fashion engines not initialized: {e}")
 
 # Integrate Supabase recommendation endpoints
 try:
@@ -1615,73 +1627,140 @@ def get_women_search_engine():
     tags=["Women's Fashion"],
     summary="Text search for women's fashion",
     description="""
-Search for women's fashion items using natural language queries.
+Search for women's fashion items using natural language queries with filters.
 
-Uses FashionCLIP to encode text queries and Supabase pgvector to find
-visually similar items in the products database.
+**Text Query:** Uses FashionCLIP + keyword matching (hybrid search) to find items.
+When you search "Zara dress" or "reformation blouse", items with matching brand/name
+are boosted in the ranking.
 
 **Example queries:**
 - "flowy blue dress"
 - "black blazer"
+- "Zara midi dress" (prioritizes Zara brand)
 - "something elegant for a wedding"
-- "cozy stay at home vibes"
 
 **Pagination:**
 - `page`: Page number (1-indexed, default: 1)
-- `page_size`: Results per page (default: 50)
+- `page_size`: Results per page (default: 50, max: 200)
 
-**Optional filters:**
-- `categories`: Filter by product categories
-- `exclude_colors`: Colors to exclude from results
-- `exclude_materials`: Materials to exclude
-- `exclude_brands`: Brands to exclude
-- `min_price` / `max_price`: Price range filter
+**User Personalization:**
+- `user_id`: User UUID for loading onboarding profile
+- `anon_id`: Anonymous ID for loading onboarding profile
+- `session_id`: Session ID for deduplication across pages
+- `apply_user_prefs`: Apply user profile preferences (default: true)
+
+**Filters (override user profile if provided):**
+- `categories`: Broad categories (tops, bottoms, dresses, outerwear)
+- `article_types`: Specific types (jeans, t-shirts, midi dresses, etc.)
+- `occasions`: casual, office, evening, beach
+- `exclude_styles`: sheer, cutouts, backless, deep-necklines, strapless
+- `fits`: slim, regular, relaxed, oversized
+- `patterns`: solid, stripes, floral, plaid (include)
+- `exclude_patterns`: patterns to exclude
+- `include_colors` / `exclude_colors`: Color filters
+- `include_materials` / `exclude_materials`: Material filters
+- `include_brands` / `exclude_brands`: Brand filters
+- `min_price` / `max_price`: Price range
+- `exclude_product_ids`: Product IDs to exclude
+
+**Search Options:**
+- `use_hybrid_search`: Enable keyword matching (default: true)
+- `apply_diversity`: Limit items per category (default: false)
+- `max_per_category`: Max items per category when diversity enabled (default: 15)
 """
 )
 async def search_women_fashion(request: dict):
     """
     Text search for women's fashion using FashionCLIP + Supabase pgvector.
+    Supports hybrid search (semantic + keyword), user profile integration,
+    session state tracking, and diversity constraints.
     """
     query = request.get("query", "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
+    # Pagination - support both page/page_size and limit/offset formats
     page = max(1, request.get("page", 1))
-    page_size = min(max(1, request.get("page_size", 50)), 200)
+    page_size = request.get("page_size") or request.get("limit", 50)
+    page_size = min(max(1, page_size), 200)
 
-    # Optional filters
-    categories = request.get("categories")
-    exclude_colors = request.get("exclude_colors")
-    exclude_materials = request.get("exclude_materials")
-    exclude_brands = request.get("exclude_brands")
-    min_price = request.get("min_price")
-    max_price = request.get("max_price")
-    exclude_product_ids = request.get("exclude_product_ids")
+    # If offset is provided, calculate page number
+    offset = request.get("offset", 0)
+    if offset > 0 and not request.get("page"):
+        page = (offset // page_size) + 1
+
+    # User identification (NEW)
+    user_id = request.get("user_id")
+    anon_id = request.get("anon_id")
+    session_id = request.get("session_id")
+
+    # Support nested "filters" object OR top-level filters
+    filters = request.get("filters", {}) or {}
+
+    def get_filter(key, default=None):
+        """Get filter value from nested filters object or top-level."""
+        return request.get(key) or filters.get(key, default)
+
+    # Existing filters
+    categories = get_filter("categories")
+    exclude_colors = get_filter("exclude_colors")
+    exclude_materials = get_filter("exclude_materials")
+    exclude_brands = get_filter("exclude_brands")
+    min_price = get_filter("min_price")
+    max_price = get_filter("max_price")
+    exclude_product_ids = get_filter("exclude_product_ids")
+
+    # Extended filters
+    article_types = get_filter("article_types")
+    include_colors = get_filter("include_colors")
+    include_materials = get_filter("include_materials")
+    include_brands = get_filter("include_brands")
+    fits = get_filter("fits")
+    occasions = get_filter("occasions")
+    exclude_styles = get_filter("exclude_styles")
+    patterns = get_filter("patterns")
+    exclude_patterns = get_filter("exclude_patterns")
+
+    # NEW options
+    apply_user_prefs = request.get("apply_user_prefs", True)
+    apply_diversity = request.get("apply_diversity", False)
+    max_per_category = request.get("max_per_category", 15)
+    use_hybrid_search = request.get("use_hybrid_search", True)
 
     try:
         engine = get_women_search_engine()
 
-        # Use filtered search if any filters provided
-        if any([exclude_colors, exclude_materials, exclude_brands, min_price, max_price, exclude_product_ids]):
-            return engine.search_with_filters(
-                query=query,
-                page=page,
-                page_size=page_size,
-                categories=categories,
-                exclude_colors=exclude_colors,
-                exclude_materials=exclude_materials,
-                exclude_brands=exclude_brands,
-                min_price=min_price,
-                max_price=max_price,
-                exclude_product_ids=exclude_product_ids,
-            )
-        else:
-            return engine.search(
-                query=query,
-                page=page,
-                page_size=page_size,
-                categories=categories
-            )
+        return engine.search_with_filters(
+            query=query,
+            page=page,
+            page_size=page_size,
+            # User identification
+            user_id=user_id,
+            anon_id=anon_id,
+            session_id=session_id,
+            # Filters
+            categories=categories,
+            exclude_colors=exclude_colors,
+            exclude_materials=exclude_materials,
+            exclude_brands=exclude_brands,
+            min_price=min_price,
+            max_price=max_price,
+            exclude_product_ids=exclude_product_ids,
+            article_types=article_types,
+            include_colors=include_colors,
+            include_materials=include_materials,
+            include_brands=include_brands,
+            fits=fits,
+            occasions=occasions,
+            exclude_styles=exclude_styles,
+            patterns=patterns,
+            exclude_patterns=exclude_patterns,
+            # Options
+            apply_user_prefs=apply_user_prefs,
+            apply_diversity=apply_diversity,
+            max_per_category=max_per_category,
+            use_hybrid_search=use_hybrid_search,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
@@ -1749,6 +1828,22 @@ Find complementary items to complete an outfit using CLIP semantic search.
 - Bottoms → Tops, Outerwear
 - Dresses → Outerwear
 - Outerwear → Tops, Bottoms, Dresses
+
+**Pagination (for infinite scroll):**
+- Use `category` to get items from a specific complementary category
+- Use `offset` and `limit` for pagination
+- Each item has a `rank` field (1-indexed, continuous across pages)
+- `has_more` indicates if more results are available
+
+**Carousel mode (default):**
+```json
+{"product_id": "xxx", "items_per_category": 4}
+```
+
+**Feed/Infinite scroll mode:**
+```json
+{"product_id": "xxx", "category": "outerwear", "offset": 0, "limit": 20}
+```
 """
 )
 async def complete_the_fit(request: dict):
@@ -1760,12 +1855,20 @@ async def complete_the_fit(request: dict):
         raise HTTPException(status_code=400, detail="product_id is required")
 
     items_per_category = min(max(1, request.get("items_per_category", 4)), 20)
+    target_category = request.get("category", None)
+    offset = max(0, request.get("offset", 0))
+    limit = request.get("limit", None)
+    if limit:
+        limit = min(max(1, limit), 100)
 
     try:
         engine = get_women_search_engine()
         return engine.complete_the_fit(
             product_id=product_id,
-            items_per_category=items_per_category
+            items_per_category=items_per_category,
+            target_category=target_category,
+            offset=offset,
+            limit=limit
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Complete fit failed: {str(e)}")
