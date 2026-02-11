@@ -595,14 +595,22 @@ class CandidateSelectionModule:
             cursor_id=cursor_id,
             limit=page_size,
             preferred_brands=preferred_brands,
+            exclude_ids=exclude_ids,
             on_sale_only=on_sale_only,
             new_arrivals_only=new_arrivals_only,
             new_arrivals_days=new_arrivals_days
         )
 
-        # Step 2b: Filter out excluded items in Python (preserves keyset cursor pagination)
-        if exclude_ids:
+        # Step 2b: Python fallback for seen exclusion
+        # Primary exclusion happens at SQL level via exclude_product_ids param.
+        # This fallback catches edge cases where SQL migration hasn't been applied yet,
+        # or if the SQL function doesn't support the new param (graceful degradation).
+        if exclude_ids and candidates:
+            pre_filter = len(candidates)
             candidates = [c for c in candidates if c.item_id not in exclude_ids]
+            filtered_out = pre_filter - len(candidates)
+            if filtered_out > 0:
+                print(f"[CandidateSelection] Python fallback exclusion removed {filtered_out} items (SQL migration may not be applied)")
 
         # Step 2c: Filter by include_article_types if specified (Python-level fallback)
         # Note: SQL functions now handle this, but keep as fallback until migration applied
@@ -716,6 +724,10 @@ class CandidateSelectionModule:
                 print(f"[CandidateSelection] Error in trending keyset retrieval: {e}")
                 return []
 
+    # Max seen IDs to send to SQL in a single query.
+    # Postgres handles uuid[] up to ~5000 efficiently; beyond that use Python fallback.
+    SQL_EXCLUDE_IDS_LIMIT = 5000
+
     def _retrieve_exploration_keyset(
         self,
         hard_filters: HardFilters,
@@ -724,7 +736,8 @@ class CandidateSelectionModule:
         cursor_id: Optional[str],
         limit: int,
         preferred_brands: Optional[List[str]] = None,
-        # NEW: Sale/New arrivals filters
+        exclude_ids: Optional[Set[str]] = None,
+        # Sale/New arrivals filters
         on_sale_only: bool = False,
         new_arrivals_only: bool = False,
         new_arrivals_days: int = 7
@@ -741,12 +754,27 @@ class CandidateSelectionModule:
             cursor_id: ID from last item for keyset pagination
             limit: Number of items to fetch
             preferred_brands: Brands to boost in results
+            exclude_ids: Product IDs to exclude at SQL level (seen history)
             on_sale_only: If True, only return items on sale
             new_arrivals_only: If True, only return items added in last N days
             new_arrivals_days: Number of days to consider for new arrivals
         """
 
         try:
+            # Prepare exclude_product_ids for SQL-level exclusion
+            # Cap at SQL_EXCLUDE_IDS_LIMIT to keep Postgres performant
+            sql_exclude_ids = None
+            overflow_exclude_ids = None
+            if exclude_ids:
+                exclude_list = list(exclude_ids)
+                if len(exclude_list) <= self.SQL_EXCLUDE_IDS_LIMIT:
+                    sql_exclude_ids = exclude_list
+                else:
+                    # Send first batch to SQL, handle overflow in Python
+                    sql_exclude_ids = exclude_list[:self.SQL_EXCLUDE_IDS_LIMIT]
+                    overflow_exclude_ids = set(exclude_list[self.SQL_EXCLUDE_IDS_LIMIT:])
+                    print(f"[CandidateSelection] Seen history overflow: {len(sql_exclude_ids)} to SQL, {len(overflow_exclude_ids)} to Python fallback")
+
             params = {
                 'filter_gender': hard_filters.gender,
                 'filter_categories': hard_filters.categories,
@@ -773,11 +801,16 @@ class CandidateSelectionModule:
                 'on_sale_only': on_sale_only,
                 'new_arrivals_only': new_arrivals_only,
                 'new_arrivals_days': new_arrivals_days,
+                # SQL-level seen history exclusion
+                'exclude_product_ids': sql_exclude_ids,
             }
 
             # Debug log article type filtering
             if hard_filters.include_article_types:
                 print(f"[CandidateSelection] SQL filter include_article_types: {hard_filters.include_article_types}")
+
+            if sql_exclude_ids:
+                print(f"[CandidateSelection] SQL-level exclude_product_ids: {len(sql_exclude_ids)} items")
 
             # Log sale/new filters
             if on_sale_only:
@@ -795,6 +828,12 @@ class CandidateSelectionModule:
                 result = self.supabase.rpc('get_exploration_keyset', params).execute()
 
             candidates = [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
+
+            # Python fallback: filter overflow exclude_ids that didn't fit in SQL
+            if overflow_exclude_ids:
+                before = len(candidates)
+                candidates = [c for c in candidates if c.item_id not in overflow_exclude_ids]
+                print(f"[CandidateSelection] Python overflow filter: {before} -> {len(candidates)}")
 
             # Enrich with product_attributes for direct attribute filtering
             return self._enrich_with_attributes(candidates)

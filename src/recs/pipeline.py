@@ -580,20 +580,22 @@ class RecommendationPipeline:
                 scoring_weights=self.ranker.config.WARM_WEIGHTS if user_state.taste_vector else self.ranker.config.COLD_WEIGHTS
             )
 
-        # Step 4: Load DB seen history first (to determine fetch size)
+        # Step 4: Load DB seen history first (for SQL-level exclusion)
         db_seen_ids = self.candidate_module.get_user_seen_history(anon_id, user_id)
         db_history_count = len(db_seen_ids)
 
         # Calculate how many candidates to fetch
-        # Need to fetch extra to account for exclusions done in Python
-        # Fetch enough to skip past seen items while maintaining keyset cursor pagination
-        # Increased multiplier to account for Python-level filtering (colors, brands, article_types)
+        # With SQL-level seen exclusion, fetch_size no longer needs to compensate
+        # for seen items — every row SQL returns is guaranteed unseen.
+        # Base fetch: always get a healthy batch from the catalog for reranker quality.
         has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types)
-        filter_multiplier = 3 if has_python_filters else 1  # Fetch 3x more if filtering
-        fetch_size = (page_size + db_history_count + 100) * filter_multiplier
-        fetch_size = min(fetch_size, 3000)  # Increased cap for filtering scenarios
+        filter_multiplier = 3 if has_python_filters else 1  # Fetch 3x more if Python filtering
+        base_fetch = max(500, page_size * 10)  # At least 500, or 10x requested page
+        fetch_size = base_fetch * filter_multiplier
+        fetch_size = min(fetch_size, 5000)  # Safety cap
 
-        # Step 5: Get candidates using keyset cursor (or endless if we have exclude_ids)
+        # Step 5: Get candidates using keyset cursor
+        # Seen IDs are excluded at the SQL level for efficiency
         candidates = self.candidate_module.get_candidates_keyset(
             user_state,
             gender,
