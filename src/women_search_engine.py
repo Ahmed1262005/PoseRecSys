@@ -7,16 +7,20 @@ Provides text-to-image search for women's fashion items using:
 """
 import os
 import sys
+import threading
 import numpy as np
 from typing import List, Dict, Optional, Set, Any, Tuple
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+from core.logging import get_logger
+from core.utils import filter_gallery_images
+
+load_dotenv()
+
+logger = get_logger(__name__)
 
 # Import occasion expansion for simple array filtering
 from recs.candidate_selection import expand_occasions
@@ -53,6 +57,7 @@ class WomenSearchEngine:
         # Lazy-load CLIP model (only when search is called)
         self._model = None
         self._processor = None
+        self._model_lock = threading.Lock()
 
         # Lazy-load session service
         self._session_service = None
@@ -90,6 +95,14 @@ class WomenSearchEngine:
     # User Profile Loading
     # =========================================================================
 
+    def load_user_profile(
+        self,
+        user_id: Optional[str] = None,
+        anon_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Public interface. Delegates to _load_user_profile."""
+        return self._load_user_profile(user_id=user_id, anon_id=anon_id)
+
     def _load_user_profile(
         self,
         user_id: Optional[str] = None,
@@ -98,15 +111,19 @@ class WomenSearchEngine:
         """
         Load user's complete onboarding profile from Supabase.
 
-        Returns:
-            Dict with all profile fields organized into:
-            - hard_filters: Applied in SQL (colors_to_avoid, etc.)
-            - soft_prefs: Used for scoring (preferred_fits, etc.)
-            - type_prefs: Article type preferences (top_types, etc.)
-            - taste_vector: 512-dim embedding from style discovery
+        Returns a flat dict whose keys match ``OnboardingProfile`` field names
+        so it can be passed directly to ``ProfileScorer.score_item()``.
+
+        For backward compatibility the legacy nested ``hard_filters``,
+        ``soft_prefs``, ``type_prefs`` and ``taste_vector`` keys are also
+        included at the top level.
         """
+        _EMPTY: Dict[str, Any] = {
+            "hard_filters": {}, "soft_prefs": {}, "type_prefs": {},
+            "taste_vector": None,
+        }
         if not user_id and not anon_id:
-            return {"hard_filters": {}, "soft_prefs": {}, "type_prefs": {}, "taste_vector": None}
+            return _EMPTY
 
         try:
             # Build query based on user_id or anon_id
@@ -121,6 +138,7 @@ class WomenSearchEngine:
                 'occasions',
                 'patterns_liked',
                 'patterns_avoided',
+                'modesty',
                 # Soft preferences
                 'preferred_fits',
                 'preferred_sleeves',
@@ -129,13 +147,24 @@ class WomenSearchEngine:
                 'preferred_rises',
                 'preferred_brands',
                 'style_persona',
+                # Brand behaviour
+                'brand_openness',
                 # Type preferences
                 'top_types',
                 'bottom_types',
                 'dress_types',
                 'outerwear_types',
+                # V3 category-aware mappings
+                'fit_category_mapping',
+                'sleeve_category_mapping',
+                'length_category_mapping',
+                # Price range
+                'global_min_price',
+                'global_max_price',
+                # Identity
+                'birthdate',
                 # Style discovery
-                'taste_vector'
+                'taste_vector',
             )
 
             if user_id:
@@ -146,41 +175,93 @@ class WomenSearchEngine:
             result = query.limit(1).execute()
 
             if not result.data:
-                return {"hard_filters": {}, "soft_prefs": {}, "type_prefs": {}, "taste_vector": None}
+                return _EMPTY
 
             profile = result.data[0]
 
-            return {
-                "hard_filters": {
-                    "categories": profile.get('categories'),
-                    "exclude_colors": profile.get('colors_to_avoid'),
-                    "exclude_materials": profile.get('materials_to_avoid'),
-                    "exclude_brands": profile.get('brands_to_avoid'),
-                    "exclude_styles": profile.get('styles_to_avoid'),
-                    "include_occasions": profile.get('occasions'),
-                    "include_patterns": profile.get('patterns_liked'),
-                    "exclude_patterns": profile.get('patterns_avoided'),
-                },
-                "soft_prefs": {
-                    "preferred_fits": profile.get('preferred_fits') or [],
-                    "preferred_sleeves": profile.get('preferred_sleeves') or [],
-                    "preferred_lengths": profile.get('preferred_lengths') or [],
-                    "preferred_lengths_dresses": profile.get('preferred_lengths_dresses') or [],
-                    "preferred_rises": profile.get('preferred_rises') or [],
-                    "preferred_brands": profile.get('preferred_brands') or [],
-                    "style_persona": profile.get('style_persona') or [],
-                },
-                "type_prefs": {
-                    "top_types": profile.get('top_types') or [],
-                    "bottom_types": profile.get('bottom_types') or [],
-                    "dress_types": profile.get('dress_types') or [],
-                    "outerwear_types": profile.get('outerwear_types') or [],
-                },
-                "taste_vector": profile.get('taste_vector'),
+            # ----------------------------------------------------------
+            # Flat keys — match OnboardingProfile / ProfileScorer fields
+            # ----------------------------------------------------------
+            flat: Dict[str, Any] = {
+                # Brand
+                "preferred_brands": profile.get('preferred_brands') or [],
+                "brand_openness": profile.get('brand_openness'),
+                # Style
+                "style_persona": profile.get('style_persona') or [],
+                # Attribute preferences
+                "preferred_fits": profile.get('preferred_fits') or [],
+                "fit_category_mapping": profile.get('fit_category_mapping') or [],
+                "preferred_sleeves": profile.get('preferred_sleeves') or [],
+                "sleeve_category_mapping": profile.get('sleeve_category_mapping') or [],
+                "preferred_lengths": profile.get('preferred_lengths') or [],
+                "length_category_mapping": profile.get('length_category_mapping') or [],
+                "preferred_lengths_dresses": profile.get('preferred_lengths_dresses') or [],
+                "preferred_necklines": [],  # no dedicated DB column yet
+                "preferred_rises": profile.get('preferred_rises') or [],
+                # Type preferences
+                "top_types": profile.get('top_types') or [],
+                "bottom_types": profile.get('bottom_types') or [],
+                "dress_types": profile.get('dress_types') or [],
+                "outerwear_types": profile.get('outerwear_types') or [],
+                # Patterns
+                "patterns_liked": profile.get('patterns_liked') or [],
+                "patterns_avoided": profile.get('patterns_avoided') or [],
+                # Occasions
+                "occasions": profile.get('occasions') or [],
+                # Avoidances
+                "colors_to_avoid": profile.get('colors_to_avoid') or [],
+                "styles_to_avoid": profile.get('styles_to_avoid') or [],
+                # Coverage exclusion flags — derived from styles_to_avoid
+                # (no dedicated DB columns; ProfileScorer._ProfileFields
+                # also handles styles_to_avoid -> exclusion mapping)
+                "no_crop": False,
+                "no_revealing": False,
+                "no_sleeveless": False,
+                "no_deep_necklines": False,
+                "no_tanks": False,
+                # Price
+                "global_min_price": profile.get('global_min_price'),
+                "global_max_price": profile.get('global_max_price'),
+                # Identity
+                "birthdate": profile.get('birthdate'),
             }
+
+            # ----------------------------------------------------------
+            # Legacy nested keys — backward compatibility for callers
+            # that still read hard_filters / soft_prefs / type_prefs
+            # ----------------------------------------------------------
+            flat["hard_filters"] = {
+                "categories": profile.get('categories'),
+                "exclude_colors": profile.get('colors_to_avoid'),
+                "exclude_materials": profile.get('materials_to_avoid'),
+                "exclude_brands": profile.get('brands_to_avoid'),
+                "exclude_styles": profile.get('styles_to_avoid'),
+                "include_occasions": profile.get('occasions'),
+                "include_patterns": profile.get('patterns_liked'),
+                "exclude_patterns": profile.get('patterns_avoided'),
+            }
+            flat["soft_prefs"] = {
+                "preferred_fits": flat["preferred_fits"],
+                "preferred_sleeves": flat["preferred_sleeves"],
+                "preferred_lengths": flat["preferred_lengths"],
+                "preferred_lengths_dresses": flat["preferred_lengths_dresses"],
+                "preferred_rises": flat["preferred_rises"],
+                "preferred_brands": flat["preferred_brands"],
+                "style_persona": flat["style_persona"],
+                "preferred_necklines": flat["preferred_necklines"],
+            }
+            flat["type_prefs"] = {
+                "top_types": flat["top_types"],
+                "bottom_types": flat["bottom_types"],
+                "dress_types": flat["dress_types"],
+                "outerwear_types": flat["outerwear_types"],
+            }
+            flat["taste_vector"] = profile.get('taste_vector')
+
+            return flat
         except Exception as e:
-            print(f"[WomenSearchEngine] Error loading user profile: {e}")
-            return {"hard_filters": {}, "soft_prefs": {}, "type_prefs": {}, "taste_vector": None}
+            logger.warning("Error loading user profile", error=str(e))
+            return _EMPTY
 
     # =========================================================================
     # Soft Preference Scoring
@@ -263,8 +344,7 @@ class WomenSearchEngine:
                 blocked_count += 1
 
         if verbose and blocked_count > 0:
-            print(f"[WomenSearchEngine] Occasion filter: {len(results)} -> {len(filtered)} results")
-            print(f"  - Blocked {blocked_count} items without matching occasion")
+            logger.debug("Occasion filter applied", before=len(results), after=len(filtered), blocked=blocked_count)
 
         return filtered, {"blocked": blocked_count}
 
@@ -298,19 +378,26 @@ class WomenSearchEngine:
         }
 
     def _load_model(self):
-        """Lazy load FashionCLIP model directly for faster inference."""
+        """Lazy load FashionCLIP model (thread-safe, double-check locking)."""
         if self._model is None:
-            import torch
-            from transformers import CLIPProcessor, CLIPModel
+            with self._model_lock:
+                if self._model is None:
+                    import torch
+                    from transformers import CLIPProcessor, CLIPModel
 
-            self._model = CLIPModel.from_pretrained('patrickjohncyh/fashion-clip')
-            self._processor = CLIPProcessor.from_pretrained('patrickjohncyh/fashion-clip')
+                    logger.info("Loading FashionCLIP model...")
+                    model = CLIPModel.from_pretrained('patrickjohncyh/fashion-clip')
+                    processor = CLIPProcessor.from_pretrained('patrickjohncyh/fashion-clip')
 
-            # Move to GPU if available
-            if torch.cuda.is_available():
-                self._model = self._model.cuda()
+                    # Move to GPU if available
+                    if torch.cuda.is_available():
+                        model = model.cuda()
 
-            self._model.eval()
+                    model.eval()
+                    # Assign last to avoid partial initialization visible to other threads
+                    self._processor = processor
+                    self._model = model
+                    logger.info("FashionCLIP model loaded")
 
     def encode_text(self, query: str) -> np.ndarray:
         """Encode text query to embedding vector."""
@@ -322,6 +409,25 @@ class WomenSearchEngine:
             if torch.cuda.is_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
             emb = self._model.get_text_features(**inputs)
+            # transformers >=5.x: get_text_features returns BaseModelOutputWithPooling
+            # instead of a raw tensor. The correct embedding is in pooler_output
+            # (which is the EOS token projected through text_projection).
+            # NOTE: last_hidden_state[:, 0, :] (CLS token) is NOT the right embedding
+            # -- it produces identical vectors for all queries.
+            if isinstance(emb, torch.Tensor):
+                # transformers <5.x: direct tensor (already projected)
+                pass
+            elif hasattr(emb, 'pooler_output') and emb.pooler_output is not None:
+                # transformers >=5.x: use the pooled + projected output
+                emb = emb.pooler_output
+            elif hasattr(emb, 'text_embeds') and emb.text_embeds is not None:
+                emb = emb.text_embeds
+            else:
+                raise ValueError(
+                    f"Unexpected return type from get_text_features: {type(emb)}. "
+                    f"Available attrs: {[a for a in dir(emb) if not a.startswith('_')]}"
+                )
+            # Normalize
             emb = emb / emb.norm(dim=-1, keepdim=True)
             return emb.cpu().numpy().flatten()
 
@@ -375,7 +481,7 @@ class WomenSearchEngine:
                         "broad_category": row.get('broad_category', ''),
                         "price": float(row.get('price', 0) or 0),
                         "image_url": row.get('primary_image_url', ''),
-                        "gallery_images": row.get('gallery_images', []) or [],
+                        "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
                         "colors": row.get('colors', []) or [],
                         "materials": row.get('materials', []) or [],
                     })
@@ -386,7 +492,7 @@ class WomenSearchEngine:
                 page += 1
 
             except Exception as e:
-                print(f"[WomenSearchEngine] Error fetching page {page}: {e}")
+                logger.warning("Error fetching page", page=page, error=str(e))
                 break
 
         return {
@@ -479,7 +585,7 @@ class WomenSearchEngine:
                     "broad_category": row.get('broad_category', ''),
                     "price": float(row.get('price', 0) or 0),
                     "image_url": row.get('primary_image_url', ''),
-                    "gallery_images": row.get('gallery_images', []) or [],
+                    "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
                     "colors": row.get('colors', []) or [],
                     "materials": row.get('materials', []) or [],
                 })
@@ -504,7 +610,7 @@ class WomenSearchEngine:
             }
 
         except Exception as e:
-            print(f"[WomenSearchEngine] Error in text search: {e}")
+            logger.error("Error in text search", error=str(e))
             return {
                 "query": query,
                 "results": [],
@@ -708,7 +814,7 @@ class WomenSearchEngine:
                     "article_type": row.get('article_type', ''),
                     "price": float(row.get('price', 0) or 0),
                     "image_url": row.get('primary_image_url', ''),
-                    "gallery_images": row.get('gallery_images', []) or [],
+                    "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
                     "colors": row.get('colors', []) or [],
                     "materials": row.get('materials', []) or [],
                     "fit": row.get('fit'),
@@ -751,7 +857,7 @@ class WomenSearchEngine:
                     unique_results, occasions, verbose=True
                 )
                 if pre_filter_count != len(unique_results):
-                    print(f"[WomenSearchEngine] Occasion filter ({occasions}): {pre_filter_count} -> {len(unique_results)}")
+                    logger.debug("Occasion filter in search_with_filters", occasions=occasions, before=pre_filter_count, after=len(unique_results))
 
             # =========================================
             # STEP 9: Paginate
@@ -796,7 +902,7 @@ class WomenSearchEngine:
             }
 
         except Exception as e:
-            print(f"[WomenSearchEngine] Error in filtered search: {e}")
+            logger.error("Error in filtered search", error=str(e))
             import traceback
             traceback.print_exc()
             return {
@@ -876,7 +982,7 @@ class WomenSearchEngine:
                     "broad_category": row.get('broad_category', ''),
                     "price": float(row.get('price', 0) or 0),
                     "image_url": row.get('primary_image_url', ''),
-                    "gallery_images": row.get('gallery_images', []) or [],
+                    "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
                     "colors": row.get('colors', []) or [],
                     "materials": row.get('materials', []) or [],
                 })
@@ -902,7 +1008,7 @@ class WomenSearchEngine:
             }
 
         except Exception as e:
-            print(f"[WomenSearchEngine] Error getting similar products: {e}")
+            logger.error("Error getting similar products", error=str(e))
             return {
                 "source_product_id": product_id,
                 "results": [],
@@ -1145,7 +1251,7 @@ class WomenSearchEngine:
             }
 
         except Exception as e:
-            print(f"[WomenSearchEngine] Error in complete_the_fit: {e}")
+            logger.error("Error in complete_the_fit", error=str(e))
             import traceback
             traceback.print_exc()
             return {
@@ -1189,29 +1295,30 @@ class WomenSearchEngine:
             }
 
 
-# Singleton instance for API use
+# Singleton instance for API use (thread-safe)
 _engine: Optional[WomenSearchEngine] = None
+_engine_lock = threading.Lock()
 
 
 def get_women_search_engine() -> WomenSearchEngine:
-    """Get or create WomenSearchEngine singleton."""
+    """Get or create WomenSearchEngine singleton (thread-safe)."""
     global _engine
     if _engine is None:
-        _engine = WomenSearchEngine()
+        with _engine_lock:
+            if _engine is None:
+                _engine = WomenSearchEngine()
     return _engine
 
 
 if __name__ == "__main__":
-    # Test the search engine
-    print("Loading WomenSearchEngine (Supabase)...")
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
     engine = get_women_search_engine()
 
     stats = engine.get_stats()
-    print(f"\nEngine Stats:")
-    for k, v in stats.items():
-        print(f"  {k}: {v}")
+    logger.info("Engine stats", **stats)
 
-    # Test queries
     test_queries = [
         "red dress",
         "flowy blue dress",
@@ -1220,16 +1327,14 @@ if __name__ == "__main__":
         "casual white top",
     ]
 
-    print("\n" + "="*60)
-    print("Test Queries:")
-    print("="*60)
-
     for query in test_queries:
-        print(f"\nQuery: '{query}'")
+        logger.info(f"Query: '{query}'")
         results = engine.search(query, k=5, gender="female")
         if results:
             for i, r in enumerate(results, 1):
-                print(f"  {i}. {r['name'][:50]}... (sim: {r['similarity']:.3f})")
-                print(f"     Brand: {r['brand']}, Category: {r['category']}, Price: ${r['price']:.2f}")
+                logger.info(
+                    f"  {i}. {r['name'][:50]} (sim: {r['similarity']:.3f}) "
+                    f"Brand: {r['brand']}, ${r['price']:.2f}"
+                )
         else:
-            print("  No results found")
+            logger.info("  No results found")

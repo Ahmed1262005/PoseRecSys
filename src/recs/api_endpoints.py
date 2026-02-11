@@ -19,15 +19,14 @@ New Pipeline Endpoints:
 """
 
 import os
-import sys
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from src.recs.recommendation_service import RecommendationService
-from src.recs.models import (
+from core.auth import require_auth, SupabaseUser
+from core.utils import sanitize_product_images
+from recs.recommendation_service import RecommendationService
+from recs.models import (
     OnboardingProfile,
     TopsPrefs,
     BottomsPrefs,
@@ -45,7 +44,7 @@ from src.recs.models import (
     StyleDiscoverySelection,
     StyleDiscoverySummary,
 )
-from src.recs.pipeline import RecommendationPipeline
+from recs.pipeline import RecommendationPipeline
 
 # Create router
 router = APIRouter(prefix="/api/recs", tags=["Recommendations"])
@@ -128,7 +127,7 @@ class CategoryCount(BaseModel):
 # =============================================================================
 
 # Valid actions for tracking (explicit engagement only)
-VALID_INTERACTION_ACTIONS = {'click', 'hover', 'add_to_wishlist', 'add_to_cart', 'purchase'}
+VALID_INTERACTION_ACTIONS = {'click', 'hover', 'add_to_wishlist', 'add_to_cart', 'purchase', 'skip'}
 
 
 class RecordActionRequest(BaseModel):
@@ -140,6 +139,10 @@ class RecordActionRequest(BaseModel):
     action: str = Field(..., description="Action type: click, hover, add_to_wishlist, add_to_cart, purchase")
     source: Optional[str] = Field("feed", description="Source: feed, search, similar, style-this")
     position: Optional[int] = Field(None, description="Position in feed when interacted")
+    # Session scoring fields (optional, sent by frontend for real-time scoring)
+    brand: Optional[str] = Field(None, description="Product brand (for session scoring)")
+    item_type: Optional[str] = Field(None, description="Product type/category (for session scoring)")
+    attributes: Optional[Dict[str, str]] = Field(None, description="Product attributes for session scoring: {fit, color_family, pattern, ...}")
 
 
 class RecordActionResponse(BaseModel):
@@ -160,6 +163,55 @@ class SyncSessionResponse(BaseModel):
     """Response from syncing session data."""
     status: str
     synced_count: int
+
+
+# =============================================================================
+# Background Task Helpers
+# =============================================================================
+
+
+def _bg_persist_interaction(
+    user_id: str,
+    session_id: str,
+    product_id: str,
+    action: str,
+    source: str,
+    position: Optional[int],
+):
+    """Background task: persist interaction to Supabase (non-blocking)."""
+    try:
+        service = get_service()
+        service.record_user_interaction(
+            anon_id=None,
+            user_id=user_id,
+            session_id=session_id,
+            product_id=product_id,
+            action=action,
+            source=source,
+            position=position,
+        )
+    except Exception as e:
+        print(f"[BG] Failed to persist interaction: {e}")
+
+
+def _bg_persist_seen_ids(
+    user_id: str,
+    session_id: str,
+    seen_ids: List[str],
+):
+    """Background task: persist seen_ids to Supabase for ML training (non-blocking)."""
+    if not seen_ids:
+        return
+    try:
+        service = get_service()
+        service.sync_session_seen_ids(
+            anon_id=None,
+            user_id=user_id,
+            session_id=session_id,
+            seen_ids=seen_ids,
+        )
+    except Exception as e:
+        print(f"[BG] Failed to persist seen_ids: {e}")
 
 
 # =============================================================================
@@ -284,7 +336,8 @@ async def get_similar(
     gender: str = Query("female", description="Gender filter"),
     category: Optional[str] = Query(None, description="Category filter"),
     limit: int = Query(20, ge=1, le=100, description="Number of results"),
-    offset: int = Query(0, ge=0, description="Number of results to skip (for pagination)")
+    offset: int = Query(0, ge=0, description="Number of results to skip (for pagination)"),
+    user: SupabaseUser = Depends(require_auth),
 ):
     """Get similar products with pagination support."""
 
@@ -319,10 +372,10 @@ async def get_similar(
     # Add rank to each result (1-indexed, continuous across pages)
     ranked_results = []
     for i, item in enumerate(results):
-        ranked_results.append({
+        ranked_results.append(sanitize_product_images({
             **item,
             "rank": offset + i + 1
-        })
+        }))
 
     # Check if there are more results
     has_more = len(results) == limit
@@ -1007,15 +1060,15 @@ def transform_frontend_to_profile(request: FullOnboardingRequest, user_key: str)
 @v2_router.post(
     "/onboarding",
     response_model=OnboardingResponse,
-    summary="Save 10-module onboarding profile",
+    summary="Save complete 10-module onboarding profile",
     description="""
-    Save user's complete onboarding profile from all 10 modules.
+    Save user's complete onboarding profile from the 10-module flow.
 
-    **Modules:**
-    1. Core Setup (selectedCategories, sizes, birthdate, colorsToAvoid, materialsToAvoid) - HARD FILTERS
-    2. Tops preferences (topTypes, fits, sleeves, priceComfort)
-    3. Bottoms preferences (bottomTypes, fits, rises, lengths, numericWaist, numericHip, priceComfort)
-    4. Skirts preferences (skirtTypes, lengths, fits, numericWaist, priceComfort)
+    **Modules (all optional except core-setup):**
+    1. Core Setup (sizes, categories, exclusions) - REQUIRED
+    2. Lifestyle (occupation, routines, budget)
+    3. Tops preferences (topTypes, fits, sleeves, necklines, priceComfort)
+    4. Bottoms preferences (bottomTypes, fits, rises, lengths, priceComfort)
     5. Dresses preferences (dressTypes, fits, lengths, sleeves, priceComfort)
     6. One-piece preferences (onePieceTypes, fits, lengths, numericWaist, priceComfort)
     7. Outerwear preferences (outerwearTypes, fits, sleeves, priceComfort)
@@ -1026,15 +1079,13 @@ def transform_frontend_to_profile(request: FullOnboardingRequest, user_key: str)
     The request body should match the exact structure sent by the frontend.
     """
 )
-async def save_onboarding(request: FullOnboardingRequest):
+async def save_onboarding(
+    request: FullOnboardingRequest,
+    user: SupabaseUser = Depends(require_auth)
+):
     """Save 10-module onboarding profile."""
 
-    user_key = request.user_id or request.anon_id
-    if not user_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id/userId or anon_id/anonId must be provided"
-        )
+    user_key = user.id
 
     # Transform frontend structure to internal profile
     profile = transform_frontend_to_profile(request, user_key)
@@ -1151,15 +1202,13 @@ class PartialOnboardingResponse(BaseModel):
     5. Frontend calls `/api/recs/v2/onboarding` with complete 10-module data
     """
 )
-async def save_core_setup(request: PartialOnboardingRequest):
+async def save_core_setup(
+    request: PartialOnboardingRequest,
+    user: SupabaseUser = Depends(require_auth)
+):
     """Save core-setup and return mapped Tinder categories."""
 
-    user_key = request.user_id or request.anon_id
-    if not user_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id/userId or anon_id/anonId must be provided"
-        )
+    user_key = user.id
 
     core = request.core_setup
 
@@ -1225,14 +1274,14 @@ class OnboardingResponseV3(BaseModel):
     - `summary.taste_vector` - sent separately
     """
 )
-async def save_onboarding_v3(request: FullOnboardingRequestV3):
+async def save_onboarding_v3(
+    request: FullOnboardingRequestV3,
+    user: SupabaseUser = Depends(require_auth)
+):
     """Save V3 onboarding profile."""
 
-    if not request.userId:
-        raise HTTPException(
-            status_code=400,
-            detail="userId is required"
-        )
+    # User ID comes from JWT token
+    user_id = user.id
 
     # Transform V3 frontend structure to internal profile
     profile = transform_frontend_to_profile_v3(request)
@@ -1251,7 +1300,7 @@ async def save_onboarding_v3(request: FullOnboardingRequestV3):
 
     return OnboardingResponseV3(
         status=result.get("status", "success"),
-        user_id=request.userId,
+        user_id=user_id,
         categories_selected=profile.categories,
         has_taste_vector=has_taste_vector,
         has_attribute_preferences=has_attribute_prefs,
@@ -1348,8 +1397,8 @@ async def get_category_mapping():
     """
 )
 async def get_pipeline_feed(
-    user_id: Optional[str] = Query(None, description="UUID user ID"),
-    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    background_tasks: BackgroundTasks,
+    user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (returned in response, send back for pagination)"),
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated broad category filter (tops, bottoms, dresses, outerwear)"),
@@ -1376,12 +1425,9 @@ async def get_pipeline_feed(
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
     """Get personalized feed using the full recommendation pipeline with keyset pagination."""
-
-    if not user_id and not anon_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id or anon_id must be provided"
-        )
+    
+    # User ID from JWT auth
+    user_id = user.id
 
     pipeline = get_pipeline()
 
@@ -1457,7 +1503,7 @@ async def get_pipeline_feed(
     # Use keyset pagination internally for O(1) performance
     response = pipeline.get_feed_keyset(
         user_id=user_id,
-        anon_id=anon_id,
+        anon_id=None,  # No anonymous users - auth required
         session_id=session_id,
         gender=gender,
         categories=cat_list,
@@ -1479,8 +1525,20 @@ async def get_pipeline_feed(
         neckline=neckline_list,
         rise=rise_list,
         cursor=cursor,
-        page_size=page_size
+        page_size=page_size,
+        # Context scoring inputs
+        user_metadata=user.user_metadata,
     )
+
+    # Auto-persist seen_ids to Supabase in background (replaces manual /session/sync)
+    shown_ids = [item["product_id"] for item in response.get("results", [])]
+    if shown_ids:
+        background_tasks.add_task(
+            _bg_persist_seen_ids,
+            user_id=user.id,
+            session_id=response.get("session_id", session_id or ""),
+            seen_ids=shown_ids,
+        )
 
     return response
 
@@ -1504,8 +1562,8 @@ async def get_pipeline_feed(
     """
 )
 async def get_sale_items(
-    user_id: Optional[str] = Query(None, description="UUID user ID"),
-    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    background_tasks: BackgroundTasks,
+    user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (returned in response, send back for pagination)"),
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated broad category filter"),
@@ -1524,12 +1582,8 @@ async def get_sale_items(
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
     """Get personalized sale items."""
-
-    if not user_id and not anon_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id or anon_id must be provided"
-        )
+    
+    user_id = user.id
 
     pipeline = get_pipeline()
 
@@ -1545,9 +1599,9 @@ async def get_sale_items(
     include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
     exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
 
-    return pipeline.get_feed_keyset(
+    response = pipeline.get_feed_keyset(
         user_id=user_id,
-        anon_id=anon_id,
+        anon_id=None,
         session_id=session_id,
         gender=gender,
         categories=cat_list,
@@ -1564,8 +1618,21 @@ async def get_sale_items(
         exclude_patterns=exclude_patterns_list,
         cursor=cursor,
         page_size=page_size,
-        on_sale_only=True,  # <-- Only difference from /feed
+        on_sale_only=True,
+        user_metadata=user.user_metadata,
     )
+
+    # Auto-persist seen_ids in background
+    shown_ids = [item["product_id"] for item in response.get("results", [])]
+    if shown_ids:
+        background_tasks.add_task(
+            _bg_persist_seen_ids,
+            user_id=user.id,
+            session_id=response.get("session_id", session_id or ""),
+            seen_ids=shown_ids,
+        )
+
+    return response
 
 
 @v2_router.get(
@@ -1586,8 +1653,8 @@ async def get_sale_items(
     """
 )
 async def get_new_arrivals(
-    user_id: Optional[str] = Query(None, description="UUID user ID"),
-    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    background_tasks: BackgroundTasks,
+    user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (returned in response, send back for pagination)"),
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated broad category filter"),
@@ -1606,12 +1673,8 @@ async def get_new_arrivals(
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
     """Get personalized new arrivals."""
-
-    if not user_id and not anon_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id or anon_id must be provided"
-        )
+    
+    user_id = user.id
 
     pipeline = get_pipeline()
 
@@ -1627,9 +1690,9 @@ async def get_new_arrivals(
     include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
     exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
 
-    return pipeline.get_feed_keyset(
+    response = pipeline.get_feed_keyset(
         user_id=user_id,
-        anon_id=anon_id,
+        anon_id=None,
         session_id=session_id,
         gender=gender,
         categories=cat_list,
@@ -1646,44 +1709,40 @@ async def get_new_arrivals(
         exclude_patterns=exclude_patterns_list,
         cursor=cursor,
         page_size=page_size,
-        new_arrivals_only=True,  # <-- Only difference from /feed
+        new_arrivals_only=True,
+        user_metadata=user.user_metadata,
     )
+
+    # Auto-persist seen_ids in background
+    shown_ids = [item["product_id"] for item in response.get("results", [])]
+    if shown_ids:
+        background_tasks.add_task(
+            _bg_persist_seen_ids,
+            user_id=user.id,
+            session_id=response.get("session_id", session_id or ""),
+            seen_ids=shown_ids,
+        )
+
+    return response
 
 
 @v2_router.get(
     "/feed/endless",
-    summary="Get endless scroll feed with session state",
+    summary="[DEPRECATED] Use GET /feed instead",
     description="""
-    Get personalized recommendations with TRUE endless scroll support.
+    **DEPRECATED** -- Use `GET /api/recs/v2/feed` instead, which provides the same
+    functionality with keyset cursor pagination, 23+ filters, session scoring,
+    and context-aware scoring (age + weather).
 
-    **Key Differences from /feed:**
-    1. Uses session state to track seen items (no duplicates within session)
-    2. Generates FRESH candidates per page (not slicing fixed pool)
-    3. Returns `session_id` for client to persist (in sessionStorage)
-    4. Each page request retrieves NEW candidates from database
+    This endpoint uses offset-based dedup which is O(n) per page.
+    The `/feed` endpoint uses keyset cursors which are O(1).
 
-    **How to Use:**
-    1. First request: Call without session_id (auto-generated and returned)
-    2. Subsequent requests: Include returned session_id to continue session
-    3. New tab/refresh: Omit session_id to start fresh session
-
-    **Session Behavior:**
-    - Sessions last 24 hours
-    - Each page shows items you haven't seen in this session
-    - has_more=true until database is exhausted
-    - Closing browser tab preserves session (if session_id persisted)
-
-    **Example Flow:**
-    1. GET /feed/endless?anon_id=abc123&page_size=50
-       -> Returns 50 items + session_id=sess_xyz123
-    2. GET /feed/endless?anon_id=abc123&session_id=sess_xyz123&page=1
-       -> Returns NEXT 50 items (no duplicates)
-    3. Repeat until has_more=false
-    """
+    Kept for backward compatibility. Will be removed in a future version.
+    """,
+    deprecated=True,
 )
 async def get_endless_feed(
-    user_id: Optional[str] = Query(None, description="UUID user ID"),
-    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (auto-generated if not provided)"),
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated category filter"),
@@ -1691,12 +1750,8 @@ async def get_endless_feed(
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
     """Get endless scroll feed with session state tracking."""
-
-    if not user_id and not anon_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id or anon_id must be provided"
-        )
+    
+    user_id = user.id
 
     pipeline = get_pipeline()
 
@@ -1707,7 +1762,7 @@ async def get_endless_feed(
 
     response = pipeline.get_feed_endless(
         user_id=user_id,
-        anon_id=anon_id,
+        anon_id=None,  # No anonymous users - auth required
         session_id=session_id,
         gender=gender,
         categories=cat_list,
@@ -1754,8 +1809,7 @@ async def get_endless_feed(
     """
 )
 async def get_keyset_feed(
-    user_id: Optional[str] = Query(None, description="UUID user ID"),
-    anon_id: Optional[str] = Query(None, description="Anonymous user ID"),
+    user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (auto-generated if not provided)"),
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated category filter"),
@@ -1763,12 +1817,8 @@ async def get_keyset_feed(
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
     """Get keyset cursor paginated feed."""
-
-    if not user_id and not anon_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either user_id or anon_id must be provided"
-        )
+    
+    user_id = user.id
 
     pipeline = get_pipeline()
 
@@ -1779,12 +1829,13 @@ async def get_keyset_feed(
 
     response = pipeline.get_feed_keyset(
         user_id=user_id,
-        anon_id=anon_id,
+        anon_id=None,  # No anonymous users - auth required
         session_id=session_id,
         gender=gender,
         categories=cat_list,
         cursor=cursor,
-        page_size=page_size
+        page_size=page_size,
+        user_metadata=user.user_metadata,
     )
 
     return response
@@ -1883,21 +1934,30 @@ async def pipeline_health():
     description="""
     Record an explicit user interaction with a product.
 
-    **Valid Actions:**
-    - `click`: User tapped to view product details
-    - `hover`: User swiped through photo gallery
-    - `add_to_wishlist`: User saved/liked the item (strong positive signal)
-    - `add_to_cart`: User added to cart (conversion intent)
-    - `purchase`: User completed purchase (conversion)
+    **Response is instant** (~1ms) — session scoring updates in-memory,
+    Supabase persistence happens in background (non-blocking).
 
-    **Note:** View and skip actions are NOT tracked here - they are implicit
-    from the session seen_ids (tracked via /session/sync endpoint).
+    **Valid Actions:**
+    - `click`: User tapped to view product details (signal: 0.5)
+    - `hover`: User swiped through photo gallery (signal: 0.1)
+    - `add_to_wishlist`: User saved/liked the item (signal: 2.0, strong positive)
+    - `add_to_cart`: User added to cart (signal: 0.8)
+    - `purchase`: User completed purchase (signal: 1.0)
+    - `skip`: User explicitly dismissed (signal: -0.5)
+
+    **Session Scoring:**
+    Send `brand`, `item_type`, and `attributes` to enable multi-dimensional
+    preference learning. The next feed request will reflect these preferences.
 
     Call this endpoint immediately when a user takes an action.
     """
 )
-async def record_action(request: RecordActionRequest):
-    """Record a user interaction."""
+async def record_action(
+    request: RecordActionRequest,
+    background_tasks: BackgroundTasks,
+    user: SupabaseUser = Depends(require_auth),
+):
+    """Record a user interaction (instant response, background persistence)."""
 
     # Validate action type
     if request.action not in VALID_INTERACTION_ACTIONS:
@@ -1906,61 +1966,53 @@ async def record_action(request: RecordActionRequest):
             detail=f"Invalid action '{request.action}'. Must be one of: {VALID_INTERACTION_ACTIONS}"
         )
 
-    # Require user identifier
-    if not request.anon_id and not request.user_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either anon_id or user_id must be provided"
-        )
-
-    service = get_service()
-
+    # Step 1: Update session scores FIRST (instant, in-memory/Redis ~1ms)
     try:
-        result = service.record_user_interaction(
-            anon_id=request.anon_id,
-            user_id=request.user_id,
+        pipeline = get_pipeline()
+        pipeline.update_session_scores_from_action(
             session_id=request.session_id,
-            product_id=request.product_id,
             action=request.action,
-            source=request.source,
-            position=request.position
+            product_id=request.product_id,
+            brand=request.brand or "",
+            item_type=request.item_type or "",
+            attributes=request.attributes or {},
+            source=request.source or "feed",
         )
+    except Exception:
+        pass  # Session scoring failure is non-fatal
 
-        return RecordActionResponse(
-            status="success",
-            interaction_id=result.get("id")
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Step 2: Enqueue Supabase write as background task (non-blocking)
+    background_tasks.add_task(
+        _bg_persist_interaction,
+        user_id=user.id,
+        session_id=request.session_id,
+        product_id=request.product_id,
+        action=request.action,
+        source=request.source or "feed",
+        position=request.position,
+    )
+
+    # Step 3: Return immediately (~1ms total)
+    return RecordActionResponse(status="success", interaction_id=None)
 
 
 @v2_router.post(
     "/session/sync",
     response_model=SyncSessionResponse,
-    summary="Sync session seen_ids for ML training",
+    summary="[DEPRECATED] Sync session seen_ids",
     description="""
-    Sync the list of product IDs shown to the user in this session.
+    **DEPRECATED** -- Seen_ids are now auto-persisted by the server on each
+    feed request via background tasks. This endpoint is no longer needed.
 
-    **Purpose:** This data is used for ML training - products shown but not
-    interacted with become implicit negative samples.
-
-    **When to Call:**
-    - Every N pages (e.g., every 5 pages of scrolling)
-    - On app close/background (window.onbeforeunload)
-    - On session end
-
-    **Not for:** Real-time tracking. Use /feed/action for explicit interactions.
-    """
+    Kept for backward compatibility. Will be removed in a future version.
+    """,
+    deprecated=True,
 )
-async def sync_session(request: SyncSessionRequest):
+async def sync_session(
+    request: SyncSessionRequest,
+    user: SupabaseUser = Depends(require_auth)
+):
     """Sync session seen_ids for training data."""
-
-    # Require user identifier
-    if not request.anon_id and not request.user_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Either anon_id or user_id must be provided"
-        )
 
     if not request.seen_ids:
         return SyncSessionResponse(status="success", synced_count=0)
@@ -1969,8 +2021,8 @@ async def sync_session(request: SyncSessionRequest):
 
     try:
         result = service.sync_session_seen_ids(
-            anon_id=request.anon_id,
-            user_id=request.user_id,
+            anon_id=None,
+            user_id=user.id,
             session_id=request.session_id,
             seen_ids=request.seen_ids
         )
@@ -1984,15 +2036,15 @@ async def sync_session(request: SyncSessionRequest):
 
 
 # =============================================================================
-# Helper to integrate with existing swipe_server
+# Helper to integrate with FastAPI app
 # =============================================================================
 
 def integrate_with_app(app):
     """
-    Integrate these endpoints with an existing FastAPI app.
+    Integrate these endpoints with a FastAPI app.
 
-    Usage in swipe_server.py:
-        from src.recs.api_endpoints import integrate_with_app
+    Usage:
+        from recs.api_endpoints import integrate_with_app
         integrate_with_app(app)
     """
     app.include_router(router)

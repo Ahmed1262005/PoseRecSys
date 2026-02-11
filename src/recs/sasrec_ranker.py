@@ -20,8 +20,6 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from recs.models import (
     UserState,
     UserStateType,
@@ -286,14 +284,19 @@ class SASRecRanker:
             sasrec_scores = {}
             weights = self.config.COLD_WEIGHTS
 
-        # Normalize all scores to [0, 1]
+        # Normalize all scores to [0, 1] using fixed global ranges
+        # This ensures scores are comparable across pages (no per-batch min-max drift)
+        #
+        # embedding_score: SQL exploration_score in [0, 1], or similarity with brand boost up to ~1.5
+        # preference_score: sum of soft weights, typically [0, ~2.75]
+        # sasrec_score: model output, typically [0, 1]
         emb_scores = [c.embedding_score for c in candidates]
         pref_scores = [c.preference_score for c in candidates]
         sas_scores = [sasrec_scores.get(c.item_id, 0) for c in candidates] if sasrec_scores else [0] * len(candidates)
 
-        emb_norm = self._normalize(emb_scores)
-        pref_norm = self._normalize(pref_scores)
-        sas_norm = self._normalize(sas_scores) if sasrec_scores else [0] * len(candidates)
+        emb_norm = self._normalize(emb_scores, global_min=0.0, global_max=1.5)
+        pref_norm = self._normalize(pref_scores, global_min=0.0, global_max=3.0)
+        sas_norm = self._normalize(sas_scores, global_min=0.0, global_max=1.0) if sasrec_scores else [0] * len(candidates)
 
         # Compute final scores
         for i, c in enumerate(candidates):
@@ -556,12 +559,17 @@ class SASRecRanker:
     # Score Normalization
     # =========================================================
 
-    def _normalize(self, scores: List[float]) -> List[float]:
+    def _normalize(self, scores: List[float], global_min: float = None, global_max: float = None) -> List[float]:
         """
-        Normalize scores to [0, 1] range using min-max normalization.
+        Normalize scores to [0, 1] range.
+
+        Uses fixed global range when provided (for cross-page score stability),
+        otherwise falls back to per-batch min-max normalization.
 
         Args:
             scores: List of raw scores
+            global_min: Fixed minimum for normalization (optional)
+            global_max: Fixed maximum for normalization (optional)
 
         Returns:
             List of normalized scores in [0, 1]
@@ -570,6 +578,16 @@ class SASRecRanker:
             return scores
 
         arr = np.array(scores)
+
+        if global_min is not None and global_max is not None:
+            # Fixed-range normalization for cross-page stability
+            range_val = global_max - global_min
+            if range_val < 1e-8:
+                return [0.5] * len(scores)
+            normalized = np.clip((arr - global_min) / range_val, 0.0, 1.0)
+            return normalized.tolist()
+
+        # Per-batch min-max fallback
         min_val = np.min(arr)
         max_val = np.max(arr)
 

@@ -30,9 +30,11 @@ def test_recbole_import():
 
 
 def test_fashionclip_import():
-    """Test FashionCLIP is installed"""
-    from fashion_clip.fashion_clip import FashionCLIP
-    assert FashionCLIP is not None
+    """Test FashionCLIP is available via transformers (used by women_search_engine.py)"""
+    from transformers import CLIPProcessor, CLIPModel
+    assert CLIPProcessor is not None
+    assert CLIPModel is not None
+    # The codebase loads 'patrickjohncyh/fashion-clip' via transformers directly
 
 
 def test_faiss_import():

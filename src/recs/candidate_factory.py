@@ -64,6 +64,13 @@ def candidate_from_dict(data: Dict[str, Any]) -> Candidate:
         color_family=data.get('color_family'),
         seasons=data.get('seasons') or [],
 
+        # Coverage & body type (from Gemini Vision)
+        coverage_level=data.get('coverage_level'),
+        skin_exposure=data.get('skin_exposure'),
+        coverage_details=data.get('coverage_details') or [],
+        model_body_type=data.get('model_body_type'),
+        model_size_estimate=data.get('model_size_estimate'),
+
         # Source tracking
         source=data.get('source', 'search'),
     )
@@ -118,6 +125,13 @@ def candidate_to_dict(candidate: Candidate) -> Dict[str, Any]:
         "formality": candidate.formality,
         "color_family": candidate.color_family,
         "seasons": candidate.seasons,
+
+        # Coverage & body type
+        "coverage_level": candidate.coverage_level,
+        "skin_exposure": candidate.skin_exposure,
+        "coverage_details": candidate.coverage_details,
+        "model_body_type": candidate.model_body_type,
+        "model_size_estimate": candidate.model_size_estimate,
 
         # Source tracking
         "source": candidate.source,

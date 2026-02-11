@@ -551,6 +551,28 @@ class Candidate(BaseModel):
         description="Seasons from product_attributes: ['Spring', 'Summer', 'Fall', 'Winter']"
     )
 
+    # Coverage & body type (from Gemini Vision analysis)
+    coverage_level: Optional[str] = Field(
+        default=None,
+        description="Overall garment coverage: Full, Moderate, Partial, Minimal, Revealing"
+    )
+    skin_exposure: Optional[str] = Field(
+        default=None,
+        description="Amount of skin visible: Low, Medium, High"
+    )
+    coverage_details: List[str] = Field(
+        default_factory=list,
+        description="Specific exposure features: backless, sheer_panels, high_slit, cutouts, midriff_exposed, etc."
+    )
+    model_body_type: Optional[str] = Field(
+        default=None,
+        description="Model body type: Petite, Slim, Regular, Athletic, Curvy, Plus Size, Unknown"
+    )
+    model_size_estimate: Optional[str] = Field(
+        default=None,
+        description="Estimated model clothing size range: XS-S, S-M, M-L, L-XL, XL-2XL, 2XL+"
+    )
+
     # Source tracking
     source: str = Field(
         default="taste_vector",
@@ -574,6 +596,37 @@ class Candidate(BaseModel):
         default=False,
         description="True if item was added in the last 7 days"
     )
+
+    def to_scoring_dict(self) -> dict:
+        """Convert to plain dict for the shared scoring module (src/scoring/)."""
+        return {
+            "product_id": self.item_id,
+            "article_type": self.article_type or "",
+            "broad_category": self.broad_category or "",
+            "category": self.category or "",
+            "brand": self.brand or "",
+            "price": self.price,
+            "style_tags": self.style_tags or [],
+            "occasions": self.occasions or [],
+            "pattern": self.pattern,
+            "formality": self.formality,
+            "fit_type": self.fit,
+            "neckline": self.neckline,
+            "sleeve_type": self.sleeve,
+            "length": self.length,
+            "rise": getattr(self, "rise", None),
+            "color_family": self.color_family,
+            "primary_color": None,  # Not stored on Candidate (fetched by enrichment if needed)
+            "seasons": self.seasons or [],
+            "materials": self.materials or [],
+            "name": self.name or "",
+            "image_url": self.image_url or "",
+            "coverage_level": self.coverage_level,
+            "skin_exposure": self.skin_exposure,
+            "coverage_details": self.coverage_details or [],
+            "model_body_type": self.model_body_type,
+            "model_size_estimate": self.model_size_estimate,
+        }
 
 
 # =============================================================================

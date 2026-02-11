@@ -2,50 +2,83 @@
 
 ## Project Overview
 
-A production fashion recommendation system with style preference learning and personalized recommendations.
+A production fashion recommendation system with style preference learning, personalized recommendations, and hybrid search.
 
 **Core Features:**
 - **Style Learning**: Tinder-style 4-choice interface to learn user preferences
 - **Personalized Feed**: Recommendations based on learned taste vectors
+- **Hybrid Search**: Algolia (lexical) + FashionCLIP (semantic) with RRF merging
 - **Supabase Integration**: pgvector for similarity search, persistent storage
+- **JWT Authentication**: All endpoints require Supabase JWT auth
 
 ---
 
 ## Project Structure
 
 ```
-outfitTransformer/
-├── src/
-│   ├── swipe_server.py                    # Main FastAPI server
-│   ├── recs/                              # Recommendation API (Supabase)
-│   │   ├── api_endpoints.py               # FastAPI routes (/api/recs/v2/*)
-│   │   ├── candidate_selection.py         # Candidate retrieval from pgvector
-│   │   ├── candidate_factory.py           # Candidate generation
-│   │   ├── models.py                      # Pydantic models
-│   │   ├── pipeline.py                    # Main recommendation pipeline
-│   │   ├── recommendation_service.py      # Service layer
-│   │   ├── sasrec_ranker.py               # SASRec model ranking
-│   │   ├── session_state.py               # Session management
-│   │   ├── style_classifier.py            # Style classification
-│   │   ├── occasion_gate.py               # Occasion filtering
-│   │   └── filter_utils.py                # Filter utilities
-│   │
-│   ├── engines/                           # UI Engines for style discovery
-│   │   ├── swipe_engine.py                # Base Tinder-style engine
-│   │   ├── four_choice_engine.py          # Four-choice selection
-│   │   ├── ranking_engine.py              # Drag-to-rank interaction
-│   │   ├── attribute_test_engine.py       # Attribute preference testing
-│   │   └── predictive_four_engine.py      # Predictive four-choice
-│   │
-│   ├── women_search_engine.py             # Women's fashion search (Supabase)
-│   ├── outrove_filter.py                  # Onboarding preference filtering
-│   ├── gender_config.py                   # Gender-specific configuration
-│   └── tests/                             # Test suite
+src/
+├── api/
+│   ├── app.py                          # FastAPI application factory
+│   └── routes/
+│       ├── health.py                   # Health check endpoints
+│       ├── women.py                    # Women's fashion style learning
+│       ├── unified.py                  # Gender-aware style learning
+│       └── search.py                   # Hybrid search endpoints
 │
-├── sql/                                   # Database migrations
-├── tests/                                 # Pytest test suite
-├── docs/                                  # API documentation
-└── config/                                # Configuration files
+├── config/
+│   ├── settings.py                     # App settings (env vars)
+│   ├── database.py                     # Supabase client setup
+│   └── constants.py                    # Shared constants
+│
+├── core/
+│   ├── auth.py                         # JWT authentication (Supabase)
+│   ├── logging.py                      # Structured logging
+│   ├── middleware.py                    # Request tracing middleware
+│   └── utils.py                        # Utilities (convert_numpy, etc.)
+│
+├── engines/
+│   ├── factory.py                      # Engine factory (get_engine, get_search_engine)
+│   ├── swipe_engine.py                 # Base Tinder-style engine
+│   └── predictive_four_engine.py       # Predictive four-choice with learning
+│
+├── search/                             # Hybrid search module
+│   ├── __init__.py                     # Module exports
+│   ├── algolia_config.py              # Index settings, 30 synonyms, record mapping
+│   ├── algolia_client.py              # Algolia v4 SearchClientSync wrapper (singleton)
+│   ├── models.py                      # Pydantic request/response models (23 filters)
+│   ├── query_classifier.py            # Intent classification (exact/specific/vague)
+│   ├── hybrid_search.py               # Main service: Algolia + FashionCLIP + RRF merge
+│   ├── reranker.py                    # Session-aware reranking with dedup & diversity
+│   ├── autocomplete.py                # Product + brand autocomplete
+│   └── analytics.py                   # Search event tracking to Supabase
+│
+├── recs/                               # Recommendation pipeline
+│   ├── api_endpoints.py                # FastAPI routes (/api/recs/*)
+│   ├── candidate_selection.py          # Candidate retrieval from pgvector
+│   ├── candidate_factory.py            # Candidate generation
+│   ├── feasibility_filter.py           # Feasibility filtering
+│   ├── filter_utils.py                 # Filter utilities
+│   ├── models.py                       # Pydantic models
+│   ├── pipeline.py                     # Main recommendation pipeline
+│   ├── recommendation_service.py       # Legacy recommendation service
+│   ├── sasrec_ranker.py                # SASRec model ranking
+│   └── session_state.py                # Feed session management
+│
+├── services/
+│   └── session_manager.py              # Style learning session state
+│
+├── gender_config.py                    # Gender-specific configuration
+└── women_search_engine.py              # Women's fashion search (Supabase + FashionCLIP)
+
+scripts/
+├── index_to_algolia.py                 # Bulk indexing from Supabase -> Algolia
+└── test_search_gradio.py               # Gradio test UI (5 tabs, 23 filters)
+
+sql/                                    # Database migrations
+tests/                                  # Pytest test suite (144 unit tests passing)
+├── unit/                               # Unit tests
+└── integration/                        # Integration tests (need running server)
+docs/                                   # API documentation
 ```
 
 ---
@@ -55,49 +88,146 @@ outfitTransformer/
 ### Start Server
 
 ```bash
-cd /home/ubuntu/recSys/outfitTransformer/src
-python3 -m uvicorn swipe_server:app --host 0.0.0.0 --port 8000
+cd /mnt/d/ecommerce/recommendationSystem
+source .venv/bin/activate
+PYTHONPATH=src uvicorn api.app:app --host 0.0.0.0 --port 8000
 ```
 
 **Production:**
 ```bash
-uvicorn swipe_server:app --host 0.0.0.0 --port 8000 --workers 4
+PYTHONPATH=src uvicorn api.app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
+
+**Gradio Test UI:**
+```bash
+PYTHONPATH=src python scripts/test_search_gradio.py
+# -> http://localhost:7860
+```
+
+---
+
+## Authentication
+
+All endpoints (except health checks and public info) require JWT authentication.
+
+**Header:** `Authorization: Bearer <supabase_jwt_token>`
+
+Public endpoints (no auth required):
+- `/health`, `/ready`, `/live`, `/health/detailed`
+- `/api/recs/v2/info`, `/api/recs/v2/health`
+- `/api/recs/v2/categories/mapping`
+- `/api/search/health`
 
 ---
 
 ## API Endpoints
 
+### Health Checks
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Basic health check |
+| `/health/detailed` | GET | No | Detailed health with dependency status |
+| `/ready` | GET | No | Readiness probe |
+| `/live` | GET | No | Liveness probe |
+
+### Hybrid Search
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/search/hybrid` | POST | Yes | Hybrid search (Algolia + FashionCLIP) |
+| `/api/search/autocomplete` | GET | Yes | Product + brand autocomplete |
+| `/api/search/click` | POST | Yes | Track click event |
+| `/api/search/conversion` | POST | Yes | Track conversion event |
+| `/api/search/health` | GET | No | Search module health check |
+
 ### Women's Fashion Style Learning
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/women/options` | GET | Get available categories and attributes |
-| `/api/women/session/start` | POST | Start a new style learning session |
-| `/api/women/session/choose` | POST | Record user's choice (1 of 4) |
-| `/api/women/session/skip` | POST | Skip all 4 items |
-| `/api/women/session/{user_id}/summary` | GET | Get learned preferences |
-| `/api/women/feed/{user_id}` | GET | Get personalized feed |
-| `/api/women/search` | POST | Search women's fashion |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/women/session/start` | POST | Yes | Start a new style learning session |
+| `/api/women/session/choose` | POST | Yes | Record user's choice (1 of 4) |
+| `/api/women/session/skip` | POST | Yes | Skip all 4 items |
+| `/api/women/session/summary` | GET | Yes | Get learned preferences |
+| `/api/women/feed` | GET | Yes | Get personalized feed |
+| `/api/women/search` | POST | Yes | Search women's fashion |
+
+### Unified Gender-Aware Style Learning
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/unified/four/start` | POST | Yes | Start a gender-aware session |
+| `/api/unified/four/choose` | POST | Yes | Record choice |
+| `/api/unified/four/skip` | POST | Yes | Skip all 4 items |
+| `/api/unified/four/summary/{gender}` | GET | Yes | Get session summary |
 
 ### Recommendation Pipeline (v2)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/recs/v2/onboarding` | POST | Save 9-module onboarding profile |
-| `/api/recs/v2/feed` | GET | Get feed using full pipeline |
-| `/api/recs/v2/info` | GET | Get pipeline configuration info |
-| `/api/recs/v2/action` | POST | Record user interaction |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/recs/v2/onboarding` | POST | Yes | Save onboarding profile |
+| `/api/recs/v2/onboarding/core-setup` | POST | Yes | Save core-setup, get Tinder categories |
+| `/api/recs/v2/onboarding/v3` | POST | Yes | Save V3 onboarding profile |
+| `/api/recs/v2/feed` | GET | Yes | Get feed using full pipeline |
+| `/api/recs/v2/sale` | GET | Yes | Get sale items feed |
+| `/api/recs/v2/new-arrivals` | GET | Yes | Get new arrivals feed |
+| `/api/recs/v2/feed/endless` | GET | Yes | Endless scroll feed |
+| `/api/recs/v2/feed/keyset` | GET | Yes | Keyset pagination feed |
+| `/api/recs/v2/feed/action` | POST | Yes | Record user interaction |
+| `/api/recs/v2/session/sync` | POST | Yes | Sync session seen_ids |
+| `/api/recs/v2/feed/session/{session_id}` | GET | Yes | Get session info |
+| `/api/recs/v2/feed/session/{session_id}` | DELETE | Yes | Delete session |
+| `/api/recs/v2/info` | GET | No | Pipeline configuration info |
+| `/api/recs/v2/health` | GET | No | Pipeline health check |
+| `/api/recs/v2/categories/mapping` | GET | No | Category mappings |
 
 ### Legacy Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/recs/save-preferences` | POST | Save Tinder test results |
-| `/api/recs/feed/{user_id}` | GET | Get personalized feed |
-| `/api/recs/similar/{product_id}` | GET | Get similar products |
-| `/api/recs/trending` | GET | Get trending products |
-| `/api/recs/categories` | GET | Get product categories |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/recs/save-preferences` | POST | No | Save Tinder test results |
+| `/api/recs/feed/{user_id}` | GET | No | Get personalized feed |
+| `/api/recs/similar/{product_id}` | GET | Yes | Get similar products |
+| `/api/recs/trending` | GET | No | Get trending products |
+| `/api/recs/categories` | GET | No | Get product categories |
+| `/api/recs/product/{product_id}` | GET | No | Get product details |
+| `/api/recs/health` | GET | No | Legacy health check |
+
+---
+
+## Hybrid Search Architecture
+
+### Pipeline Flow
+1. **Query Classification** - Classify intent as EXACT (brand), SPECIFIC (category+filters), or VAGUE
+2. **Algolia Search** - Lexical/keyword search with filters and facets (19 facet fields)
+3. **FashionCLIP Semantic Search** - Visual/semantic similarity via pgvector embeddings
+4. **RRF Merge** - Reciprocal Rank Fusion combining both result sets
+5. **Post-Filtering** - Strict attribute filtering on semantic results (None = excluded)
+6. **Enrichment** - Batch-fetch Gemini attributes from Algolia for semantic results
+7. **Reranking** - Session dedup, near-duplicate removal, profile boosts, brand diversity
+8. **Facets** - Return filterable facet counts (>1 count, excludes null/N/A, 2+ distinct values)
+
+### Search Filters (23 total)
+Query, page, per_page, brands, exclude_brands, categories, colors, min_price, max_price,
+patterns, occasions, styles, fit_types, necklines, sleeve_types, materials, lengths,
+age_groups, aesthetics, body_types, versatility_scores, care_instructions, sustainability_ratings
+
+### Query Classifier Intent Rules
+- **EXACT**: Pure brand query (e.g., "Ba&sh", "Boohoo")
+- **SPECIFIC**: Category keyword present (e.g., "office dress", "black tops")
+- **VAGUE**: No category keywords, possibly just mood/occasion words
+
+### Algolia v4 API Notes (CRITICAL)
+- `SearchClientSync(app_id, api_key)` -- NOT `SearchClient.create()`
+- No `init_index()` -- all methods take `index_name` as first param
+- `search_single_index(index_name, search_params={...})` -- returns pydantic model, use `.to_dict()`
+- `get_objects(get_objects_params={"requests": [{"objectID": id, "indexName": name}, ...]})` -- batch fetch
+
+### Reranker (Current State)
+1. Session dedup (remove seen_ids)
+2. Near-duplicate removal (size-variant name normalization, sister-brand mapping, same-image detection)
+3. Profile-based soft scoring (10 boost types + 3 penalty types, capped at +/-0.15)
+4. Brand diversity cap (max 4 per brand)
 
 ---
 
@@ -134,6 +264,24 @@ uvicorn swipe_server:app --host 0.0.0.0 --port 8000 --workers 4
 
 ---
 
+## Database Inventory
+
+```
+products table total:       118,792
+products (in_stock):         96,558
+image_embeddings rows:      170,174  (multiple per product, pgvector)
+product_attributes (Gemini): 115,874
+Algolia index records:       94,000  (full coverage of in-stock products)
+Distinct brands:             131
+Top brands: Boohoo (20K), Missguided (9K), Forever 21 (7K), Princess Polly (7K)
+```
+
+- pgvector RPC `text_search_products` uses `DISTINCT ON (p.id)` to deduplicate multi-image products
+- Embedding table: `image_embeddings` with `sku_id` FK to `products.id`
+- Gemini attributes table: `product_attributes` with `sku_id` FK to `products.id`
+
+---
+
 ## Dependencies
 
 ```
@@ -144,18 +292,32 @@ uvicorn[standard]
 # Database
 supabase
 
+# ML
+recbole
+faiss-cpu
+transformers
+
+# Search
+algoliasearch>=4.36.0
+
 # Data Processing
-pandas
-numpy
+numpy<2.0
 pillow
+
+# Auth
+PyJWT
 
 # Testing
 pytest
 pytest-asyncio
 httpx
 
+# UI
+gradio>=6.5.1
+
 # Utilities
 pydantic
+python-dotenv
 ```
 
 Install:
@@ -169,14 +331,22 @@ pip install -r requirements.txt
 
 Run all tests:
 ```bash
-pytest tests/ -v
-pytest src/recs/test_preference_weighting.py -v
-pytest src/tests/ -v
+PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-Skip slow tests:
+Run unit tests only (144 passing):
 ```bash
-pytest tests/ -v -m "not slow"
+PYTHONPATH=src python -m pytest tests/unit/ -v
+```
+
+Run search tests:
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_search.py -v
+```
+
+Run integration tests (requires running server):
+```bash
+TEST_SERVER_URL=http://localhost:8000 PYTHONPATH=src python -m pytest tests/integration/ -v
 ```
 
 ---
@@ -184,15 +354,55 @@ pytest tests/ -v -m "not slow"
 ## Environment Variables
 
 ```bash
-# API
-export HOST=0.0.0.0
-export PORT=8000
-export WORKERS=4
-
 # Supabase
-export SUPABASE_URL=your_supabase_url
-export SUPABASE_KEY=your_supabase_key
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_key
+SUPABASE_JWT_SECRET=your_jwt_secret
+
+# Algolia
+ALGOLIA_APP_ID=your_algolia_app_id
+ALGOLIA_SEARCH_KEY=your_algolia_search_key
+ALGOLIA_WRITE_KEY=your_algolia_write_key
+ALGOLIA_INDEX_NAME=products
+
+# API (optional)
+HOST=0.0.0.0
+PORT=8000
+WORKERS=4
 ```
+
+---
+
+## Development Session History
+
+### Phase 1: Core Search Module (Complete)
+Built entire `src/search/` module from scratch:
+- Algolia v4 client with singleton pattern, batch `get_objects()`, facets
+- Hybrid search service (Algolia + FashionCLIP + RRF merge)
+- Query classifier with intent detection and brand extraction
+- 23-filter Pydantic models with price validation
+- Session-aware reranker with dedup and brand diversity
+- Autocomplete (products first, then brands)
+- Analytics tracking (queries, clicks, conversions) to Supabase
+- FastAPI routes for all search endpoints
+- Bulk indexing script (Supabase -> Algolia)
+- Gradio test UI with 5 tabs
+
+### Phase 2: Critical Bug Fixes (Complete)
+1. **FashionCLIP encode_text constant vector** - transformers 5.x returns `BaseModelOutputWithPooling`; fixed to use `pooler_output` instead of CLS token
+2. **Query classifier occasion+category -> VAGUE** - reordered intent logic: category keywords checked before vague
+3. **Semantic results missing Gemini attributes** - added batch enrichment via `AlgoliaClient.get_objects()`
+4. **Strict post-filtering** - None values now excluded (not passed through); all 23 filter types enforced
+5. **Near-duplicate removal** - size-variant normalization, sister-brand mapping, same-image detection
+6. **Brand search special characters** - `extract_brand()` + `html.unescape()` for `&amp;` encoding
+7. **Algolia re-index** - 85,558 of 96,558 in-stock products indexed
+8. **Faceted search** - 19 facet fields, filtered to count>1, excludes null/N/A
+
+### Phase 3: Gradio Test UI Enhancement (Complete)
+5 tabs: Hybrid Search (all 23 filters), Compare Queries, Autocomplete, Click Analytics, Quick Tests (28 automated)
+
+### Next: Reranker Overhaul (Pending)
+Discussion started on rebuilding reranker with more capabilities.
 
 ---
 

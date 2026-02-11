@@ -28,6 +28,12 @@ pytest
 pytest-asyncio
 httpx
 
+# Search
+algoliasearch>=4.0.0
+
+# Session storage
+redis>=5.0.0
+
 # Utilities
 pyyaml
 scikit-learn

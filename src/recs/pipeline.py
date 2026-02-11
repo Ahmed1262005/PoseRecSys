@@ -22,8 +22,6 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from recs.models import (
     UserState,
     UserStateType,
@@ -44,6 +42,16 @@ from recs.filter_utils import (
     get_diversity_limit,
     DiversityConfig,
 )
+from recs.session_scoring import (
+    SessionScoringEngine,
+    SessionScores,
+    get_session_scoring_engine,
+)
+from recs.feed_reranker import (
+    GreedyConstrainedReranker,
+    get_feed_reranker,
+)
+from scoring import ContextScorer, ContextResolver, UserContext
 
 
 # =============================================================================
@@ -109,6 +117,27 @@ class RecommendationPipeline:
         # Initialize session state service for endless scroll
         self.session_service = SessionStateService(backend="auto")
         print("[RecommendationPipeline] SessionStateService initialized")
+
+        # Initialize session scoring engine + feed reranker
+        self.scoring_engine = get_session_scoring_engine()
+        self.feed_reranker = get_feed_reranker()
+        print("[RecommendationPipeline] SessionScoringEngine + FeedReranker initialized")
+
+        # Initialize scoring backend (Redis if REDIS_URL set, else in-memory)
+        # + L1 process-local cache for fast repeated reads
+        self._scoring_backend = self._init_scoring_backend()
+        self._scores_l1_cache: Dict[str, SessionScores] = {}
+        self._SCORES_L1_MAX = 200
+        print("[RecommendationPipeline] ScoringBackend initialized")
+
+        # Initialize context-aware scoring (age affinity + weather/season)
+        from config.settings import get_settings
+        settings = get_settings()
+        self.context_scorer = ContextScorer()
+        self.context_resolver = ContextResolver(
+            weather_api_key=settings.openweather_api_key,
+        )
+        print("[RecommendationPipeline] ContextScorer + ContextResolver initialized")
 
         print("[RecommendationPipeline] Ready")
 
@@ -178,7 +207,7 @@ class RecommendationPipeline:
         #     strategy = "seed_vector"
         # else:
         #     strategy = "exploration"
-        strategy = "exploration"
+        strategy = "session_aware" if session_scores.action_count > 0 else "exploration"
 
         # Convert to response
         results = []
@@ -203,7 +232,7 @@ class RecommendationPipeline:
 
         metadata = {
             "candidates_retrieved": len(candidates),
-            "candidates_after_diversity": len(diverse_candidates),
+            "candidates_after_scoring": len(ranked_candidates),
             "sasrec_available": self.ranker.model is not None,
             "seed_vector_available": user_state.taste_vector is not None,
             "has_onboarding": user_state.onboarding_profile is not None,
@@ -278,7 +307,7 @@ class RecommendationPipeline:
                 user_state.onboarding_profile.categories = categories
             else:
                 # Create minimal onboarding profile with just categories
-                from src.recs.models import OnboardingProfile
+                from recs.models import OnboardingProfile
                 user_state.onboarding_profile = OnboardingProfile(
                     user_id=user_state.user_id,
                     categories=categories
@@ -367,7 +396,7 @@ class RecommendationPipeline:
             },
             "metadata": {
                 "candidates_retrieved": len(candidates),
-                "candidates_after_diversity": len(diverse_candidates),
+                "candidates_after_scoring": len(ranked_candidates),
                 "sasrec_available": self.ranker.model is not None,
                 "seed_vector_available": user_state.taste_vector is not None,
                 "has_onboarding": user_state.onboarding_profile is not None,
@@ -411,7 +440,9 @@ class RecommendationPipeline:
         # NEW: Sale/New arrivals filters
         on_sale_only: bool = False,
         new_arrivals_only: bool = False,
-        new_arrivals_days: int = 7
+        new_arrivals_days: int = 7,
+        # Context scoring inputs
+        user_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Generate feed using keyset cursor for O(1) pagination.
@@ -480,7 +511,7 @@ class RecommendationPipeline:
             if user_state.onboarding_profile:
                 user_state.onboarding_profile.categories = categories
             else:
-                from src.recs.models import OnboardingProfile
+                from recs.models import OnboardingProfile
                 user_state.onboarding_profile = OnboardingProfile(
                     user_id=user_state.user_id,
                     categories=categories
@@ -495,7 +526,7 @@ class RecommendationPipeline:
         ])
         if has_any_filter:
             if not user_state.onboarding_profile:
-                from src.recs.models import OnboardingProfile
+                from recs.models import OnboardingProfile
                 user_state.onboarding_profile = OnboardingProfile(
                     user_id=user_state.user_id
                 )
@@ -576,6 +607,44 @@ class RecommendationPipeline:
             new_arrivals_days=new_arrivals_days
         )
 
+        # Step 5a: Session-Aware Retrieval (Contextual Recall)
+        # If the user has live session signals (from searches/clicks),
+        # inject additional candidates matching those signals.
+        # This bridges session scoring (ranking) with candidate retrieval (recall).
+        session_intent_count = 0
+        session_scores_for_recall = self._get_or_create_session_scores(
+            session_id, user_state
+        ) if session_id else None
+
+        if session_scores_for_recall and session_scores_for_recall.action_count > 0:
+            try:
+                from recs.session_scoring import extract_intent_filters
+                intent_filters = extract_intent_filters(session_scores_for_recall)
+
+                if intent_filters["has_intent"]:
+                    existing_ids = {c.item_id for c in candidates}
+                    intent_candidates = self._retrieve_session_intent_candidates(
+                        user_state=user_state,
+                        gender=gender,
+                        intent_brands=intent_filters["brands"],
+                        intent_types=intent_filters["types"],
+                        exclude_ids=existing_ids | db_seen_ids,
+                        limit=100,
+                    )
+                    # Merge: add intent candidates not already in pool
+                    for c in intent_candidates:
+                        if c.item_id not in existing_ids:
+                            c.source = "session_intent"
+                            candidates.append(c)
+                            existing_ids.add(c.item_id)
+                            session_intent_count += 1
+
+                    if session_intent_count > 0:
+                        print(f"[Pipeline] Session-intent recall: +{session_intent_count} candidates "
+                              f"(brands={intent_filters['brands']}, types={intent_filters['types']})")
+            except Exception as e:
+                print(f"[Pipeline] Session-intent recall skipped (non-fatal): {e}")
+
         # Step 5b: Apply Python-level hard filters (colors, brands, article_types)
         # These are more reliable than SQL-level filtering
         pre_filter_count = len(candidates)
@@ -635,23 +704,76 @@ class RecommendationPipeline:
             if pre_occasion_count != post_occasion_count:
                 print(f"[Pipeline] Occasion filter ({include_occasions}): {pre_occasion_count} -> {post_occasion_count} candidates")
 
-        # Step 6: Rank candidates (lightweight re-scoring)
+        # Step 6: Rank candidates (SASRec + embedding scoring)
         ranked_candidates = self.ranker.rank_candidates(user_state, candidates)
 
-        # Step 7: Apply diversity constraints
-        diverse_candidates = self._apply_diversity(ranked_candidates, user_state)
+        # Step 6b: Session-aware scoring
+        # Load or initialize session scores for this user
+        session_scores = self._get_or_create_session_scores(
+            session_id, user_state
+        )
+        # Apply session scoring on top of existing scores
+        ranked_candidates = self.scoring_engine.score_candidates(
+            session_scores, ranked_candidates
+        )
 
-        # Step 8: Get seen items and filter duplicates (session + DB history)
-        # Load from session (current page views)
+        # Step 6c: Context-aware scoring (age affinity + weather/season)
+        context_scoring_meta = {}
+        try:
+            birthdate = None
+            profile_dict = None
+            if user_state.onboarding_profile:
+                birthdate = user_state.onboarding_profile.birthdate
+                # Build profile dict for coverage prefs extraction
+                profile_dict = {}
+                profile = user_state.onboarding_profile
+                for flag in ("no_sleeveless", "no_tanks", "no_crop", "no_athletic", "no_revealing"):
+                    profile_dict[flag] = getattr(profile, flag, False)
+                profile_dict["styles_to_avoid"] = getattr(profile, "styles_to_avoid", []) or []
+                profile_dict["modesty"] = getattr(profile, "modesty", None)
+
+            user_context = self.context_resolver.resolve(
+                user_id=user_id or anon_id or "anonymous",
+                jwt_user_metadata=user_metadata,
+                birthdate=birthdate,
+                onboarding_profile=profile_dict,
+            )
+
+            if user_context.age_group or user_context.weather:
+                for c in ranked_candidates:
+                    item_dict = c.to_scoring_dict()
+                    adj = self.context_scorer.score_item(item_dict, user_context)
+                    c.final_score += adj
+
+                context_scoring_meta = {
+                    "age_group": user_context.age_group.value if user_context.age_group else None,
+                    "has_weather": user_context.weather is not None,
+                    "season": user_context.weather.season.value if user_context.weather else None,
+                    "city": user_context.city,
+                }
+                print(f"[Pipeline] Context scoring applied: age={context_scoring_meta.get('age_group')}, season={context_scoring_meta.get('season')}")
+        except Exception as e:
+            print(f"[Pipeline] Context scoring skipped (non-fatal): {e}")
+            context_scoring_meta = {"error": str(e)}
+
+        # Step 7: Get seen items for dedup + reranking
         session_seen_ids = self.session_service.get_seen_items(session_id)
-
-        # db_seen_ids already loaded in Step 4
-        # Combine both sources for permanent deduplication
         all_seen_ids = session_seen_ids | db_seen_ids
-        filtered_candidates = [c for c in diverse_candidates if c.item_id not in all_seen_ids]
 
-        # Step 8b: Deduplicate by image hash to remove same products across different brands
-        filtered_candidates = self._deduplicate_by_image(filtered_candidates)
+        # Step 7b: Deduplicate by image hash
+        ranked_candidates = self._deduplicate_by_image(ranked_candidates)
+
+        # Step 8: Greedy constrained list-wise reranking
+        # Builds the feed one item at a time with diversity constraints:
+        # - max per brand, max per cluster, max per type
+        # - no repeated attribute combos
+        # - exploration injection
+        filtered_candidates = self.feed_reranker.rerank(
+            ranked_candidates,
+            target_size=page_size + 10,  # Fetch slightly more for safety
+            seen_ids=all_seen_ids,
+            skipped_ids=session_scores.skipped_ids,
+        )
 
         # Step 9: Take top N for this page
         page_results = filtered_candidates[:page_size]
@@ -751,7 +873,7 @@ class RecommendationPipeline:
                 "candidates_after_python_filters": post_filter_count,
                 "candidates_after_feasibility_filter": feasibility_stats.get("passed") if feasibility_stats else post_filter_count,
                 "candidates_after_occasion_filter": len(candidates) if include_occasions else None,
-                "candidates_after_diversity": len(diverse_candidates),
+                "candidates_after_scoring": len(ranked_candidates),
                 "candidates_after_dedup": len(filtered_candidates),
                 "sasrec_available": self.ranker.model is not None,
                 "seed_vector_available": user_state.taste_vector is not None,
@@ -759,6 +881,14 @@ class RecommendationPipeline:
                 "user_state_type": user_state.state_type.value,
                 "by_source": dict(by_source),
                 "keyset_pagination": True,
+                "session_scoring": {
+                    "action_count": session_scores.action_count,
+                    "active_clusters": list(session_scores.cluster_scores.keys()),
+                    "active_brands": len(session_scores.brand_scores),
+                    "search_intents": len(session_scores.search_intents),
+                    "session_intent_candidates": session_intent_count,
+                },
+                "context_scoring": context_scoring_meta if context_scoring_meta else None,
                 "db_seen_history_count": db_history_count,
                 "fetch_size_used": fetch_size,
                 "python_filters_applied": {
@@ -790,6 +920,131 @@ class RecommendationPipeline:
     def clear_session(self, session_id: str):
         """Clear a session (reset seen items)."""
         self.session_service.clear_session(session_id)
+
+    # =========================================================
+    # Session Scoring (Redis-backed with L1 cache)
+    # =========================================================
+
+    def _init_scoring_backend(self):
+        """Initialize scoring backend (Redis if REDIS_URL set, else in-memory)."""
+        from recs.session_state import get_scoring_backend
+        return get_scoring_backend(backend="auto")
+
+    def _get_or_create_session_scores(
+        self, session_id: str, user_state: UserState
+    ) -> SessionScores:
+        """
+        Get or create session scores for a user.
+
+        Lookup order: L1 cache -> scoring backend (Redis/memory) -> cold start.
+        On first call (cold start): initializes from onboarding brands.
+        On subsequent calls: returns the existing session scores.
+        """
+        # L1 cache check
+        if session_id in self._scores_l1_cache:
+            return self._scores_l1_cache[session_id]
+
+        # Backend check (Redis or in-memory)
+        scores = self._scoring_backend.get_scores(session_id)
+        if scores is not None:
+            self._scores_l1_cache[session_id] = scores
+            return scores
+
+        # Cold start - initialize from onboarding
+        preferred_brands = []
+        profile = user_state.onboarding_profile
+        if profile:
+            preferred_brands = profile.preferred_brands or []
+
+        scores = self.scoring_engine.initialize_from_onboarding(
+            preferred_brands=preferred_brands,
+            onboarding_profile=profile,
+        )
+
+        # Persist to backend and L1 cache
+        self._scoring_backend.save_scores(session_id, scores)
+        self._scores_l1_cache[session_id] = scores
+
+        # Evict L1 if too large
+        if len(self._scores_l1_cache) > self._SCORES_L1_MAX:
+            sorted_keys = sorted(
+                self._scores_l1_cache.keys(),
+                key=lambda k: self._scores_l1_cache[k].last_updated,
+            )
+            for k in sorted_keys[: len(sorted_keys) // 2]:
+                del self._scores_l1_cache[k]
+
+        return scores
+
+    def get_session_scores(self, session_id: str) -> Optional[SessionScores]:
+        """Get session scores for external use (e.g., search reranker).
+
+        Lookup order: L1 cache -> scoring backend (Redis/memory).
+        """
+        scores = self._scores_l1_cache.get(session_id)
+        if scores is None:
+            scores = self._scoring_backend.get_scores(session_id)
+            if scores is not None:
+                self._scores_l1_cache[session_id] = scores
+        return scores
+
+    def update_session_scores_from_action(
+        self,
+        session_id: str,
+        action: str,
+        product_id: str,
+        brand: str = "",
+        item_type: str = "",
+        attributes: Dict[str, str] = None,
+        source: str = "feed",
+    ) -> None:
+        """
+        Update session scores from a user action.
+        Called by the /api/recs/v2/feed/action endpoint.
+        Persists back to scoring backend after mutation.
+        """
+        # Load from L1 or backend
+        scores = self._scores_l1_cache.get(session_id)
+        if scores is None:
+            scores = self._scoring_backend.get_scores(session_id)
+        if scores is None:
+            scores = SessionScores()
+
+        self.scoring_engine.process_action(
+            scores, action=action, product_id=product_id,
+            brand=brand, item_type=item_type,
+            attributes=attributes or {}, source=source,
+        )
+
+        # Persist back
+        self._scoring_backend.save_scores(session_id, scores)
+        self._scores_l1_cache[session_id] = scores
+
+    def update_session_scores_from_search(
+        self,
+        session_id: str,
+        query: str = "",
+        filters: Dict[str, Any] = None,
+    ) -> None:
+        """
+        Update session scores from a search/filter action.
+        Called by the search endpoint to feed signals into the recommendation feed.
+        Persists back to scoring backend after mutation.
+        """
+        # Load from L1 or backend
+        scores = self._scores_l1_cache.get(session_id)
+        if scores is None:
+            scores = self._scoring_backend.get_scores(session_id)
+        if scores is None:
+            scores = SessionScores()
+
+        self.scoring_engine.process_search_signal(
+            scores, query=query, filters=filters or {},
+        )
+
+        # Persist back
+        self._scoring_backend.save_scores(session_id, scores)
+        self._scores_l1_cache[session_id] = scores
 
     # =========================================================
     # User State Loading
@@ -839,6 +1094,126 @@ class RecommendationPipeline:
         brand names. Uses shared filter_utils for consistent deduplication logic.
         """
         return deduplicate_candidates(candidates)
+
+    # =========================================================
+    # Session-Aware Retrieval (Contextual Recall)
+    # =========================================================
+
+    def _retrieve_session_intent_candidates(
+        self,
+        user_state: "UserState",
+        gender: str,
+        intent_brands: List[str],
+        intent_types: List[str],
+        exclude_ids: set,
+        limit: int = 100,
+    ) -> List[Candidate]:
+        """
+        Retrieve additional candidates matching live session intent signals.
+
+        Uses direct PostgREST table queries (not an RPC function) to fetch
+        products whose brand or article_type matches the user's in-session
+        signals.  Results are enriched with product_attributes and converted
+        to Candidate objects with source="session_intent".
+
+        Args:
+            user_state: Current user state (for hard filter extraction).
+            gender: Gender filter string (e.g. "women").
+            intent_brands: Brands the user has shown session affinity for.
+            intent_types: Article types the user has shown session affinity for.
+            exclude_ids: Product IDs already in the candidate pool or seen.
+            limit: Maximum candidates to retrieve.
+
+        Returns:
+            List of Candidate objects (may be empty on error or no matches).
+        """
+        if not intent_brands and not intent_types:
+            return []
+
+        supabase = self.candidate_module.supabase
+
+        # Columns matching what the RPC functions return, plus extras for enrichment
+        SELECT_COLS = (
+            "id, name, brand, category, broad_category, article_type, "
+            "price, original_price, in_stock, fit, length, sleeve, "
+            "neckline, rise, colors, materials, style_tags, "
+            "primary_image_url, gallery_images, gender"
+        )
+
+        try:
+            # Build OR filter for brands and types
+            or_clauses = []
+            for b in intent_brands:
+                # Use ilike for case-insensitive brand matching
+                escaped = b.replace("%", "").replace("_", "")
+                or_clauses.append(f"brand.ilike.%{escaped}%")
+            for t in intent_types:
+                escaped = t.replace("%", "").replace("_", "")
+                or_clauses.append(f"article_type.ilike.%{escaped}%")
+
+            if not or_clauses:
+                return []
+
+            or_filter = ",".join(or_clauses)
+
+            # Query products table with filters
+            query = supabase.table("products") \
+                .select(SELECT_COLS) \
+                .eq("in_stock", True) \
+                .not_.is_("primary_image_url", "null") \
+                .or_(or_filter)
+
+            # Apply gender filter if available
+            if gender:
+                query = query.contains("gender", [gender])
+
+            # Exclude already-seen/pooled products
+            if exclude_ids:
+                # PostgREST has a max URL length, so limit exclusions to 500
+                exclude_list = list(exclude_ids)[:500]
+                # Use not_.in_ to exclude IDs we already have
+                # Note: supabase-py uses .not_.in_() for NOT IN
+                # But for large sets, we filter in Python to avoid URL limits
+                pass  # Will filter in Python below
+
+            query = query.limit(limit * 2)  # Over-fetch to account for Python filtering
+            result = query.execute()
+
+            if not result.data:
+                return []
+
+            # Python-level filtering: exclude IDs already in pool
+            rows = [
+                r for r in result.data
+                if str(r.get("id", "")) not in exclude_ids
+            ][:limit]
+
+            if not rows:
+                return []
+
+            # Convert to Candidate objects using the same pattern as CandidateSelectionModule
+            candidates = []
+            for row in rows:
+                # Map 'id' -> 'product_id' to match the format _row_to_candidate expects
+                row["product_id"] = row.get("id", "")
+                row["similarity"] = 0.0  # No embedding score for direct queries
+                c = self.candidate_module._row_to_candidate(row, source="session_intent")
+                candidates.append(c)
+
+            # Enrich with product_attributes (occasions, pattern, formality, etc.)
+            candidates = self.candidate_module._enrich_with_attributes(
+                candidates, require_attributes=False
+            )
+
+            print(f"[Pipeline] Session-intent retrieval: queried {len(result.data)} rows, "
+                  f"returning {len(candidates)} candidates "
+                  f"(brands={intent_brands}, types={intent_types})")
+
+            return candidates
+
+        except Exception as e:
+            print(f"[Pipeline] Error in session-intent retrieval: {e}")
+            return []
 
     # =========================================================
     # Python-Level Hard Filters (Colors, Article Types)

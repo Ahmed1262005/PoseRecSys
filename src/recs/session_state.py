@@ -126,6 +126,7 @@ class SessionState:
     - user_signals: User interaction signals
     """
     session_id: str
+    owner_user_id: Optional[str] = None
     seen_item_ids: Set[str] = field(default_factory=set)
     cursor: Optional[KeysetCursor] = None
     feed_version: Optional[FeedVersion] = None
@@ -138,6 +139,7 @@ class SessionState:
         """Serialize to dictionary."""
         return {
             "session_id": self.session_id,
+            "owner_user_id": self.owner_user_id,
             "seen_item_ids": list(self.seen_item_ids),
             "cursor": self.cursor.to_dict() if self.cursor else None,
             "feed_version": self.feed_version.to_dict() if self.feed_version else None,
@@ -155,6 +157,7 @@ class SessionState:
 
         return cls(
             session_id=data["session_id"],
+            owner_user_id=data.get("owner_user_id"),
             seen_item_ids=set(data.get("seen_item_ids", [])),
             cursor=KeysetCursor.from_dict(cursor_data) if cursor_data else None,
             feed_version=FeedVersion.from_dict(feed_version_data) if feed_version_data else None,
@@ -339,6 +342,153 @@ class RedisSessionBackend:
 
 
 # =============================================================================
+# Scoring Backend Protocol (for SessionScores persistence)
+# =============================================================================
+
+class InMemoryScoringBackend:
+    """
+    In-memory backend for SessionScores (dev / test).
+
+    Sessions are lost on server restart. Use ScoringRedisBackend for production.
+    """
+
+    def __init__(self, max_entries: int = 1000, ttl_seconds: int = 86400):
+        self._scores: Dict[str, Any] = {}  # session_id -> SessionScores
+        self._max_entries = max_entries
+        self._ttl = ttl_seconds
+        self._lock = Lock()
+
+    def get_scores(self, session_id: str):
+        """Load SessionScores from memory. Returns None if not found."""
+        with self._lock:
+            entry = self._scores.get(session_id)
+            if entry is None:
+                return None
+            # TTL check
+            if time.time() - entry.get("stored_at", 0) > self._ttl:
+                del self._scores[session_id]
+                return None
+            return entry["scores"]
+
+    def save_scores(self, session_id: str, scores) -> None:
+        """Save SessionScores to memory."""
+        with self._lock:
+            self._scores[session_id] = {
+                "scores": scores,
+                "stored_at": time.time(),
+            }
+            # Evict oldest half if over capacity
+            if len(self._scores) > self._max_entries:
+                sorted_keys = sorted(
+                    self._scores.keys(),
+                    key=lambda k: self._scores[k].get("stored_at", 0),
+                )
+                for k in sorted_keys[: len(sorted_keys) // 2]:
+                    del self._scores[k]
+
+    def delete_scores(self, session_id: str) -> None:
+        """Delete SessionScores from memory."""
+        with self._lock:
+            self._scores.pop(session_id, None)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get backend stats."""
+        with self._lock:
+            return {
+                "active_scoring_sessions": len(self._scores),
+                "backend": "memory",
+                "max_entries": self._max_entries,
+            }
+
+
+class ScoringRedisBackend:
+    """
+    Redis backend for SessionScores persistence.
+
+    Key pattern: scoring:{session_id}
+    Storage: JSON blob via SessionScores.to_json() / from_json()
+    TTL: 24 hours (refreshed on access)
+    """
+
+    def __init__(self, redis_url: str, ttl_seconds: int = 86400):
+        try:
+            import redis as redis_lib
+        except ImportError:
+            raise ImportError(
+                "Redis backend requires 'redis' package. Install with: pip install redis"
+            )
+
+        self._ttl = ttl_seconds
+        self._redis = redis_lib.from_url(redis_url, decode_responses=True)
+        # Verify connection
+        self._redis.ping()
+
+    def _key(self, session_id: str) -> str:
+        return f"scoring:{session_id}"
+
+    def get_scores(self, session_id: str):
+        """Load SessionScores from Redis. Returns None if not found."""
+        from recs.session_scoring import SessionScores
+
+        data = self._redis.get(self._key(session_id))
+        if data is None:
+            return None
+        # Refresh TTL on access
+        self._redis.expire(self._key(session_id), self._ttl)
+        return SessionScores.from_json(data)
+
+    def save_scores(self, session_id: str, scores) -> None:
+        """Persist SessionScores to Redis with TTL."""
+        self._redis.setex(
+            self._key(session_id),
+            self._ttl,
+            scores.to_json(),
+        )
+
+    def delete_scores(self, session_id: str) -> None:
+        """Delete SessionScores from Redis."""
+        self._redis.delete(self._key(session_id))
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get scoring backend stats."""
+        count = 0
+        for _ in self._redis.scan_iter(match="scoring:*", count=100):
+            count += 1
+        return {"active_scoring_sessions": count, "backend": "redis"}
+
+
+def get_scoring_backend(backend: str = "auto", ttl_seconds: int = 86400):
+    """
+    Factory for scoring backend. Auto-selects Redis if REDIS_URL is set.
+
+    Args:
+        backend: "auto", "redis", or "memory"
+        ttl_seconds: TTL for scoring sessions (default 24h)
+
+    Returns:
+        InMemoryScoringBackend or ScoringRedisBackend
+    """
+    if backend == "auto":
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                b = ScoringRedisBackend(redis_url=redis_url, ttl_seconds=ttl_seconds)
+                print(f"[ScoringBackend] Using Redis: {redis_url.split('@')[-1]}")
+                return b
+            except Exception as e:
+                print(f"[ScoringBackend] Redis unavailable ({e}), using in-memory")
+                return InMemoryScoringBackend(ttl_seconds=ttl_seconds)
+        else:
+            print("[ScoringBackend] No REDIS_URL set, using in-memory backend")
+            return InMemoryScoringBackend(ttl_seconds=ttl_seconds)
+    elif backend == "redis":
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        return ScoringRedisBackend(redis_url=redis_url, ttl_seconds=ttl_seconds)
+    else:
+        return InMemoryScoringBackend(ttl_seconds=ttl_seconds)
+
+
+# =============================================================================
 # Session State Service (Main Interface)
 # =============================================================================
 
@@ -408,6 +558,19 @@ class SessionStateService:
         if state:
             return state.seen_item_ids.copy()
         return set()
+
+    def get_owner(self, session_id: str) -> Optional[str]:
+        """Get owner user ID for a session, if set."""
+        state = self._backend.get_session(session_id)
+        if state:
+            return state.owner_user_id
+        return None
+
+    def set_owner(self, session_id: str, owner_user_id: str):
+        """Set (or update) owner user ID for a session."""
+        state = self._backend.get_or_create_session(session_id)
+        state.owner_user_id = owner_user_id
+        self._backend.update_session(state)
 
     def add_seen_items(self, session_id: str, item_ids: List[str]):
         """
@@ -616,6 +779,7 @@ class SessionStateService:
         if state:
             info = {
                 "session_id": state.session_id,
+                "owner_user_id": state.owner_user_id,
                 "seen_count": len(state.seen_item_ids),
                 "current_offset": state.current_offset,
                 "signals": {

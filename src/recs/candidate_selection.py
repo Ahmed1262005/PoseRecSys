@@ -19,8 +19,6 @@ import sys
 from typing import List, Dict, Optional, Set, Any
 from dataclasses import dataclass
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -38,8 +36,9 @@ from recs.models import (
     OuterwearPrefs,
 )
 from recs.feasibility_filter import canonicalize_article_type, canonicalize_name
+from core.utils import filter_gallery_images
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
+load_dotenv()
 
 
 # =============================================================================
@@ -411,6 +410,10 @@ class CandidateSelectionModule:
         self.supabase: Client = create_client(url, key)
         self.config = config or CandidateSelectionConfig()
 
+        # Shared profile scorer for attribute-driven preference matching
+        from scoring.profile_scorer import ProfileScorer
+        self._profile_scorer = ProfileScorer()
+
     # =========================================================
     # Main Candidate Retrieval
     # =========================================================
@@ -478,9 +481,9 @@ class CandidateSelectionModule:
             if c.item_id not in candidates:
                 candidates[c.item_id] = c
 
-        # Step 3: Apply soft preference scoring
+        # Step 3: Apply soft preference scoring (ProfileScorer + legacy fallback)
         candidate_list = list(candidates.values())
-        scored_candidates = self._apply_soft_scoring(
+        scored_candidates = self._apply_profile_scoring(
             candidate_list,
             user_state.onboarding_profile
         )
@@ -609,8 +612,8 @@ class CandidateSelectionModule:
             article_types_lower = [at.lower() for at in hard_filters.article_types]
             candidates = [c for c in candidates if (c.article_type or '').lower() in article_types_lower]
 
-        # Step 3: Apply soft preference scoring
-        scored_candidates = self._apply_soft_scoring(
+        # Step 3: Apply soft preference scoring (ProfileScorer + legacy fallback)
+        scored_candidates = self._apply_profile_scoring(
             candidates,
             user_state.onboarding_profile
         )
@@ -1077,7 +1080,7 @@ class CandidateSelectionModule:
         try:
             # Query product_attributes table directly
             result = self.supabase.table('product_attributes') \
-                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, construction') \
+                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, construction, coverage_level, skin_exposure, coverage_details, model_body_type, model_size_estimate') \
                 .in_('sku_id', product_ids) \
                 .execute()
 
@@ -1112,6 +1115,13 @@ class CandidateSelectionModule:
                         c.sleeve = construction.get('sleeve_type')
                     if construction.get('length') and not c.length:
                         c.length = construction.get('length')
+
+                    # Coverage & body type (from Gemini Vision)
+                    c.coverage_level = attrs.get('coverage_level')
+                    c.skin_exposure = attrs.get('skin_exposure')
+                    c.coverage_details = attrs.get('coverage_details') or []
+                    c.model_body_type = attrs.get('model_body_type')
+                    c.model_size_estimate = attrs.get('model_size_estimate')
 
                     enriched_candidates.append(c)
                 elif not require_attributes:
@@ -1171,7 +1181,7 @@ class CandidateSelectionModule:
             rise=row.get('rise'),
             style_tags=row.get('style_tags', []) or [],
             image_url=row.get('primary_image_url') or '',
-            gallery_images=row.get('gallery_images', []) or [],
+            gallery_images=filter_gallery_images(row.get('gallery_images', []) or []),
             name=name_raw,
             source=source,
             # Sale/New arrival fields
@@ -1188,7 +1198,37 @@ class CandidateSelectionModule:
         )
 
     # =========================================================
-    # Soft Preference Scoring
+    # Profile Scoring (shared ProfileScorer)
+    # =========================================================
+
+    def _apply_profile_scoring(
+        self,
+        candidates: List[Candidate],
+        profile: Optional[OnboardingProfile]
+    ) -> List[Candidate]:
+        """
+        Apply attribute-driven profile scoring using the shared ProfileScorer.
+
+        Uses direct Gemini attribute matching against the onboarding profile:
+        brand (+0.25 preferred, +0.10 cluster-adjacent), style tags, formality,
+        fit/sleeve/length/neckline/rise (category-aware), type preferences,
+        pattern, occasion, color avoidance, price range, and coverage hard-kills.
+
+        Falls back to the legacy _apply_soft_scoring for backward compatibility
+        if ProfileScorer fails.
+        """
+        if not profile:
+            return candidates
+
+        for c in candidates:
+            c.preference_score = self._profile_scorer.score_item(
+                c.to_scoring_dict(), profile
+            )
+
+        return candidates
+
+    # =========================================================
+    # Soft Preference Scoring (Legacy - kept for reference)
     # =========================================================
 
     def _apply_soft_scoring(

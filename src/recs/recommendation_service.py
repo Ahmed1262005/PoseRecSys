@@ -21,12 +21,10 @@ from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
+load_dotenv()
 
 
 class RecommendationStrategy(Enum):
