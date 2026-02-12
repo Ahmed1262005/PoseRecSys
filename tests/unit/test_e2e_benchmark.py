@@ -1265,31 +1265,33 @@ class TestFeedRerankerBenchmark:
     Checks diversity constraints, brand caps, exploration.
     """
 
-    def test_brand_diversity_cap(self, mock_candidates):
-        """No brand should exceed max_per_brand in output."""
+    def test_brand_share_cap(self, mock_candidates):
+        """No brand should exceed max_brand_share of the feed."""
         from recs.feed_reranker import GreedyConstrainedReranker, RerankerConfig
 
-        config = RerankerConfig(max_per_brand=4)
+        config = RerankerConfig(max_brand_share=0.40)
+        reranker = GreedyConstrainedReranker(config)
+
+        target = 50
+        result = reranker.rerank(mock_candidates, target_size=target)
+        brand_counts = Counter(c.brand for c in result)
+        max_allowed = max(3, int(target * config.max_brand_share))
+
+        for brand, count in brand_counts.items():
+            assert count <= max_allowed, f"Brand {brand} has {count} items, exceeds share cap of {max_allowed}"
+
+    def test_soft_penalties_create_diversity(self, mock_candidates):
+        """Brand and category decay should produce diverse output without hard caps."""
+        from recs.feed_reranker import GreedyConstrainedReranker, RerankerConfig
+
+        config = RerankerConfig()
         reranker = GreedyConstrainedReranker(config)
 
         result = reranker.rerank(mock_candidates, target_size=50)
         brand_counts = Counter(c.brand for c in result)
 
-        for brand, count in brand_counts.items():
-            assert count <= 4, f"Brand {brand} has {count} items, exceeds cap of 4"
-
-    def test_type_diversity_cap(self, mock_candidates):
-        """No article type should exceed max_per_type in output."""
-        from recs.feed_reranker import GreedyConstrainedReranker, RerankerConfig
-
-        config = RerankerConfig(max_per_type=6)
-        reranker = GreedyConstrainedReranker(config)
-
-        result = reranker.rerank(mock_candidates, target_size=50)
-        type_counts = Counter(c.article_type for c in result)
-
-        for atype, count in type_counts.items():
-            assert count <= 6, f"Type {atype} has {count} items, exceeds cap of 6"
+        # Soft penalties should produce at least some brand diversity
+        assert len(brand_counts) >= 3, "Soft penalties should produce multiple brands"
 
     def test_seen_items_excluded(self, mock_candidates):
         """Seen items should not appear in output."""
@@ -1324,7 +1326,7 @@ class TestFeedRerankerBenchmark:
         from recs.feed_reranker import GreedyConstrainedReranker, RerankerConfig
         from recs.session_scoring import SessionScoringEngine
 
-        config = RerankerConfig(max_per_brand=4, max_per_type=6)
+        config = RerankerConfig()  # Default soft-penalty config
         reranker = GreedyConstrainedReranker(config)
         engine = SessionScoringEngine()
 
@@ -1539,7 +1541,7 @@ class TestFullPipelineBenchmark:
 
         scorer = ContextScorer()
         engine = SessionScoringEngine()
-        reranker = GreedyConstrainedReranker(RerankerConfig(max_per_brand=4, max_per_type=6))
+        reranker = GreedyConstrainedReranker(RerankerConfig())
 
         all_metrics = []
         all_baselines = []
@@ -2125,7 +2127,7 @@ class TestAggregateReport:
 
         scorer = ContextScorer()
         engine = SessionScoringEngine()
-        feed_reranker = GreedyConstrainedReranker(RerankerConfig(max_per_brand=4, max_per_type=6))
+        feed_reranker = GreedyConstrainedReranker(RerankerConfig())
         search_reranker = SessionReranker()
 
         # Collect metrics by dimension

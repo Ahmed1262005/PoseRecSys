@@ -436,8 +436,9 @@ class TestGreedyReranker:
         result = reranker.rerank(candidates, target_size=10)
         assert len(result) <= 10
 
-    def test_brand_cap_enforced(self, reranker):
+    def test_brand_share_cap_enforced(self, reranker):
         # 20 items all from Boohoo + 10 from others
+        target = 15
         candidates = [
             _make_candidate(item_id=f"boo{i}", brand="Boohoo", final_score=0.9 - i * 0.01)
             for i in range(20)
@@ -446,12 +447,14 @@ class TestGreedyReranker:
             for i in range(10)
         ]
 
-        result = reranker.rerank(candidates, target_size=15)
+        result = reranker.rerank(candidates, target_size=target)
         brand_counts = defaultdict(int)
         for item in result:
             brand_counts[item.brand.lower()] += 1
 
-        assert brand_counts["boohoo"] <= reranker.config.max_per_brand
+        # Hard cap: no brand exceeds max_brand_share of target
+        max_allowed = max(3, int(target * reranker.config.max_brand_share))
+        assert brand_counts["boohoo"] <= max_allowed
 
     def test_seen_ids_excluded(self, reranker):
         candidates = [
@@ -465,7 +468,8 @@ class TestGreedyReranker:
         assert result_ids.isdisjoint(seen)
 
     def test_strict_diversity_in_first_positions(self, reranker):
-        """First 10 positions should have no brand repeats."""
+        """First 3 positions must have unique brands (hard reject).
+        Beyond that, soft penalties naturally push fresh brands up."""
         colors = ["Blues", "Reds", "Greens", "Browns", "Pinks"]
         fits = ["slim", "regular", "relaxed", "oversized", "fitted"]
         candidates = []
@@ -482,29 +486,49 @@ class TestGreedyReranker:
             )
 
         result = reranker.rerank(candidates, target_size=20)
-        # First 5 positions should all be different brands
+        # First 3 positions must be unique brands (strict_diversity_positions=3)
+        first_3_brands = [item.brand.lower() for item in result[:3]]
+        assert len(set(first_3_brands)) == 3
+        # Soft penalties should still produce good diversity beyond that
         first_5_brands = [item.brand.lower() for item in result[:5]]
-        assert len(set(first_5_brands)) == 5
+        assert len(set(first_5_brands)) >= 3
 
-    def test_type_cap_enforced(self, reranker):
-        """No more than max_per_type items of the same type."""
-        from recs.feed_reranker import RerankerConfig
-        config = RerankerConfig(max_per_type=3, max_per_brand=20, max_per_cluster=20)
-        from recs.feed_reranker import GreedyConstrainedReranker
+    def test_category_overshoot_penalty_demotes_excess(self, reranker):
+        """When a category exceeds its proportional target, items get penalized
+        and other categories get preferred via higher adjusted scores."""
+        from recs.feed_reranker import RerankerConfig, GreedyConstrainedReranker
+
+        # Use tight proportions: dresses = 20% of 10 = cap of 2
+        config = RerankerConfig(
+            category_proportions={
+                "tops": 0.30, "bottoms": 0.25,
+                "dresses": 0.20, "outerwear": 0.10, "_other": 0.15,
+            },
+            category_overshoot_penalty=0.50,  # Strong penalty
+        )
         r = GreedyConstrainedReranker(config)
 
+        # 15 dresses (all same score) + 5 tops (slightly lower score)
         candidates = [
             _make_candidate(
-                item_id=f"p{i}", brand=f"Brand{i}",
-                broad_category="dresses", final_score=1.0 - i * 0.01,
+                item_id=f"d{i}", brand=f"Brand{i}",
+                broad_category="dresses", final_score=0.80,
             )
-            for i in range(20)
+            for i in range(15)
+        ] + [
+            _make_candidate(
+                item_id=f"t{i}", brand=f"BrandT{i}",
+                broad_category="tops", final_score=0.78,
+            )
+            for i in range(5)
         ]
         result = r.rerank(candidates, target_size=10)
         type_counts = defaultdict(int)
         for item in result:
             type_counts[item.broad_category.lower()] += 1
-        assert type_counts["dresses"] <= 3
+        # With 0.50 overshoot penalty, dresses past cap 2 score 0.40 vs tops at 0.78
+        # So tops should appear (penalty makes dresses less attractive after cap)
+        assert type_counts["tops"] >= 2
 
     def test_empty_candidates(self, reranker):
         result = reranker.rerank([], target_size=10)
@@ -537,8 +561,9 @@ class TestGreedyReranker:
         assert stats["unique_brands"] > 1
         assert stats["brand_entropy"] > 0
 
-    def test_combo_dedup_prevents_same_attribute_combo(self, reranker):
-        """Items with same cluster+type+color+fit should be deduped."""
+    def test_combo_penalty_demotes_duplicate_combos(self, reranker):
+        """Items with same cluster+type+color+fit get penalized, so diverse items
+        are preferred even when they have lower raw scores."""
         # All from same brand (same cluster), same category, color, fit
         candidates = [
             _make_candidate(
@@ -548,23 +573,24 @@ class TestGreedyReranker:
             )
             for i in range(10)
         ]
-        # Add different items
+        # Add different items with moderately lower scores
         candidates += [
             _make_candidate(
                 item_id=f"d{i}", brand=f"Brand{i}",
                 broad_category="tops", color_family="Blues",
-                fit="relaxed", final_score=0.5 - i * 0.01,
+                fit="relaxed", final_score=0.7 - i * 0.01,
             )
             for i in range(10)
         ]
 
         result = reranker.rerank(candidates, target_size=10)
-        # Should not be all Boohoo dresses in Neutrals/slim
-        boohoo_neutral_slim = sum(
-            1 for item in result
-            if item.brand == "Boohoo" and item.color_family == "Neutrals"
-        )
-        assert boohoo_neutral_slim <= 2  # combo dedup + brand cap
+        # Soft penalties (brand_decay + combo_penalty) should push diverse items up.
+        # With brand_decay=0.85 and combo_penalty=0.70, the 3rd Boohoo dress scores:
+        #   0.98 * 0.85^2 * 0.70 = 0.50 (penalized for brand repeat AND combo dupe)
+        # Meanwhile Brand2 tops score: 0.68 * 1.0 = 0.68 (fresh brand, fresh combo)
+        # So diverse items should appear in the top 10
+        non_boohoo = sum(1 for item in result if item.brand != "Boohoo")
+        assert non_boohoo >= 3  # At least 3 diverse items should beat penalized dupes
 
 
 # =============================================================================

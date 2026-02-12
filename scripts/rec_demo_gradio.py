@@ -921,7 +921,7 @@ def profile_to_search_profile(p: DemoProfile) -> dict:
 context_scorer = ContextScorer()
 profile_scorer = ProfileScorer()
 session_engine = SessionScoringEngine()
-feed_reranker = GreedyConstrainedReranker(RerankerConfig(max_per_brand=4, max_per_type=6))
+feed_reranker = GreedyConstrainedReranker(RerankerConfig())
 search_reranker = SessionReranker()
 
 

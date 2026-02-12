@@ -626,106 +626,108 @@ class RecommendationPipeline:
         db_history_count = len(db_seen_ids)
 
         # Calculate how many candidates to fetch
-        # With SQL-level seen exclusion, fetch_size no longer needs to compensate
-        # for seen items — every row SQL returns is guaranteed unseen.
-        # Check if any Python-level filters are active (need over-fetch)
-        has_attribute_filters = any([
-            include_formality, exclude_formality,
-            include_seasons, exclude_seasons,
-            include_style_tags, exclude_style_tags,
-            include_color_family, exclude_color_family,
-            include_silhouette, exclude_silhouette,
-            include_fit, exclude_fit,
-            include_length, exclude_length,
-            include_sleeves, exclude_sleeves,
-            include_neckline, exclude_neckline,
-            include_rise, exclude_rise,
-            include_coverage, exclude_coverage,
-            include_materials, exclude_materials,
-            exclude_occasions,
-            include_patterns, exclude_patterns,
-        ])
-        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types)
+        # With SQL-level attribute filtering (JOIN product_attributes), no need for
+        # massive over-fetch. Only over-fetch for Python-level filters (colors, brands, article_types, rise).
+        has_python_filters = bool(
+            include_colors or exclude_colors or preferred_brands or exclude_brands
+            or article_types or include_rise or exclude_rise
+        )
 
-        # Step 4b: Pre-filter by product_attributes if attribute filters are active.
-        # This queries product_attributes for matching sku_ids BEFORE the main SQL RPC,
-        # so every candidate returned already satisfies the attribute filters.
-        # JSONB fields (neckline, sleeve, length) are still handled in Python fallback.
-        pre_filter_ids = None
-        pre_filter_count = None
-        if has_attribute_filters:
-            # Build attribute_filters dict early for the pre-filter query
-            _af_params_for_prefilter = {
-                'include_formality': include_formality, 'exclude_formality': exclude_formality,
-                'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
-                'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
-                'include_color_family': include_color_family, 'exclude_color_family': exclude_color_family,
-                'include_silhouette': include_silhouette, 'exclude_silhouette': exclude_silhouette,
-                'include_fit': include_fit, 'exclude_fit': exclude_fit,
-                'include_coverage': include_coverage, 'exclude_coverage': exclude_coverage,
-                'include_pattern': include_patterns, 'exclude_pattern': exclude_patterns,
-                'exclude_occasions': exclude_occasions,
-                # Multi-value
-                'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
-                'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
-                'include_occasions': include_occasions,
-            }
-            active_prefilter = {k: v for k, v in _af_params_for_prefilter.items() if v}
-
-            if active_prefilter:
-                pre_filter_ids = self.candidate_module.pre_filter_by_attributes(active_prefilter)
-                if pre_filter_ids is not None:
-                    pre_filter_count = len(pre_filter_ids)
-                    if pre_filter_count == 0:
-                        # No products match the attribute filters -- short circuit
-                        print(f"[Pipeline] Pre-filter returned 0 matching products -- returning empty feed")
-                        return {
-                            "user_id": user_id or anon_id,
-                            "session_id": session_id,
-                            "cursor": None,
-                            "strategy": "exploration",
-                            "results": [],
-                            "pagination": {
-                                "page": 0,
-                                "page_size": page_size,
-                                "items_returned": 0,
-                                "session_seen_count": len(db_seen_ids),
-                                "has_more": False,
-                            },
-                            "metadata": {
-                                "candidates_retrieved": 0,
-                                "candidates_after_python_filters": 0,
-                                "candidates_after_feasibility_filter": 0,
-                                "candidates_after_occasion_filter": None,
-                                "candidates_after_scoring": 0,
-                                "candidates_after_dedup": 0,
-                                "pre_filter_count": 0,
-                                "pre_filter_short_circuit": True,
-                                "sasrec_available": self.ranker.is_loaded,
-                                "seed_vector_available": bool(user_state.taste_vector),
-                                "has_onboarding": bool(user_state.onboarding_profile),
-                                "user_state_type": user_state.state_type,
-                                "by_source": {},
-                                "keyset_pagination": True,
-                                "db_seen_history_count": db_history_count,
-                                "feed_version": self.version_id,
-                            },
-                        }
-                    # Cap pre-filter IDs for SQL performance
-                    if pre_filter_count > self.candidate_module.SQL_INCLUDE_IDS_LIMIT:
-                        print(f"[Pipeline] Pre-filter returned {pre_filter_count} IDs, capping to {self.candidate_module.SQL_INCLUDE_IDS_LIMIT} for SQL")
-                        pre_filter_ids = pre_filter_ids[:self.candidate_module.SQL_INCLUDE_IDS_LIMIT]
-
-        # With pre-filtering, no need for 3x multiplier on attribute filters
-        # Only over-fetch for color/brand/article_type Python filters
         filter_multiplier = 3 if has_python_filters else 1
         base_fetch = max(500, page_size * 10)  # At least 500, or 10x requested page
         fetch_size = base_fetch * filter_multiplier
         fetch_size = min(fetch_size, 5000)  # Safety cap
 
         # Step 5: Get candidates using keyset cursor
-        # Seen IDs are excluded at the SQL level for efficiency
-        # Pre-filtered IDs constrain SQL to only return matching products
+        # Attribute filters are applied directly in SQL via LEFT JOIN to product_attributes.
+        # No pre-filter step needed — SQL handles all attribute filtering in one query.
+        #
+        # Expand frontend filter values to DB values.
+        # The frontend sends user-friendly slugs (e.g., "casual", "active", "beach")
+        # but the DB stores Gemini-generated values (e.g., "Everyday", "Workout", "Vacation").
+        # We expand each frontend value to ALL matching DB values, and also handle
+        # cross-dimension routing (e.g., "smart-casual" -> formality filter, not occasions).
+
+        # --- Occasion expansion ---
+        # Frontend occasion slugs -> DB product_attributes.occasions values
+        _OCCASION_EXPANSION = {
+            'casual':       ['Everyday', 'Weekend', 'Brunch', 'Casual Outings'],
+            'active':       ['Workout'],
+            'activewear':   ['Workout'],
+            'beach':        ['Vacation'],
+            'vacation':     ['Vacation'],
+            'evening':      ['Date Night', 'Party', 'Night Out', 'Evening', 'Evening Event'],
+            'date-night':   ['Date Night'],
+            'date night':   ['Date Night'],
+            'party':        ['Party', 'Night Out'],
+            'office':       ['Office', 'Work'],
+            'work':         ['Office', 'Work'],
+            'formal':       ['Formal Event', 'Wedding Guest'],
+            'wedding':      ['Wedding Guest', 'Wedding'],
+            'lounge':       ['Lounging'],
+            'lounging':     ['Lounging'],
+            'brunch':       ['Brunch'],
+            'weekend':      ['Weekend'],
+            'workout':      ['Workout'],
+            'night-out':    ['Night Out', 'Party'],
+        }
+
+        # Cross-dimension routing: some "occasion" values should trigger
+        # formality or style_tags filters instead of (or in addition to) occasions.
+        _OCCASION_CROSS_DIMENSION = {
+            'smart-casual':  {'formality': ['Smart Casual', 'Business Casual']},
+            'smart casual':  {'formality': ['Smart Casual', 'Business Casual']},
+            'formal':        {'formality': ['Formal', 'Semi-Formal']},
+        }
+
+        def _expand(vals, expansion_map):
+            """Expand frontend values using synonym map. Unknown values are title-cased as-is."""
+            if not vals:
+                return None
+            expanded = []
+            for v in vals:
+                key = v.lower().strip()
+                if key in expansion_map:
+                    expanded.extend(expansion_map[key])
+                else:
+                    # Unknown value: title-case it and pass through
+                    expanded.append(v.title())
+            return list(dict.fromkeys(expanded)) if expanded else None  # dedupe, preserve order
+
+        def _tc(vals):
+            """Title-case normalize a list of filter values, or None."""
+            if not vals:
+                return vals
+            return [v.title() for v in vals]
+
+        # Handle cross-dimension routing FIRST (before occasion expansion)
+        # e.g., "smart-casual" should add formality filter, not occasion filter.
+        # Values that are purely cross-dimensional are removed from the occasion list.
+        occasion_values_for_expansion = list(include_occasions) if include_occasions else []
+        if include_occasions:
+            for v in list(include_occasions):
+                key = v.lower().strip()
+                if key in _OCCASION_CROSS_DIMENSION:
+                    cross = _OCCASION_CROSS_DIMENSION[key]
+                    if 'formality' in cross:
+                        if include_formality is None:
+                            include_formality = []
+                        include_formality = list(set(include_formality) | set(cross['formality']))
+                        print(f"[Pipeline] Cross-dimension: '{v}' -> include_formality={cross['formality']}")
+                    # Remove from occasion list if it's ONLY a cross-dimension value
+                    # (not also a valid occasion expansion key)
+                    if key not in _OCCASION_EXPANSION:
+                        occasion_values_for_expansion = [x for x in occasion_values_for_expansion if x.lower().strip() != key]
+
+        # Now expand remaining occasion values
+        expanded_occasions = _expand(occasion_values_for_expansion, _OCCASION_EXPANSION) if occasion_values_for_expansion else None
+        expanded_exclude_occasions = _expand(exclude_occasions, _OCCASION_EXPANSION) if exclude_occasions else None
+
+        if expanded_occasions:
+            print(f"[Pipeline] Occasion expansion: {include_occasions} -> {expanded_occasions}")
+        if include_formality:
+            print(f"[Pipeline] Formality filter (after cross-dim): {include_formality}")
+
         candidates = self.candidate_module.get_candidates_keyset(
             user_state,
             gender,
@@ -738,7 +740,32 @@ class RecommendationPipeline:
             new_arrivals_only=new_arrivals_only,
             new_arrivals_days=new_arrivals_days,
             include_materials=include_materials,
-            include_product_ids=pre_filter_ids,
+            # Attribute filters via SQL JOIN (maps API params to SQL column names)
+            # Occasions use synonym expansion; other fields use title-case normalization
+            attr_include_formality=_tc(include_formality),
+            attr_exclude_formality=_tc(exclude_formality),
+            attr_include_seasons=_tc(include_seasons),
+            attr_exclude_seasons=_tc(exclude_seasons),
+            attr_include_style_tags=_tc(include_style_tags),
+            attr_exclude_style_tags=_tc(exclude_style_tags),
+            attr_include_color_family=_tc(include_color_family),
+            attr_exclude_color_family=_tc(exclude_color_family),
+            attr_include_silhouette=_tc(include_silhouette),
+            attr_exclude_silhouette=_tc(exclude_silhouette),
+            attr_include_fit_type=_tc(include_fit),          # API param 'fit' -> SQL column 'fit_type'
+            attr_exclude_fit_type=_tc(exclude_fit),
+            attr_include_coverage=_tc(include_coverage),      # SQL column 'coverage_level'
+            attr_exclude_coverage=_tc(exclude_coverage),
+            attr_include_pattern=_tc(include_patterns),       # API param 'patterns' -> SQL 'pattern'
+            attr_exclude_pattern=_tc(exclude_patterns),
+            attr_include_neckline=_tc(include_neckline),      # SQL reads from construction JSONB
+            attr_exclude_neckline=_tc(exclude_neckline),
+            attr_include_sleeve_type=_tc(include_sleeves),    # API 'sleeves' -> SQL 'sleeve_type'
+            attr_exclude_sleeve_type=_tc(exclude_sleeves),
+            attr_include_length=_tc(include_length),          # SQL reads from construction JSONB
+            attr_exclude_length=_tc(exclude_length),
+            attr_include_occasions=expanded_occasions,        # Already expanded with DB values
+            attr_exclude_occasions=expanded_exclude_occasions,
         )
 
         # Step 5a: Session-Aware Retrieval (Contextual Recall)
@@ -802,36 +829,24 @@ class RecommendationPipeline:
         if pre_python_filter_count != post_filter_count:
             print(f"[Pipeline] Python filters: {pre_python_filter_count} -> {post_filter_count} candidates")
 
-        # Step 5b2: Apply generic attribute hard filters (include/exclude)
-        # Build attribute_filters dict from all new filter params
-        attribute_filters = {}
-        # NOTE: include_occasions is NOT here -- it has dedicated filter paths
-        # (feasibility filter + _filter_by_occasions with occasion expansion).
-        # exclude_occasions IS here since it has no dedicated path.
-        # NOTE: include_patterns/exclude_patterns are NOT here -- they are
-        # handled via profile.patterns_liked and the existing pattern scoring path.
-        _af_params = {
-            'include_formality': include_formality, 'exclude_formality': exclude_formality,
-            'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
-            'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
-            'include_color_family': include_color_family, 'exclude_color_family': exclude_color_family,
-            'include_silhouette': include_silhouette, 'exclude_silhouette': exclude_silhouette,
-            'include_fit': include_fit, 'exclude_fit': exclude_fit,
-            'include_length': include_length, 'exclude_length': exclude_length,
-            'include_sleeves': include_sleeves, 'exclude_sleeves': exclude_sleeves,
-            'include_neckline': include_neckline, 'exclude_neckline': exclude_neckline,
-            'include_rise': include_rise, 'exclude_rise': exclude_rise,
-            'include_coverage': include_coverage, 'exclude_coverage': exclude_coverage,
-            'include_materials': include_materials, 'exclude_materials': exclude_materials,
-            'exclude_occasions': exclude_occasions,
-        }
-        for k, v in _af_params.items():
-            if v:
-                attribute_filters[k] = v
-
-        if attribute_filters:
-            candidates = self._apply_attribute_filters(candidates, attribute_filters)
+        # Step 5b2: Rise filter (Python-only — no product_attributes column)
+        # All other attribute filters are now handled in SQL via JOIN.
+        if include_rise or exclude_rise:
+            pre_rise = len(candidates)
+            filtered = []
+            inc_set = {v.lower() for v in include_rise} if include_rise else None
+            exc_set = {v.lower() for v in exclude_rise} if exclude_rise else None
+            for c in candidates:
+                val = (c.rise or '').lower() if c.rise else None
+                if inc_set and (not val or val not in inc_set):
+                    continue
+                if exc_set and val and val in exc_set:
+                    continue
+                filtered.append(c)
+            candidates = filtered
             post_filter_count = len(candidates)
+            if pre_rise != post_filter_count:
+                print(f"[Pipeline] Rise filter: {pre_rise} -> {post_filter_count} candidates")
 
         # Step 5c: Apply FeasibilityFilter (HARD constraint-based filtering)
         # This runs BEFORE soft scoring and uses canonicalized article types
@@ -1039,7 +1054,7 @@ class RecommendationPipeline:
             "metadata": {
                 "candidates_retrieved": pre_filter_count_for_meta,
                 "candidates_after_python_filters": post_filter_count,
-                "pre_filter_count": pre_filter_count,
+                "sql_attribute_filters_active": has_python_filters or bool(expanded_occasions or include_formality or exclude_formality or include_seasons or exclude_seasons or include_style_tags or exclude_style_tags),
                 "candidates_after_feasibility_filter": feasibility_stats.get("passed") if feasibility_stats else post_filter_count,
                 "candidates_after_occasion_filter": len(candidates) if include_occasions else None,
                 "candidates_after_scoring": len(ranked_candidates),
@@ -1066,7 +1081,8 @@ class RecommendationPipeline:
                     "include_brands": preferred_brands,
                     "exclude_brands": exclude_brands,
                     "article_types": article_types,
-                    "attribute_filters": attribute_filters if attribute_filters else None,
+                    "include_rise": include_rise,
+                    "exclude_rise": exclude_rise,
                 } if has_python_filters else None,
                 "feasibility_filter": {
                     "occasions": include_occasions,
@@ -1595,156 +1611,9 @@ class RecommendationPipeline:
 
         return filtered
 
-    # =========================================================
-    # Generic Attribute Hard Filters (include/exclude)
-    # =========================================================
-
-    # Single-value attributes: Candidate has ONE value (str)
-    # Maps filter_name -> Candidate field name
-    SINGLE_VALUE_FILTERS = {
-        'formality': 'formality',
-        'color_family': 'color_family',
-        'silhouette': 'silhouette',
-        'fit': 'fit',
-        'length': 'length',
-        'sleeves': 'sleeve',       # API param "sleeves" maps to Candidate.sleeve
-        'neckline': 'neckline',
-        'rise': 'rise',
-        'coverage': 'coverage_level',
-        'pattern': 'pattern',
-    }
-
-    # Multi-value attributes: Candidate has a LIST of values (List[str])
-    # Maps filter_name -> Candidate field name
-    MULTI_VALUE_FILTERS = {
-        'seasons': 'seasons',
-        'style_tags': 'style_tags',
-        'occasions': 'occasions',
-        'materials': 'materials',
-    }
-
-    def _apply_attribute_filters(
-        self,
-        candidates: List[Candidate],
-        attribute_filters: Dict[str, Any],
-    ) -> List[Candidate]:
-        """
-        Apply generic hard attribute filtering on enriched candidates.
-
-        Supports both include and exclude for every attribute dimension.
-        All comparisons are case-insensitive.
-
-        Args:
-            candidates: List of enriched candidates (post product_attributes enrichment)
-            attribute_filters: Dict with keys like:
-                include_formality: ["Casual", "Smart Casual"]
-                exclude_formality: ["Formal"]
-                include_seasons: ["Spring", "Summer"]
-                exclude_seasons: ["Winter"]
-                ... etc for all attributes
-
-        Include logic:
-            - Single-value: c.attr in include_list (case-insensitive)
-            - Multi-value: any(v in include_list for v in c.attr) (case-insensitive)
-            - Items where attribute is None/empty are EXCLUDED when include is active
-
-        Exclude logic:
-            - Single-value: c.attr not in exclude_list
-            - Multi-value: not any(v in exclude_list for v in c.attr)
-            - Items where attribute is None/empty PASS the exclude filter
-
-        Returns:
-            Filtered list of candidates
-        """
-        if not attribute_filters:
-            return candidates
-
-        # Build active filter specs: list of (include_set, exclude_set, field_name, is_multi)
-        active_filters = []
-
-        for filter_name, field_name in self.SINGLE_VALUE_FILTERS.items():
-            inc_key = f"include_{filter_name}"
-            exc_key = f"exclude_{filter_name}"
-            inc_vals = attribute_filters.get(inc_key)
-            exc_vals = attribute_filters.get(exc_key)
-            if inc_vals or exc_vals:
-                inc_set = {v.lower() for v in inc_vals} if inc_vals else None
-                exc_set = {v.lower() for v in exc_vals} if exc_vals else None
-                active_filters.append((inc_set, exc_set, field_name, False))
-
-        for filter_name, field_name in self.MULTI_VALUE_FILTERS.items():
-            inc_key = f"include_{filter_name}"
-            exc_key = f"exclude_{filter_name}"
-            inc_vals = attribute_filters.get(inc_key)
-            exc_vals = attribute_filters.get(exc_key)
-            if inc_vals or exc_vals:
-                inc_set = {v.lower() for v in inc_vals} if inc_vals else None
-                exc_set = {v.lower() for v in exc_vals} if exc_vals else None
-                active_filters.append((inc_set, exc_set, field_name, True))
-
-        if not active_filters:
-            return candidates
-
-        pre_count = len(candidates)
-        filtered = []
-
-        for c in candidates:
-            passes = True
-            for inc_set, exc_set, field_name, is_multi in active_filters:
-                if is_multi:
-                    # Multi-value: candidate has a list
-                    vals = getattr(c, field_name, None) or []
-                    vals_lower = [v.lower() for v in vals if v]
-
-                    # Include check: at least one value must be in include_set
-                    if inc_set:
-                        if not vals_lower:
-                            passes = False
-                            break
-                        if not any(v in inc_set for v in vals_lower):
-                            passes = False
-                            break
-
-                    # Exclude check: none of the values may be in exclude_set
-                    if exc_set:
-                        if vals_lower and any(v in exc_set for v in vals_lower):
-                            passes = False
-                            break
-                else:
-                    # Single-value: candidate has one string
-                    val = getattr(c, field_name, None)
-                    val_lower = val.lower() if val else None
-
-                    # Include check: value must be in include_set
-                    if inc_set:
-                        if not val_lower:
-                            passes = False
-                            break
-                        if val_lower not in inc_set:
-                            passes = False
-                            break
-
-                    # Exclude check: value must NOT be in exclude_set
-                    if exc_set:
-                        if val_lower and val_lower in exc_set:
-                            passes = False
-                            break
-
-            if passes:
-                filtered.append(c)
-
-        post_count = len(filtered)
-        if pre_count != post_count:
-            # Log which filters were active
-            active_names = []
-            for inc_set, exc_set, field_name, _ in active_filters:
-                if inc_set:
-                    active_names.append(f"include_{field_name}")
-                if exc_set:
-                    active_names.append(f"exclude_{field_name}")
-            print(f"[Pipeline] Attribute filters ({', '.join(active_names)}): {pre_count} -> {post_count} candidates")
-
-        return filtered
+    # NOTE: _apply_attribute_filters() has been removed.
+    # All attribute filtering now happens in SQL via LEFT JOIN to product_attributes.
+    # Only rise filter remains in Python (no product_attributes column for rise).
 
     # =========================================================
     # Occasion Filtering (using product_attributes.occasions)

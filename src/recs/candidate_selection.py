@@ -509,14 +509,38 @@ class CandidateSelectionModule:
         new_arrivals_days: int = 7,
         # Material inclusion filter (SQL-level)
         include_materials: Optional[List[str]] = None,
-        # Pre-filtered product IDs (from product_attributes query)
-        include_product_ids: Optional[List[str]] = None,
+        # Attribute filters (passed directly to SQL via product_attributes JOIN)
+        attr_include_formality: Optional[List[str]] = None,
+        attr_exclude_formality: Optional[List[str]] = None,
+        attr_include_seasons: Optional[List[str]] = None,
+        attr_exclude_seasons: Optional[List[str]] = None,
+        attr_include_style_tags: Optional[List[str]] = None,
+        attr_exclude_style_tags: Optional[List[str]] = None,
+        attr_include_color_family: Optional[List[str]] = None,
+        attr_exclude_color_family: Optional[List[str]] = None,
+        attr_include_silhouette: Optional[List[str]] = None,
+        attr_exclude_silhouette: Optional[List[str]] = None,
+        attr_include_fit_type: Optional[List[str]] = None,
+        attr_exclude_fit_type: Optional[List[str]] = None,
+        attr_include_coverage: Optional[List[str]] = None,
+        attr_exclude_coverage: Optional[List[str]] = None,
+        attr_include_pattern: Optional[List[str]] = None,
+        attr_exclude_pattern: Optional[List[str]] = None,
+        attr_include_neckline: Optional[List[str]] = None,
+        attr_exclude_neckline: Optional[List[str]] = None,
+        attr_include_sleeve_type: Optional[List[str]] = None,
+        attr_exclude_sleeve_type: Optional[List[str]] = None,
+        attr_include_length: Optional[List[str]] = None,
+        attr_exclude_length: Optional[List[str]] = None,
+        attr_include_occasions: Optional[List[str]] = None,
+        attr_exclude_occasions: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """
         Get candidates using keyset cursor for O(1) pagination.
 
-        V2 improvement: Instead of tracking seen_ids (O(n) exclusion),
-        we use a cursor based on (score, id) for constant-time pagination.
+        Attribute filters are applied directly in SQL via a LEFT JOIN to
+        product_attributes, eliminating the need for pre-filtering or
+        Python-level attribute filtering.
 
         Args:
             user_state: User's current state (onboarding, taste_vector, history)
@@ -525,10 +549,11 @@ class CandidateSelectionModule:
             cursor_id: ID from last item of previous page (None for first page)
             page_size: Number of items to return
             exclude_ids: Set of product IDs to exclude (e.g., seen history)
-            article_types: Optional list of specific article types to filter by (e.g., ['jeans', 't-shirts'])
-            on_sale_only: If True, only return items on sale (original_price > price)
+            article_types: Optional list of specific article types to filter by
+            on_sale_only: If True, only return items on sale
             new_arrivals_only: If True, only return items added in last N days
-            new_arrivals_days: Number of days to consider for new arrivals (default 7)
+            new_arrivals_days: Number of days to consider for new arrivals
+            attr_*: Attribute filters passed directly to SQL JOIN conditions
 
         Returns:
             List of Candidate objects, sorted by score descending
@@ -604,7 +629,31 @@ class CandidateSelectionModule:
             new_arrivals_only=new_arrivals_only,
             new_arrivals_days=new_arrivals_days,
             include_materials=include_materials,
-            include_product_ids=include_product_ids,
+            # Attribute filters (passed through to SQL)
+            attr_include_formality=attr_include_formality,
+            attr_exclude_formality=attr_exclude_formality,
+            attr_include_seasons=attr_include_seasons,
+            attr_exclude_seasons=attr_exclude_seasons,
+            attr_include_style_tags=attr_include_style_tags,
+            attr_exclude_style_tags=attr_exclude_style_tags,
+            attr_include_color_family=attr_include_color_family,
+            attr_exclude_color_family=attr_exclude_color_family,
+            attr_include_silhouette=attr_include_silhouette,
+            attr_exclude_silhouette=attr_exclude_silhouette,
+            attr_include_fit_type=attr_include_fit_type,
+            attr_exclude_fit_type=attr_exclude_fit_type,
+            attr_include_coverage=attr_include_coverage,
+            attr_exclude_coverage=attr_exclude_coverage,
+            attr_include_pattern=attr_include_pattern,
+            attr_exclude_pattern=attr_exclude_pattern,
+            attr_include_neckline=attr_include_neckline,
+            attr_exclude_neckline=attr_exclude_neckline,
+            attr_include_sleeve_type=attr_include_sleeve_type,
+            attr_exclude_sleeve_type=attr_exclude_sleeve_type,
+            attr_include_length=attr_include_length,
+            attr_exclude_length=attr_exclude_length,
+            attr_include_occasions=attr_include_occasions,
+            attr_exclude_occasions=attr_exclude_occasions,
         )
 
         # Step 2b: Python fallback for seen exclusion
@@ -734,124 +783,6 @@ class CandidateSelectionModule:
     # Postgres handles uuid[] up to ~5000 efficiently; beyond that use Python fallback.
     SQL_EXCLUDE_IDS_LIMIT = 5000
 
-    # Max pre-filter IDs to send to SQL. Postgres ANY() is efficient up to ~5000 UUIDs.
-    SQL_INCLUDE_IDS_LIMIT = 5000
-
-    # =========================================================
-    # Pre-filter: Query product_attributes for matching IDs
-    # =========================================================
-
-    # Maps attribute filter keys to product_attributes columns and query types.
-    # 'single' = text column, use .in_()
-    # 'multi' = text[] array column, use .overlaps()
-    # 'jsonb_field' = field inside construction JSONB, handled in Python fallback
-    _PRE_FILTER_COLUMN_MAP = {
-        'formality': ('formality', 'single'),
-        'color_family': ('color_family', 'single'),
-        'silhouette': ('silhouette', 'single'),
-        'pattern': ('pattern', 'single'),
-        'fit': ('fit_type', 'single'),
-        'coverage': ('coverage_level', 'single'),
-        'seasons': ('seasons', 'multi'),
-        'style_tags': ('style_tags', 'multi'),
-        'occasions': ('occasions', 'multi'),
-        # These live inside construction JSONB -- kept in Python fallback
-        # 'sleeves': ('construction->sleeve_type', 'jsonb_field'),
-        # 'neckline': ('construction->neckline', 'jsonb_field'),
-        # 'length': ('construction->length', 'jsonb_field'),
-    }
-
-    def pre_filter_by_attributes(
-        self,
-        attribute_filters: Dict[str, Any],
-    ) -> Optional[List[str]]:
-        """
-        Query product_attributes to get product IDs matching attribute filters.
-
-        This runs BEFORE the main keyset RPC call. The returned IDs are passed as
-        include_product_ids to the SQL function, so every candidate returned already
-        satisfies the attribute filters.
-
-        Only handles top-level columns (formality, seasons, style_tags, etc.).
-        JSONB fields (neckline, sleeve, length from construction) are still
-        handled by _apply_attribute_filters() as a Python-level fallback.
-
-        Args:
-            attribute_filters: Dict with keys like include_formality, exclude_seasons, etc.
-
-        Returns:
-            List of matching sku_id strings, or None if no pre-filterable attributes are active.
-        """
-        if not attribute_filters:
-            return None
-
-        # Determine which filters can be pushed to the pre-filter query
-        # vs which must stay in Python (JSONB fields)
-        has_prefilterable = False
-        for key in attribute_filters:
-            # Extract dimension name: 'include_formality' -> 'formality', 'exclude_seasons' -> 'seasons'
-            dimension = key.replace('include_', '').replace('exclude_', '')
-            if dimension in self._PRE_FILTER_COLUMN_MAP:
-                has_prefilterable = True
-                break
-
-        if not has_prefilterable:
-            return None
-
-        try:
-            import time
-            t_start = time.time()
-
-            # Build the Supabase query
-            query = self.supabase.table('product_attributes').select('sku_id')
-
-            for key, values in attribute_filters.items():
-                if not values:
-                    continue
-
-                is_exclude = key.startswith('exclude_')
-                dimension = key.replace('include_', '').replace('exclude_', '')
-
-                if dimension not in self._PRE_FILTER_COLUMN_MAP:
-                    continue  # JSONB field, skip -- handled in Python
-
-                column, col_type = self._PRE_FILTER_COLUMN_MAP[dimension]
-
-                # Lowercase the values for case-insensitive matching
-                # NOTE: product_attributes stores mixed-case values, so we use ilike for single
-                # and overlaps for arrays (which are case-sensitive in Postgres)
-                if col_type == 'single':
-                    if is_exclude:
-                        # Exclude: NOT IN (val1, val2, ...)
-                        # Supabase: .not_.in_(column, values)
-                        query = query.not_.in_(column, values)
-                    else:
-                        # Include: IN (val1, val2, ...)
-                        query = query.in_(column, values)
-
-                elif col_type == 'multi':
-                    if is_exclude:
-                        # Exclude any product that has overlap with excluded values
-                        # Supabase: .not_.overlaps(column, values)
-                        query = query.not_.overlaps(column, values)
-                    else:
-                        # Include: product must have at least one matching value
-                        # Supabase: .overlaps(column, values)
-                        query = query.overlaps(column, values)
-
-            result = query.execute()
-
-            matching_ids = [str(r['sku_id']) for r in (result.data or [])]
-
-            elapsed_ms = (time.time() - t_start) * 1000
-            print(f"[CandidateSelection] Pre-filter query: {len(matching_ids)} products match attribute filters ({elapsed_ms:.0f}ms)")
-
-            return matching_ids
-
-        except Exception as e:
-            print(f"[CandidateSelection] Pre-filter query failed (non-fatal, falling back to Python): {e}")
-            return None
-
     def _retrieve_exploration_keyset(
         self,
         hard_filters: HardFilters,
@@ -867,13 +798,36 @@ class CandidateSelectionModule:
         new_arrivals_days: int = 7,
         # Material inclusion filter (SQL-level)
         include_materials: Optional[List[str]] = None,
-        # Pre-filtered product IDs (from product_attributes query)
-        include_product_ids: Optional[List[str]] = None,
+        # Attribute filters (passed directly to SQL via product_attributes JOIN)
+        attr_include_formality: Optional[List[str]] = None,
+        attr_exclude_formality: Optional[List[str]] = None,
+        attr_include_seasons: Optional[List[str]] = None,
+        attr_exclude_seasons: Optional[List[str]] = None,
+        attr_include_style_tags: Optional[List[str]] = None,
+        attr_exclude_style_tags: Optional[List[str]] = None,
+        attr_include_color_family: Optional[List[str]] = None,
+        attr_exclude_color_family: Optional[List[str]] = None,
+        attr_include_silhouette: Optional[List[str]] = None,
+        attr_exclude_silhouette: Optional[List[str]] = None,
+        attr_include_fit_type: Optional[List[str]] = None,
+        attr_exclude_fit_type: Optional[List[str]] = None,
+        attr_include_coverage: Optional[List[str]] = None,
+        attr_exclude_coverage: Optional[List[str]] = None,
+        attr_include_pattern: Optional[List[str]] = None,
+        attr_exclude_pattern: Optional[List[str]] = None,
+        attr_include_neckline: Optional[List[str]] = None,
+        attr_exclude_neckline: Optional[List[str]] = None,
+        attr_include_sleeve_type: Optional[List[str]] = None,
+        attr_exclude_sleeve_type: Optional[List[str]] = None,
+        attr_include_length: Optional[List[str]] = None,
+        attr_exclude_length: Optional[List[str]] = None,
+        attr_include_occasions: Optional[List[str]] = None,
+        attr_exclude_occasions: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """Retrieve exploration items with deterministic ordering.
 
-        If preferred_brands is provided, uses brand-priority function to
-        boost preferred brands to the top of results.
+        Attribute filters are applied directly in SQL via a LEFT JOIN to
+        product_attributes. No pre-filter step needed.
 
         Args:
             hard_filters: Hard filters from user state
@@ -886,6 +840,7 @@ class CandidateSelectionModule:
             on_sale_only: If True, only return items on sale
             new_arrivals_only: If True, only return items added in last N days
             new_arrivals_days: Number of days to consider for new arrivals
+            attr_*: Attribute filters passed directly to SQL JOIN conditions
         """
 
         try:
@@ -915,14 +870,13 @@ class CandidateSelectionModule:
                 'cursor_score': cursor_score,
                 'cursor_id': cursor_id,
                 'p_limit': limit,
-                # Lifestyle filters - occasions now filtered in Python via product_attributes
+                # Lifestyle filters
                 'exclude_styles': hard_filters.exclude_styles,
-                'include_occasions': None,  # Filtered in Python via product_attributes.occasions
+                'include_occasions': None,  # Filtered via attr_include_occasions in SQL JOIN
                 'include_article_types': None,  # Python handles article_type filtering via name matching
-                'style_threshold': 0.25,  # Default for backward compat with SQL functions
+                'style_threshold': 0.25,
                 'occasion_threshold': 0.18,
-                # Pattern filters - patterns now filtered in Python via product_attributes.pattern
-                'include_patterns': None,  # Filtered in Python via product_attributes.pattern
+                'include_patterns': None,  # Filtered via attr_include_pattern in SQL JOIN
                 'exclude_patterns': None,
                 'pattern_threshold': 0.30,
                 # Sale/New arrivals filters
@@ -931,21 +885,46 @@ class CandidateSelectionModule:
                 'new_arrivals_days': new_arrivals_days,
                 # SQL-level seen history exclusion
                 'exclude_product_ids': sql_exclude_ids,
-                # Material inclusion filter (SQL-level)
+                # Material inclusion filter (SQL-level on products table)
                 'include_materials': include_materials,
-                # Pre-filtered product IDs (from product_attributes query)
-                'include_product_ids': include_product_ids,
+                # Attribute filters via product_attributes JOIN (24 params)
+                'attr_include_formality': attr_include_formality,
+                'attr_exclude_formality': attr_exclude_formality,
+                'attr_include_seasons': attr_include_seasons,
+                'attr_exclude_seasons': attr_exclude_seasons,
+                'attr_include_style_tags': attr_include_style_tags,
+                'attr_exclude_style_tags': attr_exclude_style_tags,
+                'attr_include_color_family': attr_include_color_family,
+                'attr_exclude_color_family': attr_exclude_color_family,
+                'attr_include_silhouette': attr_include_silhouette,
+                'attr_exclude_silhouette': attr_exclude_silhouette,
+                'attr_include_fit_type': attr_include_fit_type,
+                'attr_exclude_fit_type': attr_exclude_fit_type,
+                'attr_include_coverage': attr_include_coverage,
+                'attr_exclude_coverage': attr_exclude_coverage,
+                'attr_include_pattern': attr_include_pattern,
+                'attr_exclude_pattern': attr_exclude_pattern,
+                'attr_include_neckline': attr_include_neckline,
+                'attr_exclude_neckline': attr_exclude_neckline,
+                'attr_include_sleeve_type': attr_include_sleeve_type,
+                'attr_exclude_sleeve_type': attr_exclude_sleeve_type,
+                'attr_include_length': attr_include_length,
+                'attr_exclude_length': attr_exclude_length,
+                'attr_include_occasions': attr_include_occasions,
+                'attr_exclude_occasions': attr_exclude_occasions,
             }
 
-            # Debug log article type filtering
+            # Debug logging
             if hard_filters.include_article_types:
                 print(f"[CandidateSelection] SQL filter include_article_types: {hard_filters.include_article_types}")
 
             if sql_exclude_ids:
                 print(f"[CandidateSelection] SQL-level exclude_product_ids: {len(sql_exclude_ids)} items")
 
-            if include_product_ids:
-                print(f"[CandidateSelection] SQL-level include_product_ids (pre-filter): {len(include_product_ids)} items")
+            # Log active attribute filters
+            active_attrs = [k for k, v in params.items() if k.startswith('attr_') and v is not None]
+            if active_attrs:
+                print(f"[CandidateSelection] SQL-level attribute filters: {', '.join(active_attrs)}")
 
             # Log sale/new filters
             if on_sale_only:
@@ -1253,13 +1232,22 @@ class CandidateSelectionModule:
 
         try:
             # Query product_attributes table directly
-            result = self.supabase.table('product_attributes') \
-                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, silhouette, construction, coverage_level, skin_exposure, coverage_details, model_body_type, model_size_estimate') \
-                .in_('sku_id', product_ids) \
-                .execute()
+            # PostgREST has a URL length limit (~600 UUIDs in .in_() with full select).
+            # Batch queries to stay under the limit.
+            ENRICH_BATCH_SIZE = 500
+            select_cols = 'sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, silhouette, construction, coverage_level, skin_exposure, coverage_details, model_body_type, model_size_estimate'
+
+            all_rows = []
+            for i in range(0, len(product_ids), ENRICH_BATCH_SIZE):
+                batch_ids = product_ids[i:i + ENRICH_BATCH_SIZE]
+                result = self.supabase.table('product_attributes') \
+                    .select(select_cols) \
+                    .in_('sku_id', batch_ids) \
+                    .execute()
+                all_rows.extend(result.data or [])
 
             # Build lookup dict
-            attrs_by_id = {str(r['sku_id']): r for r in (result.data or [])}
+            attrs_by_id = {str(r['sku_id']): r for r in all_rows}
 
             # Track enrichment stats
             enriched_count = 0

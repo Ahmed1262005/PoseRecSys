@@ -516,6 +516,7 @@ OCCASION_ALLOWED: Dict[str, Dict[str, Set[str]]] = {
         "one_piece": {
             "sundress", "maxi_dress", "coverup", "swimsuit", "bikini",
             "kaftan", "romper",
+            "dress", "mini_dress",  # Light dresses are valid beachwear
         },
         "outerwear": {
             "linen_jacket", "kimono", "coverup",
@@ -541,15 +542,18 @@ OCCASION_ALLOWED: Dict[str, Dict[str, Set[str]]] = {
         "tops": {
             "silk_top", "cami", "blouse", "sequin_top", "shell",
             "halter_top",  # Dressy halter OK for evening
+            "bodysuit", "sweater", "cardigan", "turtleneck",
         },
         "bottoms": {
             "wide_leg_pants", "dress_pants", "midi_skirt", "maxi_skirt",
             "pencil_skirt", "pleated_skirt",
+            "skirt", "mini_skirt", "aline_skirt", "pants",
         },
         "one_piece": {
             "cocktail_dress", "evening_dress", "gown", "maxi_dress",
             "midi_dress", "slip_dress", "bodycon_dress", "wrap_dress",
             "jumpsuit",
+            "dress", "mini_dress", "sheath_dress", "aline_dress", "shirt_dress",
         },
         "outerwear": {
             "blazer", "evening_jacket", "structured_jacket", "coat",

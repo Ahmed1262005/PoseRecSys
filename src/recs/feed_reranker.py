@@ -1,28 +1,27 @@
 """
-Greedy Constrained List-wise Reranker for Fashion Feed.
+Soft-Penalty Greedy Reranker for Fashion Feed.
 
-This is the "secret sauce" that makes the feed feel like a human stylist.
+Builds the feed one item at a time using SOFT score penalties for diversity
+instead of hard caps that reject items. This ensures the feed always fills
+regardless of candidate pool size.
 
-Instead of taking the top-N by score, we BUILD the feed one item at a time,
-enforcing constraints at each step:
-
+Algorithm:
 1. Sort candidates by session score (descending)
 2. For each position in the feed:
-   a. Pick the highest-scoring candidate that passes ALL constraints
-   b. Update constraint counters
-   c. At certain positions, inject exploration items
+   a. Scan all remaining candidates
+   b. Compute adjusted_score = raw_score * brand_decay * cluster_decay
+                               * combo_penalty * category_overshoot_penalty
+   c. Pick the candidate with the highest adjusted_score
+   d. Only HARD-REJECT if brand exceeds max_brand_share of feed
+   e. Update counters
 3. Continue until the feed is full
 
-Constraints:
-- max_per_brand: No more than N items from the same brand
-- max_per_cluster: No more than N items from the same persona cluster
-- max_per_type: No more than N items from the same item type
-- no_repeat_combo: Avoid showing items with identical attribute combos
-- exploration_rate: Inject X% items from outside the user's comfort zone
-
-This is the standard approach used by Zalando, Pinterest, Etsy, and Amazon
-for fashion/marketplace feeds. It scales and converts to ML later because
-every item position + constraints become features for learning-to-rank.
+Why soft penalties instead of hard caps:
+- Hard caps (max 4 per brand) kill feeds when the candidate pool is small
+  (e.g., after attribute filtering for "evening" → 83 candidates, 5 brands)
+- Soft penalties naturally adapt: with 80 brands, repeats get pushed down
+  by fresh-brand items; with 5 brands, repeats still fill the feed
+- One config works for both filtered and unfiltered feeds
 """
 
 import math
@@ -98,37 +97,44 @@ def compute_category_caps(
 
 @dataclass(frozen=True)
 class RerankerConfig:
-    """Tunable parameters for the greedy constrained reranker."""
+    """Tunable parameters for the soft-penalty greedy reranker.
 
-    # --- Diversity caps ---
-    max_per_brand: int = 4
-    max_per_cluster: int = 8
-    max_per_type: int = 6          # fallback for raw types not in a group
+    Diversity is achieved through score decay factors, not hard caps.
+    The only hard reject is max_brand_share (safety net for degenerate pools).
+    """
 
-    # --- Category proportional caps ---
-    # If set, overrides max_per_type for grouped categories.
-    # Keys: "tops", "bottoms", "dresses", "outerwear", "_other"
-    # Values: fraction of target_size (e.g. 0.35 = 35%)
+    # --- Soft penalty decay factors ---
+    # Each additional item from the same brand/cluster multiplies the
+    # adjusted score by the decay factor. e.g., brand_decay=0.85 means:
+    #   1st item from brand: 1.0x, 2nd: 0.85x, 3rd: 0.72x, 4th: 0.61x
+    brand_decay: float = 0.85
+    cluster_decay: float = 0.92
+
+    # Flat penalty for items with identical (cluster, category, color, fit)
+    combo_penalty: float = 0.70
+
+    # Penalty when a category group exceeds its proportional target
+    category_overshoot_penalty: float = 0.80
+
+    # --- Hard safety net ---
+    # No single brand can exceed this fraction of the feed.
+    # At target_size=50, max_brand_share=0.40 means max 20 items per brand.
+    max_brand_share: float = 0.40
+
+    # --- Strict diversity (top of feed only) ---
+    # In the first N positions, require unique brands (hard reject).
+    # Set to 3 — achievable even with small pools.
+    strict_diversity_positions: int = 3
+
+    # --- Category proportional targets (for overshoot penalty) ---
     category_proportions: Dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_CATEGORY_PROPORTIONS)
     )
-
-    # --- Attribute combo dedup ---
-    # Items with the same (brand_cluster, broad_category, color_family, fit)
-    # are considered "too similar" -- only keep the first one.
-    combo_dedup: bool = True
 
     # --- Exploration ---
     exploration_rate: float = 0.08  # 8% of positions are exploration
     exploration_min_position: int = 5  # Don't explore in first 5 positions
     exploration_cluster_penalty: float = 0.3  # How different exploration must be
-
-    # --- Position-aware diversity ---
-    # In the first N items, enforce stricter diversity (no brand repeats)
-    strict_diversity_positions: int = 10
-
-    # --- Seen penalty ---
-    seen_penalty_weight: float = 0.8
 
 
 DEFAULT_RERANKER_CONFIG = RerankerConfig()
@@ -140,9 +146,15 @@ DEFAULT_RERANKER_CONFIG = RerankerConfig()
 
 class GreedyConstrainedReranker:
     """
-    Build the feed one item at a time with constraints.
+    Build the feed one item at a time with soft score penalties.
 
-    Every serious commerce feed uses this pattern.
+    For each position, scans all remaining candidates and picks the one
+    with the highest adjusted score. Diversity emerges naturally because
+    repeated brands/clusters get progressively penalized.
+
+    The only hard rejects are:
+    - max_brand_share: prevents a single brand dominating the entire feed
+    - strict_diversity_positions: first 3 items must be different brands
     """
 
     def __init__(self, config: RerankerConfig = None):
@@ -157,13 +169,13 @@ class GreedyConstrainedReranker:
         exploration_pool: List[Any] = None,
     ) -> List[Any]:
         """
-        Build a constrained, diverse feed from scored candidates.
+        Build a diverse feed from scored candidates using soft penalties.
 
         Args:
             candidates: Pre-scored candidates (must have final_score, brand, etc.)
             target_size: How many items to return
             seen_ids: Product IDs already shown (hard exclude)
-            skipped_ids: Product IDs the user skipped (soft penalty)
+            skipped_ids: Product IDs the user skipped (not used by reranker)
             exploration_pool: Optional separate pool for exploration injection
 
         Returns:
@@ -171,34 +183,32 @@ class GreedyConstrainedReranker:
         """
         cfg = self.config
         seen_ids = seen_ids or set()
-        skipped_ids = skipped_ids or set()
 
-        # Step 1: Remove already-seen items
+        # Step 1: Remove already-seen items, mark available
         available = [
             c for c in candidates
             if (getattr(c, "item_id", None) or getattr(c, "product_id", ""))
             not in seen_ids
         ]
 
-        # Step 2: Sort by score (descending)
+        # Step 2: Sort by raw score (descending) for tie-breaking
         available.sort(key=lambda c: getattr(c, "final_score", 0.0), reverse=True)
 
-        # Step 3: Compute proportional category caps
+        # Step 3: Compute proportional category targets (for overshoot detection)
         category_caps = compute_category_caps(
             target_size, cfg.category_proportions
         )
 
-        # Step 4: Greedy selection with constraints
+        # Hard brand cap (the only hard diversity limit)
+        max_brand_items = max(3, int(target_size * cfg.max_brand_share))
+
+        # Step 4: Greedy selection with soft penalties
         result: List[Any] = []
         brand_counts: Dict[str, int] = defaultdict(int)
         cluster_counts: Dict[str, int] = defaultdict(int)
-        type_counts: Dict[str, int] = defaultdict(int)
         group_counts: Dict[str, int] = defaultdict(int)
         used_combos: Set[str] = set()
         used_ids: Set[str] = set()
-
-        # Track which candidates we've consumed
-        candidate_idx = 0
 
         for position in range(target_size):
             # Check if we should inject exploration
@@ -214,152 +224,104 @@ class GreedyConstrainedReranker:
                     result.append(exp_item)
                     self._update_counters(
                         exp_item, brand_counts, cluster_counts,
-                        type_counts, used_combos, used_ids, group_counts
+                        used_combos, used_ids, group_counts
                     )
                     continue
 
-            # Find the next valid candidate
-            picked = False
-            scan_start = candidate_idx
-            scan_count = 0
+            # Scan all remaining candidates, pick the best adjusted score
+            best_candidate = None
+            best_adjusted = -float("inf")
 
-            while candidate_idx < len(available):
-                candidate = available[candidate_idx]
-                candidate_idx += 1
-                scan_count += 1
-
-                pid = getattr(candidate, "item_id", None) or getattr(candidate, "product_id", "")
+            for candidate in available:
+                pid = (
+                    getattr(candidate, "item_id", None)
+                    or getattr(candidate, "product_id", "")
+                )
                 if pid in used_ids:
                     continue
 
-                # Check constraints
-                if self._passes_constraints(
-                    candidate, position, brand_counts, cluster_counts,
-                    type_counts, used_combos, group_counts, category_caps
-                ):
-                    result.append(candidate)
-                    self._update_counters(
-                        candidate, brand_counts, cluster_counts,
-                        type_counts, used_combos, used_ids, group_counts
-                    )
-                    picked = True
-                    break
+                brand = (getattr(candidate, "brand", "") or "").lower()
+                cluster_id = (
+                    get_cluster_for_item(brand) if brand else DEFAULT_CLUSTER
+                )
 
-                # If we've scanned too many without finding a match, relax constraints
-                if scan_count > 50:
-                    break
+                # === HARD REJECTS (only two) ===
 
-            if not picked:
-                # Fallback: take the next available item regardless of constraints
-                # (better to show something than nothing)
-                for fallback_idx in range(candidate_idx, len(available)):
-                    candidate = available[fallback_idx]
-                    pid = getattr(candidate, "item_id", None) or getattr(candidate, "product_id", "")
-                    if pid not in used_ids:
-                        result.append(candidate)
-                        self._update_counters(
-                            candidate, brand_counts, cluster_counts,
-                            type_counts, used_combos, used_ids, group_counts
-                        )
-                        candidate_idx = fallback_idx + 1
-                        break
-                else:
-                    # Truly out of candidates
-                    break
+                # 1. Brand share cap — safety net
+                if brand and brand_counts[brand] >= max_brand_items:
+                    continue
+
+                # 2. Strict diversity in first N positions
+                if position < cfg.strict_diversity_positions:
+                    if brand and brand_counts[brand] > 0:
+                        continue
+
+                # === SOFT PENALTIES ===
+
+                raw_score = getattr(candidate, "final_score", 0.0)
+                adjusted = raw_score
+
+                # Brand decay: 0.85^n for nth item from same brand
+                if brand:
+                    adjusted *= cfg.brand_decay ** brand_counts[brand]
+
+                # Cluster decay: 0.92^n for nth item from same cluster
+                if cluster_id:
+                    adjusted *= cfg.cluster_decay ** cluster_counts[cluster_id]
+
+                # Combo penalty: 0.70 if duplicate attribute combo
+                combo_key = self._get_combo_key(candidate, cluster_id)
+                if combo_key and combo_key in used_combos:
+                    adjusted *= cfg.combo_penalty
+
+                # Category overshoot penalty: 0.80 if group exceeds target
+                group = _resolve_category_group(candidate)
+                cap = category_caps.get(group, 999)
+                if group_counts[group] >= cap:
+                    adjusted *= cfg.category_overshoot_penalty
+
+                if adjusted > best_adjusted:
+                    best_adjusted = adjusted
+                    best_candidate = candidate
+
+            if best_candidate is None:
+                # Truly out of candidates
+                break
+
+            result.append(best_candidate)
+            self._update_counters(
+                best_candidate, brand_counts, cluster_counts,
+                used_combos, used_ids, group_counts
+            )
 
         return result
-
-    def _passes_constraints(
-        self,
-        candidate: Any,
-        position: int,
-        brand_counts: Dict[str, int],
-        cluster_counts: Dict[str, int],
-        type_counts: Dict[str, int],
-        used_combos: Set[str],
-        group_counts: Dict[str, int] = None,
-        category_caps: Dict[str, int] = None,
-    ) -> bool:
-        """Check if a candidate passes all diversity constraints."""
-        cfg = self.config
-
-        brand = (getattr(candidate, "brand", "") or "").lower()
-        cluster_id = get_cluster_for_item(brand) if brand else DEFAULT_CLUSTER
-        item_type = (
-            getattr(candidate, "broad_category", "")
-            or getattr(candidate, "article_type", "")
-            or ""
-        ).lower()
-
-        # Brand cap
-        if brand and brand_counts[brand] >= cfg.max_per_brand:
-            return False
-
-        # Strict diversity in first N positions (no brand repeats)
-        if position < cfg.strict_diversity_positions:
-            if brand and brand_counts[brand] > 0:
-                return False
-
-        # Cluster cap
-        if cluster_id and cluster_counts[cluster_id] >= cfg.max_per_cluster:
-            return False
-
-        # Category group proportional cap (preferred over flat max_per_type)
-        if category_caps and group_counts is not None:
-            group = _resolve_category_group(candidate)
-            if group == "_other":
-                # Unknown categories: use the more generous of proportional
-                # cap or flat max_per_type so we don't over-restrict misc items
-                cap = max(category_caps.get(group, cfg.max_per_type), cfg.max_per_type)
-            else:
-                cap = category_caps.get(group, cfg.max_per_type)
-            if group_counts[group] >= cap:
-                return False
-        elif item_type and type_counts[item_type] >= cfg.max_per_type:
-            # Fallback: flat type cap when no proportional caps provided
-            return False
-
-        # Attribute combo dedup
-        if cfg.combo_dedup:
-            combo = self._get_combo_key(candidate, cluster_id)
-            if combo and combo in used_combos:
-                return False
-
-        return True
 
     def _update_counters(
         self,
         candidate: Any,
         brand_counts: Dict[str, int],
         cluster_counts: Dict[str, int],
-        type_counts: Dict[str, int],
         used_combos: Set[str],
         used_ids: Set[str],
-        group_counts: Dict[str, int] = None,
+        group_counts: Dict[str, int],
     ) -> None:
-        """Update constraint counters after placing an item."""
+        """Update counters after placing an item."""
         brand = (getattr(candidate, "brand", "") or "").lower()
         cluster_id = get_cluster_for_item(brand) if brand else DEFAULT_CLUSTER
-        item_type = (
-            getattr(candidate, "broad_category", "")
-            or getattr(candidate, "article_type", "")
-            or ""
-        ).lower()
 
-        pid = getattr(candidate, "item_id", None) or getattr(candidate, "product_id", "")
+        pid = (
+            getattr(candidate, "item_id", None)
+            or getattr(candidate, "product_id", "")
+        )
         used_ids.add(pid)
 
         if brand:
             brand_counts[brand] += 1
         if cluster_id:
             cluster_counts[cluster_id] += 1
-        if item_type:
-            type_counts[item_type] += 1
 
-        # Track category group counts for proportional allocation
-        if group_counts is not None:
-            group = _resolve_category_group(candidate)
-            group_counts[group] += 1
+        group = _resolve_category_group(candidate)
+        group_counts[group] += 1
 
         combo = self._get_combo_key(candidate, cluster_id)
         if combo:
@@ -368,7 +330,7 @@ class GreedyConstrainedReranker:
     @staticmethod
     def _get_combo_key(candidate: Any, cluster_id: str = "") -> str:
         """
-        Build attribute combo key for dedup.
+        Build attribute combo key for soft penalty.
 
         Items with the same (cluster, type, color_family, fit) are "too similar."
         """
@@ -379,7 +341,7 @@ class GreedyConstrainedReranker:
             (getattr(candidate, "fit", "") or "").lower(),
         ]
         key = "|".join(parts)
-        # Don't dedup if most fields are empty
+        # Don't penalize if most fields are empty
         if key.count("|") >= 3 and key.replace("|", "") == "":
             return ""
         return key
@@ -460,7 +422,6 @@ class GreedyConstrainedReranker:
     @staticmethod
     def _entropy(counts: Dict[str, int]) -> float:
         """Shannon entropy of a distribution (higher = more diverse)."""
-        import math
         total = sum(counts.values())
         if total == 0:
             return 0.0
