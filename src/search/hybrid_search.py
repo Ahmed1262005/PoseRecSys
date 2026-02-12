@@ -23,12 +23,14 @@ from search.algolia_client import AlgoliaClient, get_algolia_client
 from search.query_classifier import QueryClassifier, QueryIntent
 from search.reranker import SessionReranker
 from search.analytics import SearchAnalytics, get_search_analytics
+from search.algolia_config import get_replica_index_name
 from search.models import (
     FacetValue,
     HybridSearchRequest,
     HybridSearchResponse,
     ProductResult,
     PaginationInfo,
+    SortBy,
 )
 
 logger = get_logger(__name__)
@@ -115,6 +117,15 @@ class HybridSearchService:
         if clean_query != request.query:
             request = request.model_copy(update={"query": clean_query})
 
+        # -----------------------------------------------------------------
+        # SORT-MODE FAST PATH
+        # When sort_by is not "relevance", use Algolia-only via a virtual
+        # replica index. Skip semantic search, RRF merge, and reranker —
+        # they would break the deterministic sort order.
+        # -----------------------------------------------------------------
+        if request.sort_by != SortBy.RELEVANCE:
+            return self._search_sorted(request, user_id)
+
         # Step 1: Classify query intent
         intent = self._classifier.classify(request.query)
         algolia_weight = self._classifier.get_algolia_weight(intent)
@@ -171,7 +182,7 @@ class HybridSearchService:
         # Step 3: Run Algolia search
         # Auto-detect active filters from the request model.
         # Checks all Optional fields that are not pagination/query/session/boost.
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         has_filters = any(
             getattr(request, field_name) not in (None, False, [])
             for field_name in HybridSearchRequest.model_fields
@@ -273,6 +284,7 @@ class HybridSearchService:
         return HybridSearchResponse(
             query=request.query,
             intent=intent.value,
+            sort_by=request.sort_by.value,
             results=products,
             pagination=PaginationInfo(
                 page=request.page,
@@ -282,6 +294,169 @@ class HybridSearchService:
             ),
             timing=timing,
             facets=facets,
+        )
+
+    # =========================================================================
+    # Sorted Search (Algolia-only via virtual replicas)
+    # =========================================================================
+
+    def _search_sorted(
+        self,
+        request: HybridSearchRequest,
+        user_id: Optional[str] = None,
+    ) -> HybridSearchResponse:
+        """
+        Algolia-only search path for non-relevance sort orders.
+
+        Uses a virtual replica index that sorts by the requested field
+        (price, trending, etc.). Skips semantic search, RRF merge, and
+        reranker to preserve the deterministic sort order.
+
+        Algolia handles pagination natively — no in-memory slicing needed.
+        """
+        t_start = time.time()
+        timing: Dict[str, int] = {}
+
+        # Resolve the replica index name
+        replica_index = get_replica_index_name(
+            self.algolia.index_name, request.sort_by.value,
+        )
+        if not replica_index:
+            # Should never happen — relevance is handled by the main path
+            logger.warning("No replica for sort_by=%s, falling back to relevance", request.sort_by)
+            replica_index = self.algolia.index_name
+
+        # Classify intent (still useful for brand injection + query cleaning)
+        intent = self._classifier.classify(request.query)
+
+        # Brand injection for exact brand queries
+        matched_brand = None
+        if intent == QueryIntent.EXACT:
+            matched_brand = self._classifier.extract_brand(request.query)
+            if matched_brand and not request.brands:
+                request = request.model_copy(update={"brands": [matched_brand]})
+
+        # Extract attribute filters from query text
+        extracted, matched_terms = self._classifier.extract_attributes(request.query)
+        if extracted:
+            updates = {}
+            for field, values in extracted.items():
+                if not getattr(request, field, None):
+                    updates[field] = values
+            if updates:
+                request = request.model_copy(update=updates)
+
+        # Clean query + build filters (same as the relevance path)
+        algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
+        algolia_filters = self._build_algolia_filters(request)
+
+        # Search the replica with Algolia-native pagination
+        t_algolia = time.time()
+        try:
+            resp = self.algolia.search(
+                query=algolia_query,
+                filters=algolia_filters,
+                hits_per_page=request.page_size,
+                page=request.page - 1,  # Algolia is 0-indexed, API is 1-indexed
+                facets=_FACET_FIELDS,
+                index_name=replica_index,
+            )
+        except Exception as e:
+            logger.error(
+                "Sorted search failed",
+                replica=replica_index,
+                sort_by=request.sort_by.value,
+                error=str(e),
+            )
+            resp = {"hits": [], "nbHits": 0, "nbPages": 0}
+        timing["algolia_ms"] = int((time.time() - t_algolia) * 1000)
+
+        # Normalize hits to result dicts (same format as _search_algolia)
+        results = []
+        for hit in resp.get("hits", []):
+            results.append({
+                "product_id": hit.get("objectID"),
+                "name": hit.get("name", ""),
+                "brand": hit.get("brand", ""),
+                "image_url": hit.get("image_url"),
+                "gallery_images": filter_gallery_images(hit.get("gallery_images") or []),
+                "price": float(hit.get("price", 0) or 0),
+                "original_price": hit.get("original_price"),
+                "is_on_sale": hit.get("is_on_sale", False),
+                "category_l1": hit.get("category_l1"),
+                "category_l2": hit.get("category_l2"),
+                "broad_category": hit.get("broad_category"),
+                "article_type": hit.get("article_type"),
+                "primary_color": hit.get("primary_color"),
+                "color_family": hit.get("color_family"),
+                "pattern": hit.get("pattern"),
+                "apparent_fabric": hit.get("apparent_fabric"),
+                "fit_type": hit.get("fit_type"),
+                "formality": hit.get("formality"),
+                "silhouette": hit.get("silhouette"),
+                "length": hit.get("length"),
+                "neckline": hit.get("neckline"),
+                "sleeve_type": hit.get("sleeve_type"),
+                "rise": hit.get("rise"),
+                "style_tags": hit.get("style_tags") or [],
+                "occasions": hit.get("occasions") or [],
+                "seasons": hit.get("seasons") or [],
+                "source": "algolia",
+            })
+
+        # Parse facets (same logic as _search_algolia)
+        parsed_facets: Optional[Dict[str, List[FacetValue]]] = None
+        raw_facets = resp.get("facets")
+        if raw_facets:
+            parsed_facets = {}
+            for facet_name, value_counts in raw_facets.items():
+                values = [
+                    FacetValue(value=val, count=cnt)
+                    for val, cnt in sorted(value_counts.items(), key=lambda x: -x[1])
+                    if cnt > 1 and val and val.lower() not in ("null", "n/a", "none", "")
+                ]
+                if len(values) >= 2:
+                    parsed_facets[facet_name] = values
+
+        # Build response
+        total_hits = resp.get("nbHits", len(results))
+        nb_pages = resp.get("nbPages", 1)
+        has_more = request.page < nb_pages
+
+        products = [self._to_product_result(r, idx + 1) for idx, r in enumerate(results)]
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+
+        # Analytics (fire-and-forget)
+        try:
+            self.analytics.log_search(
+                query=request.query,
+                intent=intent.value,
+                total_results=total_hits,
+                algolia_results=len(results),
+                semantic_results=0,
+                filters=self._extract_filter_summary(request),
+                latency_ms=timing.get("total_ms", 0),
+                algolia_latency_ms=timing.get("algolia_ms", 0),
+                semantic_latency_ms=0,
+                user_id=user_id,
+                session_id=request.session_id,
+            )
+        except Exception as e:
+            logger.warning("Failed to log sorted search analytics", error=str(e))
+
+        return HybridSearchResponse(
+            query=request.query,
+            intent=intent.value,
+            sort_by=request.sort_by.value,
+            results=products,
+            pagination=PaginationInfo(
+                page=request.page,
+                page_size=request.page_size,
+                has_more=has_more,
+                total_results=total_hits,
+            ),
+            timing=timing,
+            facets=parsed_facets,
         )
 
     # =========================================================================

@@ -43,9 +43,9 @@ src/
 │
 ├── search/                             # Hybrid search module
 │   ├── __init__.py                     # Module exports
-│   ├── algolia_config.py              # Index settings, 30 synonyms, record mapping
+│   ├── algolia_config.py              # Index settings, 30 synonyms, record mapping, replica config
 │   ├── algolia_client.py              # Algolia v4 SearchClientSync wrapper (singleton)
-│   ├── models.py                      # Pydantic request/response models (23 filters)
+│   ├── models.py                      # Pydantic request/response models (23 filters, SortBy enum)
 │   ├── query_classifier.py            # Intent classification (exact/specific/vague)
 │   ├── hybrid_search.py               # Main service: Algolia + FashionCLIP + RRF merge
 │   ├── reranker.py                    # Session-aware reranking with dedup & diversity
@@ -72,6 +72,7 @@ src/
 
 scripts/
 ├── index_to_algolia.py                 # Bulk indexing from Supabase -> Algolia
+├── setup_algolia_replicas.py           # One-time: create virtual replicas for sort-by
 └── test_search_gradio.py               # Gradio test UI (5 tabs, 23 filters)
 
 sql/                                    # Database migrations
@@ -135,7 +136,7 @@ Public endpoints (no auth required):
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/search/hybrid` | POST | Yes | Hybrid search (Algolia + FashionCLIP) |
+| `/api/search/hybrid` | POST | Yes | Hybrid search (Algolia + FashionCLIP), supports `sort_by` |
 | `/api/search/autocomplete` | GET | Yes | Product + brand autocomplete |
 | `/api/search/click` | POST | Yes | Track click event |
 | `/api/search/conversion` | POST | Yes | Track conversion event |
@@ -197,7 +198,7 @@ Public endpoints (no auth required):
 
 ## Hybrid Search Architecture
 
-### Pipeline Flow
+### Pipeline Flow (sort_by=relevance, default)
 1. **Query Classification** - Classify intent as EXACT (brand), SPECIFIC (category+filters), or VAGUE
 2. **Algolia Search** - Lexical/keyword search with filters and facets (19 facet fields)
 3. **FashionCLIP Semantic Search** - Visual/semantic similarity via pgvector embeddings
@@ -206,6 +207,41 @@ Public endpoints (no auth required):
 6. **Enrichment** - Batch-fetch Gemini attributes from Algolia for semantic results
 7. **Reranking** - Session dedup, near-duplicate removal, profile boosts, brand diversity
 8. **Facets** - Return filterable facet counts (>1 count, excludes null/N/A, 2+ distinct values)
+
+### Sort-by (search)
+
+The `sort_by` parameter controls how results are ranked. Two modes exist:
+
+| `sort_by` value | Pipeline | Speed |
+|-----------------|----------|-------|
+| `relevance` (default) | Full hybrid: Algolia + FashionCLIP + RRF merge + reranker | ~15s |
+| `price_asc` | Algolia-only via virtual replica `products_price_asc` | ~200ms |
+| `price_desc` | Algolia-only via virtual replica `products_price_desc` | ~200ms |
+| `trending` | Algolia-only via virtual replica `products_trending` | ~200ms |
+
+**When `sort_by != relevance`:** Algolia-only fast path. Skips semantic search, RRF merge, and reranker
+to preserve deterministic sort order. Uses Algolia-native pagination. All 23 filters still apply.
+
+**Virtual replicas** share primary index data (no extra storage). Each overrides `customRanking`:
+- `products_price_asc` → `asc(price)`
+- `products_price_desc` → `desc(price)`
+- `products_trending` → `desc(trending_score), desc(popularity_score)`
+
+Setup: `PYTHONPATH=src python scripts/setup_algolia_replicas.py` (one-time, needs `ALGOLIA_WRITE_KEY`)
+
+**Example request:**
+```json
+POST /api/search/hybrid
+{
+  "query": "dress",
+  "sort_by": "price_asc",
+  "brands": ["Boohoo"],
+  "min_price": 20,
+  "max_price": 100
+}
+```
+
+**Response includes:** `"sort_by": "price_asc"` in the top-level response object.
 
 ### Search Filters (23 total)
 Query, page, per_page, brands, exclude_brands, categories, colors, min_price, max_price,

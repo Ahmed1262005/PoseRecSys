@@ -18,6 +18,14 @@ class QueryIntent(str, Enum):
     VAGUE = "vague"        # Style/occasion/vibe ("quiet luxury", "date night")
 
 
+class SortBy(str, Enum):
+    """Sort order for search results."""
+    RELEVANCE = "relevance"      # Default: full hybrid pipeline (Algolia + semantic + RRF + reranker)
+    PRICE_ASC = "price_asc"      # Price low to high (Algolia replica)
+    PRICE_DESC = "price_desc"    # Price high to low (Algolia replica)
+    TRENDING = "trending"        # Trending score descending (Algolia replica)
+
+
 # ============================================================================
 # Request Models
 # ============================================================================
@@ -57,6 +65,9 @@ class HybridSearchRequest(BaseModel):
 
     # Session
     session_id: Optional[str] = Field(None, description="Session ID for deduplication")
+
+    # Sort
+    sort_by: SortBy = Field(SortBy.RELEVANCE, description="Sort order: relevance, price_asc, price_desc, trending")
 
     # Search options
     semantic_boost: float = Field(0.4, ge=0.0, le=1.0, description="Weight for semantic results in RRF")
@@ -151,6 +162,7 @@ class HybridSearchResponse(BaseModel):
     """Response from hybrid search."""
     query: str
     intent: str
+    sort_by: str = Field("relevance", description="Applied sort order")
     results: List[ProductResult]
     pagination: PaginationInfo
     timing: Dict[str, int] = Field(default_factory=dict, description="Timing breakdown in ms")

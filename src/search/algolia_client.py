@@ -28,6 +28,8 @@ from core.logging import get_logger
 from search.algolia_config import (
     ALGOLIA_INDEX_SETTINGS,
     ALGOLIA_SYNONYMS,
+    REPLICA_SUFFIXES,
+    get_replica_names,
 )
 
 logger = get_logger(__name__)
@@ -98,9 +100,67 @@ class AlgoliaClient:
         )
         return resp.to_dict()
 
-    def get_settings(self) -> dict:
+    def configure_replicas(self) -> List[dict]:
+        """
+        Declare virtual replicas on the primary index and configure each
+        replica's ranking.
+
+        This is a two-step process:
+        1. Set the `replicas` list on the primary index settings so Algolia
+           knows which virtual replicas exist.
+        2. Apply custom ranking settings to each virtual replica index.
+
+        Virtual replicas share the primary index's data and settings
+        (searchableAttributes, attributesForFaceting, etc.) — only
+        customRanking is overridden.
+
+        Returns:
+            List of response dicts (one per replica).
+        """
+        # Step 1: Declare replicas on the primary index and wait
+        replica_declarations = get_replica_names(self.index_name)
+        resp = self._client.set_settings(
+            index_name=self.index_name,
+            index_settings={"replicas": replica_declarations},
+        )
+        task_id = resp.to_dict().get("taskID")
+        if task_id:
+            self._client.wait_for_task(
+                index_name=self.index_name, task_id=task_id,
+            )
+        logger.info(
+            "Declared virtual replicas on primary index",
+            primary=self.index_name,
+            replicas=replica_declarations,
+        )
+
+        # Step 2: Configure each replica's ranking and wait for each
+        responses = []
+        for suffix, settings in REPLICA_SUFFIXES.items():
+            replica_name = f"{self.index_name}{suffix}"
+            resp = self._client.set_settings(
+                index_name=replica_name,
+                index_settings=settings,
+            )
+            resp_dict = resp.to_dict()
+            task_id = resp_dict.get("taskID")
+            if task_id:
+                self._client.wait_for_task(
+                    index_name=replica_name, task_id=task_id,
+                )
+            responses.append(resp_dict)
+            logger.info(
+                "Configured virtual replica",
+                replica=replica_name,
+                settings=settings,
+            )
+        return responses
+
+    def get_settings(self, index_name: Optional[str] = None) -> dict:
         """Get current index settings."""
-        resp = self._client.get_settings(index_name=self.index_name)
+        resp = self._client.get_settings(
+            index_name=index_name or self.index_name,
+        )
         return resp.to_dict()
 
     # =========================================================================
@@ -157,9 +217,10 @@ class AlgoliaClient:
         page: int = 0,
         attributes_to_retrieve: Optional[List[str]] = None,
         facets: Optional[List[str]] = None,
+        index_name: Optional[str] = None,
     ) -> dict:
         """
-        Search the index.
+        Search the index (or a replica).
 
         Args:
             query: Search query text.
@@ -169,6 +230,8 @@ class AlgoliaClient:
             page: Page number (0-indexed).
             attributes_to_retrieve: Specific attributes to return.
             facets: List of facet attribute names to return counts for.
+            index_name: Override index name (e.g. for virtual replicas).
+                        Defaults to the primary index.
 
         Returns:
             Dict with keys: hits (list of dicts), nbHits, page, nbPages,
@@ -189,7 +252,7 @@ class AlgoliaClient:
             params["facets"] = facets
 
         resp = self._client.search_single_index(
-            index_name=self.index_name,
+            index_name=index_name or self.index_name,
             search_params=params,
         )
         return resp.to_dict()

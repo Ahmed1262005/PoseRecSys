@@ -13,6 +13,11 @@ from datetime import datetime
 # Index Settings
 # ============================================================================
 
+# The primary index name (must match ALGOLIA_INDEX_NAME env var / settings).
+# Replica names are derived from this at configure-time via REPLICA_SETTINGS.
+# If your primary index is called something other than "products", the replica
+# names will be set dynamically in AlgoliaClient.configure_replicas().
+
 ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
     # ===========================================
     # SEARCHABLE ATTRIBUTES (priority order)
@@ -315,6 +320,53 @@ ALGOLIA_SYNONYMS: List[Dict[str, Any]] = [
     {"objectID": "athleisure_sporty", "type": "synonym",
      "synonyms": ["athleisure", "activewear"]},
 ]
+
+
+# ============================================================================
+# Virtual Replica Settings (for sort-by)
+# ============================================================================
+# Each key is a suffix appended to the primary index name.
+# The value is the index settings to apply to that virtual replica.
+# Virtual replicas inherit searchableAttributes, attributesForFaceting, etc.
+# from the primary — only customRanking needs to be overridden.
+
+REPLICA_SUFFIXES: Dict[str, Dict[str, Any]] = {
+    "_price_asc": {
+        "customRanking": ["asc(price)"],
+    },
+    "_price_desc": {
+        "customRanking": ["desc(price)"],
+    },
+    "_trending": {
+        "customRanking": [
+            "desc(trending_score)",
+            "desc(popularity_score)",
+        ],
+    },
+}
+
+
+# Map sort_by API values to replica index suffixes.
+# None means "use the primary index" (default relevance ranking).
+SORT_TO_REPLICA_SUFFIX: Dict[str, Optional[str]] = {
+    "relevance": None,
+    "price_asc": "_price_asc",
+    "price_desc": "_price_desc",
+    "trending": "_trending",
+}
+
+
+def get_replica_index_name(primary_index: str, sort_by: str) -> Optional[str]:
+    """Return the replica index name for a sort option, or None for relevance."""
+    suffix = SORT_TO_REPLICA_SUFFIX.get(sort_by)
+    if suffix is None:
+        return None
+    return f"{primary_index}{suffix}"
+
+
+def get_replica_names(primary_index: str) -> List[str]:
+    """Return all virtual replica index names for a primary index."""
+    return [f"virtual({primary_index}{suffix})" for suffix in REPLICA_SUFFIXES]
 
 
 # ============================================================================

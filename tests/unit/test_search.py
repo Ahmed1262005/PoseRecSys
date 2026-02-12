@@ -2012,7 +2012,7 @@ class TestAutoDetectFilters:
     def test_no_filters_detected(self):
         """Default request should have no filters."""
         from search.models import HybridSearchRequest
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         request = HybridSearchRequest(query="test")
         has_filters = any(
             getattr(request, f) not in (None, False, [])
@@ -2024,7 +2024,7 @@ class TestAutoDetectFilters:
     def test_brand_filter_detected(self):
         """Brand filter should be detected."""
         from search.models import HybridSearchRequest
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         request = HybridSearchRequest(query="test", brands=["Nike"])
         has_filters = any(
             getattr(request, f) not in (None, False, [])
@@ -2035,7 +2035,7 @@ class TestAutoDetectFilters:
 
     def test_on_sale_filter_detected(self):
         from search.models import HybridSearchRequest
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         request = HybridSearchRequest(query="test", on_sale_only=True)
         has_filters = any(
             getattr(request, f) not in (None, False, [])
@@ -2046,7 +2046,7 @@ class TestAutoDetectFilters:
 
     def test_price_filter_detected(self):
         from search.models import HybridSearchRequest
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         request = HybridSearchRequest(query="test", min_price=10)
         has_filters = any(
             getattr(request, f) not in (None, False, [])
@@ -2208,3 +2208,290 @@ class TestAlgoliaFallbackToSemantic:
 
         result = hybrid_service.search(HybridSearchRequest(query="blue midi dress"))
         mock_semantic.search_with_filters.assert_called_once()
+
+
+# =============================================================================
+# 15. Sort-by Tests
+# =============================================================================
+
+class TestSortByEnum:
+    """Tests for the SortBy enum and request model validation."""
+
+    def test_sort_by_enum_values(self):
+        from search.models import SortBy
+        assert SortBy.RELEVANCE.value == "relevance"
+        assert SortBy.PRICE_ASC.value == "price_asc"
+        assert SortBy.PRICE_DESC.value == "price_desc"
+        assert SortBy.TRENDING.value == "trending"
+
+    def test_default_sort_is_relevance(self):
+        from search.models import HybridSearchRequest, SortBy
+        req = HybridSearchRequest(query="dress")
+        assert req.sort_by == SortBy.RELEVANCE
+
+    def test_sort_by_accepts_valid_values(self):
+        from search.models import HybridSearchRequest, SortBy
+        for sort_val in ["relevance", "price_asc", "price_desc", "trending"]:
+            req = HybridSearchRequest(query="dress", sort_by=sort_val)
+            assert req.sort_by.value == sort_val
+
+    def test_sort_by_rejects_invalid_value(self):
+        from search.models import HybridSearchRequest
+        with pytest.raises(Exception):
+            HybridSearchRequest(query="dress", sort_by="invalid_sort")
+
+    def test_response_includes_sort_by(self):
+        from search.models import HybridSearchResponse, PaginationInfo
+        resp = HybridSearchResponse(
+            query="dress",
+            intent="specific",
+            sort_by="price_asc",
+            results=[],
+            pagination=PaginationInfo(page=1, page_size=50, has_more=False),
+        )
+        assert resp.sort_by == "price_asc"
+
+    def test_response_default_sort_by(self):
+        from search.models import HybridSearchResponse, PaginationInfo
+        resp = HybridSearchResponse(
+            query="dress",
+            intent="specific",
+            results=[],
+            pagination=PaginationInfo(page=1, page_size=50, has_more=False),
+        )
+        assert resp.sort_by == "relevance"
+
+
+class TestSortedSearchPath:
+    """Tests for the Algolia-only sorted search path."""
+
+    @pytest.fixture
+    def hybrid_service(self):
+        from search.hybrid_search import HybridSearchService
+        mock_algolia = MagicMock()
+        mock_algolia.index_name = "products"
+        mock_analytics = MagicMock()
+        return HybridSearchService(
+            algolia_client=mock_algolia,
+            analytics=mock_analytics,
+        )
+
+    def test_relevance_sort_runs_full_pipeline(self, hybrid_service):
+        """sort_by=relevance should run semantic + RRF (full pipeline)."""
+        from search.models import HybridSearchRequest, SortBy
+
+        mock_semantic = MagicMock()
+        mock_semantic.search_with_filters.return_value = {"results": []}
+        hybrid_service._semantic_engine = mock_semantic
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [{"objectID": "p1", "name": "Dress", "brand": "B", "price": 10}],
+            "nbHits": 1,
+        })
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.RELEVANCE),
+        )
+        # Semantic search should be called for the full pipeline
+        mock_semantic.search_with_filters.assert_called_once()
+        assert result.sort_by == "relevance"
+
+    def test_price_asc_skips_semantic(self, hybrid_service):
+        """sort_by=price_asc should use Algolia-only, skip semantic."""
+        from search.models import HybridSearchRequest, SortBy
+
+        mock_semantic = MagicMock()
+        hybrid_service._semantic_engine = mock_semantic
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [
+                {"objectID": "p1", "name": "Cheap Dress", "brand": "B", "price": 10},
+                {"objectID": "p2", "name": "Mid Dress", "brand": "B", "price": 50},
+            ],
+            "nbHits": 2,
+            "nbPages": 1,
+        })
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
+        )
+        # Semantic should NOT be called
+        mock_semantic.search_with_filters.assert_not_called()
+        assert result.sort_by == "price_asc"
+        assert len(result.results) == 2
+
+    def test_price_desc_skips_semantic(self, hybrid_service):
+        """sort_by=price_desc should use Algolia-only, skip semantic."""
+        from search.models import HybridSearchRequest, SortBy
+
+        mock_semantic = MagicMock()
+        hybrid_service._semantic_engine = mock_semantic
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [
+                {"objectID": "p1", "name": "Expensive Dress", "brand": "B", "price": 200},
+            ],
+            "nbHits": 1,
+            "nbPages": 1,
+        })
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_DESC),
+        )
+        mock_semantic.search_with_filters.assert_not_called()
+        assert result.sort_by == "price_desc"
+
+    def test_trending_sort_skips_semantic(self, hybrid_service):
+        """sort_by=trending should use Algolia-only, skip semantic."""
+        from search.models import HybridSearchRequest, SortBy
+
+        mock_semantic = MagicMock()
+        hybrid_service._semantic_engine = mock_semantic
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [
+                {"objectID": "p1", "name": "Trendy Top", "brand": "B", "price": 30},
+            ],
+            "nbHits": 1,
+            "nbPages": 1,
+        })
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="top", sort_by=SortBy.TRENDING),
+        )
+        mock_semantic.search_with_filters.assert_not_called()
+        assert result.sort_by == "trending"
+
+    def test_sorted_search_uses_replica_index(self, hybrid_service):
+        """Sorted search should pass the correct replica index name to Algolia."""
+        from search.models import HybridSearchRequest, SortBy
+
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [],
+            "nbHits": 0,
+            "nbPages": 0,
+        })
+
+        hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
+        )
+
+        # Check the Algolia search was called with the replica index name
+        call_kwargs = hybrid_service._algolia.search.call_args
+        assert call_kwargs.kwargs.get("index_name") == "products_price_asc" or \
+               (call_kwargs[1].get("index_name") == "products_price_asc" if len(call_kwargs) > 1 else False)
+
+    def test_sorted_search_uses_algolia_native_pagination(self, hybrid_service):
+        """Sorted search should pass page to Algolia (0-indexed)."""
+        from search.models import HybridSearchRequest, SortBy
+
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [],
+            "nbHits": 100,
+            "nbPages": 5,
+        })
+
+        hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC, page=3, page_size=20),
+        )
+
+        call_kwargs = hybrid_service._algolia.search.call_args
+        # page=3 in API (1-indexed) should be page=2 for Algolia (0-indexed)
+        assert call_kwargs.kwargs.get("page") == 2
+        assert call_kwargs.kwargs.get("hits_per_page") == 20
+
+    def test_sorted_search_has_more_pagination(self, hybrid_service):
+        """has_more should be correct based on Algolia pagination info."""
+        from search.models import HybridSearchRequest, SortBy
+
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [{"objectID": f"p{i}", "name": f"P{i}", "brand": "B", "price": i * 10}
+                     for i in range(20)],
+            "nbHits": 100,
+            "nbPages": 5,
+        })
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC, page=1, page_size=20),
+        )
+        assert result.pagination.has_more is True
+        assert result.pagination.total_results == 100
+
+    def test_sorted_search_applies_filters(self, hybrid_service):
+        """Sorted search should still apply all filters via Algolia."""
+        from search.models import HybridSearchRequest, SortBy
+
+        hybrid_service._algolia.search = MagicMock(return_value={
+            "hits": [],
+            "nbHits": 0,
+            "nbPages": 0,
+        })
+
+        hybrid_service.search(
+            HybridSearchRequest(
+                query="dress",
+                sort_by=SortBy.PRICE_ASC,
+                brands=["Boohoo"],
+                colors=["Black"],
+                min_price=10,
+                max_price=100,
+            ),
+        )
+
+        call_kwargs = hybrid_service._algolia.search.call_args
+        filters_str = call_kwargs.kwargs.get("filters", "")
+        assert "brand:" in filters_str
+        assert "primary_color:" in filters_str
+        assert "price >= 10" in filters_str
+        assert "price <= 100" in filters_str
+
+    def test_sorted_search_handles_algolia_error(self, hybrid_service):
+        """Sorted search should return empty results on Algolia error."""
+        from search.models import HybridSearchRequest, SortBy
+
+        hybrid_service._algolia.search = MagicMock(side_effect=Exception("Algolia down"))
+
+        result = hybrid_service.search(
+            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
+        )
+        assert len(result.results) == 0
+        assert result.sort_by == "price_asc"
+
+
+class TestReplicaConfig:
+    """Tests for Algolia replica index configuration."""
+
+    def test_get_replica_index_name_relevance(self):
+        from search.algolia_config import get_replica_index_name
+        assert get_replica_index_name("products", "relevance") is None
+
+    def test_get_replica_index_name_price_asc(self):
+        from search.algolia_config import get_replica_index_name
+        assert get_replica_index_name("products", "price_asc") == "products_price_asc"
+
+    def test_get_replica_index_name_price_desc(self):
+        from search.algolia_config import get_replica_index_name
+        assert get_replica_index_name("products", "price_desc") == "products_price_desc"
+
+    def test_get_replica_index_name_trending(self):
+        from search.algolia_config import get_replica_index_name
+        assert get_replica_index_name("products", "trending") == "products_trending"
+
+    def test_get_replica_index_name_unknown(self):
+        from search.algolia_config import get_replica_index_name
+        assert get_replica_index_name("products", "unknown") is None
+
+    def test_get_replica_names(self):
+        from search.algolia_config import get_replica_names
+        names = get_replica_names("products")
+        assert len(names) == 3
+        assert "virtual(products_price_asc)" in names
+        assert "virtual(products_price_desc)" in names
+        assert "virtual(products_trending)" in names
+
+    def test_get_replica_names_custom_index(self):
+        from search.algolia_config import get_replica_names
+        names = get_replica_names("my_custom_index")
+        assert "virtual(my_custom_index_price_asc)" in names
+
+    def test_replica_suffixes_have_custom_ranking(self):
+        from search.algolia_config import REPLICA_SUFFIXES
+        for suffix, settings in REPLICA_SUFFIXES.items():
+            assert "customRanking" in settings
+            assert len(settings["customRanking"]) > 0
