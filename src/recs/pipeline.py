@@ -420,7 +420,7 @@ class RecommendationPipeline:
         article_types: Optional[List[str]] = None,
         exclude_styles: Optional[List[str]] = None,
         include_occasions: Optional[List[str]] = None,
-        # New filters
+        # Price/Brand/Color filters
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
         exclude_brands: Optional[List[str]] = None,
@@ -429,7 +429,7 @@ class RecommendationPipeline:
         include_colors: Optional[List[str]] = None,
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
-        # Attribute filters (soft scoring)
+        # Legacy attribute filters (kept for backward compat, now also used as hard filters)
         fit: Optional[List[str]] = None,
         length: Optional[List[str]] = None,
         sleeves: Optional[List[str]] = None,
@@ -437,12 +437,40 @@ class RecommendationPipeline:
         rise: Optional[List[str]] = None,
         cursor: Optional[str] = None,
         page_size: int = 50,
-        # NEW: Sale/New arrivals filters
+        # Sale/New arrivals filters
         on_sale_only: bool = False,
         new_arrivals_only: bool = False,
         new_arrivals_days: int = 7,
         # Context scoring inputs
         user_metadata: Optional[Dict[str, Any]] = None,
+        # ============================================================
+        # NEW: Comprehensive attribute hard filters (include/exclude)
+        # ============================================================
+        include_formality: Optional[List[str]] = None,
+        exclude_formality: Optional[List[str]] = None,
+        include_seasons: Optional[List[str]] = None,
+        exclude_seasons: Optional[List[str]] = None,
+        include_style_tags: Optional[List[str]] = None,
+        exclude_style_tags: Optional[List[str]] = None,
+        include_color_family: Optional[List[str]] = None,
+        exclude_color_family: Optional[List[str]] = None,
+        include_silhouette: Optional[List[str]] = None,
+        exclude_silhouette: Optional[List[str]] = None,
+        include_fit: Optional[List[str]] = None,
+        exclude_fit: Optional[List[str]] = None,
+        include_length: Optional[List[str]] = None,
+        exclude_length: Optional[List[str]] = None,
+        include_sleeves: Optional[List[str]] = None,
+        exclude_sleeves: Optional[List[str]] = None,
+        include_neckline: Optional[List[str]] = None,
+        exclude_neckline: Optional[List[str]] = None,
+        include_rise: Optional[List[str]] = None,
+        exclude_rise: Optional[List[str]] = None,
+        include_coverage: Optional[List[str]] = None,
+        exclude_coverage: Optional[List[str]] = None,
+        include_materials: Optional[List[str]] = None,
+        exclude_materials: Optional[List[str]] = None,
+        exclude_occasions: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Generate feed using keyset cursor for O(1) pagination.
@@ -517,12 +545,25 @@ class RecommendationPipeline:
                     categories=categories
                 )
 
+        # Merge legacy attribute params into new include_ params
+        # (backward compat: fit=["slim"] becomes include_fit=["slim"] if include_fit not set)
+        if fit and not include_fit:
+            include_fit = fit
+        if length and not include_length:
+            include_length = length
+        if sleeves and not include_sleeves:
+            include_sleeves = sleeves
+        if neckline and not include_neckline:
+            include_neckline = neckline
+        if rise and not include_rise:
+            include_rise = rise
+
         # Override filters from request
         has_any_filter = any([
             exclude_styles, include_occasions, min_price, max_price,
             exclude_brands, preferred_brands, exclude_colors, include_colors,
             include_patterns, exclude_patterns,
-            fit, length, sleeves, neckline, rise
+            include_fit, include_length, include_sleeves, include_neckline, include_rise,
         ])
         if has_any_filter:
             if not user_state.onboarding_profile:
@@ -556,17 +597,17 @@ class RecommendationPipeline:
                 profile.patterns_liked = include_patterns
             if exclude_patterns:
                 profile.patterns_avoided = exclude_patterns
-            # Attribute filters (soft scoring)
-            if fit:
-                profile.preferred_fits = fit
-            if length:
-                profile.preferred_lengths = length
-            if sleeves:
-                profile.preferred_sleeves = sleeves
-            if neckline:
-                profile.preferred_necklines = neckline
-            if rise:
-                profile.preferred_rises = rise
+            # Attribute filters (soft scoring via profile)
+            if include_fit:
+                profile.preferred_fits = include_fit
+            if include_length:
+                profile.preferred_lengths = include_length
+            if include_sleeves:
+                profile.preferred_sleeves = include_sleeves
+            if include_neckline:
+                profile.preferred_necklines = include_neckline
+            if include_rise:
+                profile.preferred_rises = include_rise
 
         # Step 3: Set feed version on first page (for stable ordering)
         if is_new_session or not self.session_service.has_feed_version(session_id):
@@ -588,7 +629,24 @@ class RecommendationPipeline:
         # With SQL-level seen exclusion, fetch_size no longer needs to compensate
         # for seen items — every row SQL returns is guaranteed unseen.
         # Base fetch: always get a healthy batch from the catalog for reranker quality.
-        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types)
+        # Check if any Python-level filters are active (need over-fetch)
+        has_attribute_filters = any([
+            include_formality, exclude_formality,
+            include_seasons, exclude_seasons,
+            include_style_tags, exclude_style_tags,
+            include_color_family, exclude_color_family,
+            include_silhouette, exclude_silhouette,
+            include_fit, exclude_fit,
+            include_length, exclude_length,
+            include_sleeves, exclude_sleeves,
+            include_neckline, exclude_neckline,
+            include_rise, exclude_rise,
+            include_coverage, exclude_coverage,
+            include_materials, exclude_materials,
+            exclude_occasions,
+            include_patterns, exclude_patterns,
+        ])
+        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types or has_attribute_filters)
         filter_multiplier = 3 if has_python_filters else 1  # Fetch 3x more if Python filtering
         base_fetch = max(500, page_size * 10)  # At least 500, or 10x requested page
         fetch_size = base_fetch * filter_multiplier
@@ -606,7 +664,8 @@ class RecommendationPipeline:
             article_types=article_types,
             on_sale_only=on_sale_only,
             new_arrivals_only=new_arrivals_only,
-            new_arrivals_days=new_arrivals_days
+            new_arrivals_days=new_arrivals_days,
+            include_materials=include_materials,
         )
 
         # Step 5a: Session-Aware Retrieval (Contextual Recall)
@@ -666,6 +725,33 @@ class RecommendationPipeline:
         post_filter_count = len(candidates)
         if pre_filter_count != post_filter_count:
             print(f"[Pipeline] Python filters: {pre_filter_count} -> {post_filter_count} candidates")
+
+        # Step 5b2: Apply generic attribute hard filters (include/exclude)
+        # Build attribute_filters dict from all new filter params
+        attribute_filters = {}
+        _af_params = {
+            'include_formality': include_formality, 'exclude_formality': exclude_formality,
+            'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
+            'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
+            'include_color_family': include_color_family, 'exclude_color_family': exclude_color_family,
+            'include_silhouette': include_silhouette, 'exclude_silhouette': exclude_silhouette,
+            'include_fit': include_fit, 'exclude_fit': exclude_fit,
+            'include_length': include_length, 'exclude_length': exclude_length,
+            'include_sleeves': include_sleeves, 'exclude_sleeves': exclude_sleeves,
+            'include_neckline': include_neckline, 'exclude_neckline': exclude_neckline,
+            'include_rise': include_rise, 'exclude_rise': exclude_rise,
+            'include_coverage': include_coverage, 'exclude_coverage': exclude_coverage,
+            'include_materials': include_materials, 'exclude_materials': exclude_materials,
+            'include_pattern': include_patterns, 'exclude_pattern': exclude_patterns,
+            'include_occasions': include_occasions, 'exclude_occasions': exclude_occasions,
+        }
+        for k, v in _af_params.items():
+            if v:
+                attribute_filters[k] = v
+
+        if attribute_filters:
+            candidates = self._apply_attribute_filters(candidates, attribute_filters)
+            post_filter_count = len(candidates)
 
         # Step 5c: Apply FeasibilityFilter (HARD constraint-based filtering)
         # This runs BEFORE soft scoring and uses canonicalized article types
@@ -898,7 +984,8 @@ class RecommendationPipeline:
                     "exclude_colors": exclude_colors,
                     "include_brands": preferred_brands,
                     "exclude_brands": exclude_brands,
-                    "article_types": article_types
+                    "article_types": article_types,
+                    "attribute_filters": attribute_filters if attribute_filters else None,
                 } if has_python_filters else None,
                 "feasibility_filter": {
                     "occasions": include_occasions,
@@ -1424,6 +1511,157 @@ class RecommendationPipeline:
 
             if matches:
                 filtered.append(candidate)
+
+        return filtered
+
+    # =========================================================
+    # Generic Attribute Hard Filters (include/exclude)
+    # =========================================================
+
+    # Single-value attributes: Candidate has ONE value (str)
+    # Maps filter_name -> Candidate field name
+    SINGLE_VALUE_FILTERS = {
+        'formality': 'formality',
+        'color_family': 'color_family',
+        'silhouette': 'silhouette',
+        'fit': 'fit',
+        'length': 'length',
+        'sleeves': 'sleeve',       # API param "sleeves" maps to Candidate.sleeve
+        'neckline': 'neckline',
+        'rise': 'rise',
+        'coverage': 'coverage_level',
+        'pattern': 'pattern',
+    }
+
+    # Multi-value attributes: Candidate has a LIST of values (List[str])
+    # Maps filter_name -> Candidate field name
+    MULTI_VALUE_FILTERS = {
+        'seasons': 'seasons',
+        'style_tags': 'style_tags',
+        'occasions': 'occasions',
+        'materials': 'materials',
+    }
+
+    def _apply_attribute_filters(
+        self,
+        candidates: List[Candidate],
+        attribute_filters: Dict[str, Any],
+    ) -> List[Candidate]:
+        """
+        Apply generic hard attribute filtering on enriched candidates.
+
+        Supports both include and exclude for every attribute dimension.
+        All comparisons are case-insensitive.
+
+        Args:
+            candidates: List of enriched candidates (post product_attributes enrichment)
+            attribute_filters: Dict with keys like:
+                include_formality: ["Casual", "Smart Casual"]
+                exclude_formality: ["Formal"]
+                include_seasons: ["Spring", "Summer"]
+                exclude_seasons: ["Winter"]
+                ... etc for all attributes
+
+        Include logic:
+            - Single-value: c.attr in include_list (case-insensitive)
+            - Multi-value: any(v in include_list for v in c.attr) (case-insensitive)
+            - Items where attribute is None/empty are EXCLUDED when include is active
+
+        Exclude logic:
+            - Single-value: c.attr not in exclude_list
+            - Multi-value: not any(v in exclude_list for v in c.attr)
+            - Items where attribute is None/empty PASS the exclude filter
+
+        Returns:
+            Filtered list of candidates
+        """
+        if not attribute_filters:
+            return candidates
+
+        # Build active filter specs: list of (include_set, exclude_set, field_name, is_multi)
+        active_filters = []
+
+        for filter_name, field_name in self.SINGLE_VALUE_FILTERS.items():
+            inc_key = f"include_{filter_name}"
+            exc_key = f"exclude_{filter_name}"
+            inc_vals = attribute_filters.get(inc_key)
+            exc_vals = attribute_filters.get(exc_key)
+            if inc_vals or exc_vals:
+                inc_set = {v.lower() for v in inc_vals} if inc_vals else None
+                exc_set = {v.lower() for v in exc_vals} if exc_vals else None
+                active_filters.append((inc_set, exc_set, field_name, False))
+
+        for filter_name, field_name in self.MULTI_VALUE_FILTERS.items():
+            inc_key = f"include_{filter_name}"
+            exc_key = f"exclude_{filter_name}"
+            inc_vals = attribute_filters.get(inc_key)
+            exc_vals = attribute_filters.get(exc_key)
+            if inc_vals or exc_vals:
+                inc_set = {v.lower() for v in inc_vals} if inc_vals else None
+                exc_set = {v.lower() for v in exc_vals} if exc_vals else None
+                active_filters.append((inc_set, exc_set, field_name, True))
+
+        if not active_filters:
+            return candidates
+
+        pre_count = len(candidates)
+        filtered = []
+
+        for c in candidates:
+            passes = True
+            for inc_set, exc_set, field_name, is_multi in active_filters:
+                if is_multi:
+                    # Multi-value: candidate has a list
+                    vals = getattr(c, field_name, None) or []
+                    vals_lower = [v.lower() for v in vals if v]
+
+                    # Include check: at least one value must be in include_set
+                    if inc_set:
+                        if not vals_lower:
+                            passes = False
+                            break
+                        if not any(v in inc_set for v in vals_lower):
+                            passes = False
+                            break
+
+                    # Exclude check: none of the values may be in exclude_set
+                    if exc_set:
+                        if vals_lower and any(v in exc_set for v in vals_lower):
+                            passes = False
+                            break
+                else:
+                    # Single-value: candidate has one string
+                    val = getattr(c, field_name, None)
+                    val_lower = val.lower() if val else None
+
+                    # Include check: value must be in include_set
+                    if inc_set:
+                        if not val_lower:
+                            passes = False
+                            break
+                        if val_lower not in inc_set:
+                            passes = False
+                            break
+
+                    # Exclude check: value must NOT be in exclude_set
+                    if exc_set:
+                        if val_lower and val_lower in exc_set:
+                            passes = False
+                            break
+
+            if passes:
+                filtered.append(c)
+
+        post_count = len(filtered)
+        if pre_count != post_count:
+            # Log which filters were active
+            active_names = []
+            for inc_set, exc_set, field_name, _ in active_filters:
+                if inc_set:
+                    active_names.append(f"include_{field_name}")
+                if exc_set:
+                    active_names.append(f"exclude_{field_name}")
+            print(f"[Pipeline] Attribute filters ({', '.join(active_names)}): {pre_count} -> {post_count} candidates")
 
         return filtered
 

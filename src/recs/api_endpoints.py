@@ -1413,14 +1413,41 @@ async def get_pipeline_feed(
     preferred_brands: Optional[str] = Query(None, description="[DEPRECATED] Use include_brands instead"),
     exclude_colors: Optional[str] = Query(None, description="Comma-separated colors to exclude"),
     include_colors: Optional[str] = Query(None, description="Comma-separated colors to include (hard filter - item must have at least one)"),
-    # Attribute filters (soft scoring)
-    fit: Optional[str] = Query(None, description="Comma-separated fits: slim, regular, relaxed, oversized"),
-    length: Optional[str] = Query(None, description="Comma-separated lengths: cropped, standard, long"),
-    sleeves: Optional[str] = Query(None, description="Comma-separated sleeves: short, long, sleeveless, 3/4"),
-    neckline: Optional[str] = Query(None, description="Comma-separated necklines: crew, v-neck, scoop, turtleneck, mock"),
-    rise: Optional[str] = Query(None, description="Comma-separated rises: high, mid, low"),
-    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer (solid, stripes, floral, geometric, animal-print, plaid)"),
-    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    # Attribute filters (hard include/exclude)
+    fit: Optional[str] = Query(None, description="[DEPRECATED] Use include_fit. Comma-separated fits: slim, regular, relaxed, oversized"),
+    length: Optional[str] = Query(None, description="[DEPRECATED] Use include_length. Comma-separated lengths: cropped, standard, long"),
+    sleeves: Optional[str] = Query(None, description="[DEPRECATED] Use include_sleeves. Comma-separated sleeves: short, long, sleeveless, 3/4"),
+    neckline: Optional[str] = Query(None, description="[DEPRECATED] Use include_neckline. Comma-separated necklines: crew, v-neck, scoop, turtleneck, mock"),
+    rise: Optional[str] = Query(None, description="[DEPRECATED] Use include_rise. Comma-separated rises: high, mid, low"),
+    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to include (solid, stripes, floral, geometric, animal-print, plaid)"),
+    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to exclude"),
+    # NEW: Comprehensive attribute hard filters (include/exclude)
+    include_formality: Optional[str] = Query(None, description="Comma-separated formality levels to include (Casual, Smart Casual, Semi-Formal, Formal)"),
+    exclude_formality: Optional[str] = Query(None, description="Comma-separated formality levels to exclude"),
+    include_seasons: Optional[str] = Query(None, description="Comma-separated seasons to include (Spring, Summer, Fall, Winter)"),
+    exclude_seasons: Optional[str] = Query(None, description="Comma-separated seasons to exclude"),
+    include_style_tags: Optional[str] = Query(None, description="Comma-separated styles to include (Classic, Trendy, Bold, Minimal, Street, Boho, Romantic)"),
+    exclude_style_tags: Optional[str] = Query(None, description="Comma-separated styles to exclude"),
+    include_color_family: Optional[str] = Query(None, description="Comma-separated color families to include (Neutrals, Blues, Browns, Greens, etc.)"),
+    exclude_color_family: Optional[str] = Query(None, description="Comma-separated color families to exclude"),
+    include_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to include (Fitted, A-Line, Straight, Wide Leg, Skinny, etc.)"),
+    exclude_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to exclude"),
+    include_fit: Optional[str] = Query(None, description="Comma-separated fits to include (slim, regular, relaxed, oversized)"),
+    exclude_fit: Optional[str] = Query(None, description="Comma-separated fits to exclude"),
+    include_length: Optional[str] = Query(None, description="Comma-separated lengths to include (cropped, standard, long, mini, midi, maxi)"),
+    exclude_length: Optional[str] = Query(None, description="Comma-separated lengths to exclude"),
+    include_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to include (short, long, sleeveless, 3/4)"),
+    exclude_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to exclude"),
+    include_neckline: Optional[str] = Query(None, description="Comma-separated necklines to include (crew, v-neck, scoop, turtleneck, mock)"),
+    exclude_neckline: Optional[str] = Query(None, description="Comma-separated necklines to exclude"),
+    include_rise: Optional[str] = Query(None, description="Comma-separated rises to include (high, mid, low)"),
+    exclude_rise: Optional[str] = Query(None, description="Comma-separated rises to exclude"),
+    include_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to include (Full, Moderate, Partial, Minimal)"),
+    exclude_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to exclude"),
+    include_materials: Optional[str] = Query(None, description="Comma-separated materials to include (cotton, linen, silk, etc.)"),
+    exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
+    exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
+    on_sale_only: bool = Query(False, description="Only show items on sale"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
@@ -1500,6 +1527,36 @@ async def get_pipeline_feed(
     if exclude_patterns:
         exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")]
 
+    # Parse new attribute filters (comma-separated -> list)
+    def _parse_csv(val: Optional[str]) -> Optional[list]:
+        return [v.strip() for v in val.split(",")] if val else None
+
+    include_formality_list = _parse_csv(include_formality)
+    exclude_formality_list = _parse_csv(exclude_formality)
+    include_seasons_list = _parse_csv(include_seasons)
+    exclude_seasons_list = _parse_csv(exclude_seasons)
+    include_style_tags_list = _parse_csv(include_style_tags)
+    exclude_style_tags_list = _parse_csv(exclude_style_tags)
+    include_color_family_list = _parse_csv(include_color_family)
+    exclude_color_family_list = _parse_csv(exclude_color_family)
+    include_silhouette_list = _parse_csv(include_silhouette)
+    exclude_silhouette_list = _parse_csv(exclude_silhouette)
+    include_fit_list = _parse_csv(include_fit)
+    exclude_fit_list = _parse_csv(exclude_fit)
+    include_length_list = _parse_csv(include_length)
+    exclude_length_list = _parse_csv(exclude_length)
+    include_sleeves_list = _parse_csv(include_sleeves)
+    exclude_sleeves_list = _parse_csv(exclude_sleeves)
+    include_neckline_list = _parse_csv(include_neckline)
+    exclude_neckline_list = _parse_csv(exclude_neckline)
+    include_rise_list = _parse_csv(include_rise)
+    exclude_rise_list = _parse_csv(exclude_rise)
+    include_coverage_list = _parse_csv(include_coverage)
+    exclude_coverage_list = _parse_csv(exclude_coverage)
+    include_materials_list = _parse_csv(include_materials)
+    exclude_materials_filter_list = _parse_csv(exclude_materials_filter)
+    exclude_occasions_list = _parse_csv(exclude_occasions)
+
     # Use keyset pagination internally for O(1) performance
     response = pipeline.get_feed_keyset(
         user_id=user_id,
@@ -1518,7 +1575,7 @@ async def get_pipeline_feed(
         include_colors=include_colors_list,
         include_patterns=include_patterns_list,
         exclude_patterns=exclude_patterns_list,
-        # Attribute filters
+        # Legacy attribute filters (backward compat)
         fit=fit_list,
         length=length_list,
         sleeves=sleeves_list,
@@ -1526,8 +1583,35 @@ async def get_pipeline_feed(
         rise=rise_list,
         cursor=cursor,
         page_size=page_size,
+        on_sale_only=on_sale_only,
         # Context scoring inputs
         user_metadata=user.user_metadata,
+        # NEW: Comprehensive attribute hard filters
+        include_formality=include_formality_list,
+        exclude_formality=exclude_formality_list,
+        include_seasons=include_seasons_list,
+        exclude_seasons=exclude_seasons_list,
+        include_style_tags=include_style_tags_list,
+        exclude_style_tags=exclude_style_tags_list,
+        include_color_family=include_color_family_list,
+        exclude_color_family=exclude_color_family_list,
+        include_silhouette=include_silhouette_list,
+        exclude_silhouette=exclude_silhouette_list,
+        include_fit=include_fit_list,
+        exclude_fit=exclude_fit_list,
+        include_length=include_length_list,
+        exclude_length=exclude_length_list,
+        include_sleeves=include_sleeves_list,
+        exclude_sleeves=exclude_sleeves_list,
+        include_neckline=include_neckline_list,
+        exclude_neckline=exclude_neckline_list,
+        include_rise=include_rise_list,
+        exclude_rise=exclude_rise_list,
+        include_coverage=include_coverage_list,
+        exclude_coverage=exclude_coverage_list,
+        include_materials=include_materials_list,
+        exclude_materials=exclude_materials_filter_list,
+        exclude_occasions=exclude_occasions_list,
     )
 
     # Auto-persist seen_ids to Supabase in background (replaces manual /session/sync)
@@ -1812,30 +1896,105 @@ async def get_keyset_feed(
     user: SupabaseUser = Depends(require_auth),
     session_id: Optional[str] = Query(None, description="Session ID (auto-generated if not provided)"),
     gender: str = Query("female", description="Gender filter"),
-    categories: Optional[str] = Query(None, description="Comma-separated category filter"),
+    categories: Optional[str] = Query(None, description="Comma-separated broad category filter"),
+    article_types: Optional[str] = Query(None, description="Comma-separated article type filter"),
+    exclude_styles: Optional[str] = Query(None, description="Comma-separated styles to avoid"),
+    include_occasions: Optional[str] = Query(None, description="Comma-separated occasions to include"),
+    min_price: Optional[float] = Query(None, ge=0, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, ge=0, description="Maximum price filter"),
+    exclude_brands: Optional[str] = Query(None, description="Comma-separated brands to exclude"),
+    include_brands: Optional[str] = Query(None, description="Comma-separated brands to include (hard filter)"),
+    exclude_colors: Optional[str] = Query(None, description="Comma-separated colors to exclude"),
+    include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
+    include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to include"),
+    exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to exclude"),
+    # Attribute filters (include/exclude)
+    include_formality: Optional[str] = Query(None, description="Comma-separated formality levels to include"),
+    exclude_formality: Optional[str] = Query(None, description="Comma-separated formality levels to exclude"),
+    include_seasons: Optional[str] = Query(None, description="Comma-separated seasons to include"),
+    exclude_seasons: Optional[str] = Query(None, description="Comma-separated seasons to exclude"),
+    include_style_tags: Optional[str] = Query(None, description="Comma-separated styles to include"),
+    exclude_style_tags: Optional[str] = Query(None, description="Comma-separated styles to exclude"),
+    include_color_family: Optional[str] = Query(None, description="Comma-separated color families to include"),
+    exclude_color_family: Optional[str] = Query(None, description="Comma-separated color families to exclude"),
+    include_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to include"),
+    exclude_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to exclude"),
+    include_fit: Optional[str] = Query(None, description="Comma-separated fits to include"),
+    exclude_fit: Optional[str] = Query(None, description="Comma-separated fits to exclude"),
+    include_length: Optional[str] = Query(None, description="Comma-separated lengths to include"),
+    exclude_length: Optional[str] = Query(None, description="Comma-separated lengths to exclude"),
+    include_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to include"),
+    exclude_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to exclude"),
+    include_neckline: Optional[str] = Query(None, description="Comma-separated necklines to include"),
+    exclude_neckline: Optional[str] = Query(None, description="Comma-separated necklines to exclude"),
+    include_rise: Optional[str] = Query(None, description="Comma-separated rises to include"),
+    exclude_rise: Optional[str] = Query(None, description="Comma-separated rises to exclude"),
+    include_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to include"),
+    exclude_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to exclude"),
+    include_materials: Optional[str] = Query(None, description="Comma-separated materials to include"),
+    exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
+    exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
+    on_sale_only: bool = Query(False, description="Only show items on sale"),
     cursor: Optional[str] = Query(None, description="Opaque cursor from previous response (NULL for first page)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page")
 ):
-    """Get keyset cursor paginated feed."""
+    """Get keyset cursor paginated feed with full filter support."""
     
     user_id = user.id
 
     pipeline = get_pipeline()
 
-    # Parse categories
-    cat_list = None
-    if categories:
-        cat_list = [c.strip() for c in categories.split(",")]
+    # Parse all comma-separated filters
+    def _parse_csv(val: Optional[str]) -> Optional[list]:
+        return [v.strip() for v in val.split(",")] if val else None
 
     response = pipeline.get_feed_keyset(
         user_id=user_id,
-        anon_id=None,  # No anonymous users - auth required
+        anon_id=None,
         session_id=session_id,
         gender=gender,
-        categories=cat_list,
+        categories=_parse_csv(categories),
+        article_types=_parse_csv(article_types),
+        exclude_styles=_parse_csv(exclude_styles),
+        include_occasions=_parse_csv(include_occasions),
+        min_price=min_price,
+        max_price=max_price,
+        exclude_brands=_parse_csv(exclude_brands),
+        preferred_brands=_parse_csv(include_brands),
+        exclude_colors=_parse_csv(exclude_colors),
+        include_colors=_parse_csv(include_colors),
+        include_patterns=_parse_csv(include_patterns),
+        exclude_patterns=_parse_csv(exclude_patterns),
         cursor=cursor,
         page_size=page_size,
+        on_sale_only=on_sale_only,
         user_metadata=user.user_metadata,
+        # Comprehensive attribute hard filters
+        include_formality=_parse_csv(include_formality),
+        exclude_formality=_parse_csv(exclude_formality),
+        include_seasons=_parse_csv(include_seasons),
+        exclude_seasons=_parse_csv(exclude_seasons),
+        include_style_tags=_parse_csv(include_style_tags),
+        exclude_style_tags=_parse_csv(exclude_style_tags),
+        include_color_family=_parse_csv(include_color_family),
+        exclude_color_family=_parse_csv(exclude_color_family),
+        include_silhouette=_parse_csv(include_silhouette),
+        exclude_silhouette=_parse_csv(exclude_silhouette),
+        include_fit=_parse_csv(include_fit),
+        exclude_fit=_parse_csv(exclude_fit),
+        include_length=_parse_csv(include_length),
+        exclude_length=_parse_csv(exclude_length),
+        include_sleeves=_parse_csv(include_sleeves),
+        exclude_sleeves=_parse_csv(exclude_sleeves),
+        include_neckline=_parse_csv(include_neckline),
+        exclude_neckline=_parse_csv(exclude_neckline),
+        include_rise=_parse_csv(include_rise),
+        exclude_rise=_parse_csv(exclude_rise),
+        include_coverage=_parse_csv(include_coverage),
+        exclude_coverage=_parse_csv(exclude_coverage),
+        include_materials=_parse_csv(include_materials),
+        exclude_materials=_parse_csv(exclude_materials_filter),
+        exclude_occasions=_parse_csv(exclude_occasions),
     )
 
     return response

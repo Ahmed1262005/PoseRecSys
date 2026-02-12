@@ -503,10 +503,12 @@ class CandidateSelectionModule:
         page_size: int = 50,
         exclude_ids: Optional[Set[str]] = None,
         article_types: Optional[List[str]] = None,
-        # NEW: Sale/New arrivals filters
+        # Sale/New arrivals filters
         on_sale_only: bool = False,
         new_arrivals_only: bool = False,
-        new_arrivals_days: int = 7
+        new_arrivals_days: int = 7,
+        # Material inclusion filter (SQL-level)
+        include_materials: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """
         Get candidates using keyset cursor for O(1) pagination.
@@ -598,7 +600,8 @@ class CandidateSelectionModule:
             exclude_ids=exclude_ids,
             on_sale_only=on_sale_only,
             new_arrivals_only=new_arrivals_only,
-            new_arrivals_days=new_arrivals_days
+            new_arrivals_days=new_arrivals_days,
+            include_materials=include_materials,
         )
 
         # Step 2b: Python fallback for seen exclusion
@@ -740,7 +743,9 @@ class CandidateSelectionModule:
         # Sale/New arrivals filters
         on_sale_only: bool = False,
         new_arrivals_only: bool = False,
-        new_arrivals_days: int = 7
+        new_arrivals_days: int = 7,
+        # Material inclusion filter (SQL-level)
+        include_materials: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """Retrieve exploration items with deterministic ordering.
 
@@ -803,6 +808,8 @@ class CandidateSelectionModule:
                 'new_arrivals_days': new_arrivals_days,
                 # SQL-level seen history exclusion
                 'exclude_product_ids': sql_exclude_ids,
+                # Material inclusion filter (SQL-level)
+                'include_materials': include_materials,
             }
 
             # Debug log article type filtering
@@ -1119,7 +1126,7 @@ class CandidateSelectionModule:
         try:
             # Query product_attributes table directly
             result = self.supabase.table('product_attributes') \
-                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, construction, coverage_level, skin_exposure, coverage_details, model_body_type, model_size_estimate') \
+                .select('sku_id, occasions, style_tags, pattern, formality, fit_type, color_family, seasons, silhouette, construction, coverage_level, skin_exposure, coverage_details, model_body_type, model_size_estimate') \
                 .in_('sku_id', product_ids) \
                 .execute()
 
@@ -1141,6 +1148,7 @@ class CandidateSelectionModule:
                     c.formality = attrs.get('formality')
                     c.color_family = attrs.get('color_family')
                     c.seasons = attrs.get('seasons') or []
+                    c.silhouette = attrs.get('silhouette')
 
                     # Override fit from product_attributes if available
                     if attrs.get('fit_type'):

@@ -61,7 +61,7 @@ _session_id: str = str(uuid.uuid4())
 # ---------------------------------------------------------------------------
 
 BROAD_CATEGORIES = ["tops", "bottoms", "dresses", "outerwear"]
-CATEGORIES_L1 = ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear", "Swimwear", "Accessories", "Shoes", "Intimates"]
+CATEGORIES_L1 = ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear", "Swimwear", "Shoes", "Intimates"]
 CATEGORIES_L2 = [
     "Blouse", "T-Shirt", "Tank Top", "Camisole", "Bodysuit", "Sweater", "Cardigan",
     "Hoodie", "Sweatshirt", "Crop Top", "Tunic", "Polo",

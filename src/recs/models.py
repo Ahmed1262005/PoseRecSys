@@ -550,6 +550,10 @@ class Candidate(BaseModel):
         default_factory=list,
         description="Seasons from product_attributes: ['Spring', 'Summer', 'Fall', 'Winter']"
     )
+    silhouette: Optional[str] = Field(
+        default=None,
+        description="Silhouette from product_attributes: 'Fitted', 'A-Line', 'Straight', 'Wide Leg', 'Skinny', etc."
+    )
 
     # Coverage & body type (from Gemini Vision analysis)
     coverage_level: Optional[str] = Field(

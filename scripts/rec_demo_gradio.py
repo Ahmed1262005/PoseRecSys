@@ -1496,7 +1496,7 @@ DB_COLOR_FAMILIES = sorted(set(f.get("color_family") for f in ALL_FLATS if f.get
 DB_PRIMARY_COLORS = sorted(set(f.get("primary_color") for f in ALL_FLATS if f.get("primary_color")))
 DB_MATERIALS = sorted(set(m for f in ALL_FLATS for m in (f.get("materials") or []) if m))
 DB_SEASONS = sorted(set(s for f in ALL_FLATS for s in (f.get("seasons") or []) if s))
-DB_CATEGORIES = sorted(set(f.get("broad_category") for f in ALL_FLATS if f.get("broad_category")))
+DB_CATEGORIES = sorted(set(f.get("broad_category") for f in ALL_FLATS if f.get("broad_category") and f.get("broad_category").lower() != "accessories"))
 DB_COVERAGE_LEVELS = sorted(set(f.get("coverage_level") for f in ALL_FLATS if f.get("coverage_level")))
 DB_SKIN_EXPOSURE = sorted(set(f.get("skin_exposure") for f in ALL_FLATS if f.get("skin_exposure")))
 DB_MODEL_BODY_TYPES = sorted(set(f.get("model_body_type") for f in ALL_FLATS if f.get("model_body_type")))
