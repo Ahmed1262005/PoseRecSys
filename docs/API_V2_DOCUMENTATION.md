@@ -10,8 +10,15 @@ Base URL: `https://your-server.com/api/recs/v2`
 |--------|----------|-------------|
 | `POST` | `/onboarding` | Save complete 10-module onboarding profile |
 | `POST` | `/onboarding/core-setup` | Save core-setup & get Tinder categories |
+| `POST` | `/onboarding/v3` | Save V3 flat-format onboarding profile |
 | `GET` | `/categories/mapping` | Get category mapping reference |
-| `GET` | `/feed` | Get personalized product feed |
+| `GET` | `/feed` | Get personalized product feed (40+ filters, cursor pagination) |
+| `GET` | `/feed/keyset` | Keyset pagination feed (full filter parity with /feed) |
+| `GET` | `/sale` | Sale items feed (same filters as /feed) |
+| `GET` | `/new-arrivals` | New arrivals feed (same filters as /feed) |
+| `POST` | `/feed/action` | Record user interaction (click, wishlist, skip) |
+| `GET` | `/feed/session/{id}` | Get session debug info |
+| `DELETE` | `/feed/session/{id}` | Delete/reset a session |
 | `GET` | `/health` | Check API health status |
 | `GET` | `/info` | Get pipeline configuration |
 

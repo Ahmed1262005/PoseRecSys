@@ -509,6 +509,8 @@ class CandidateSelectionModule:
         new_arrivals_days: int = 7,
         # Material inclusion filter (SQL-level)
         include_materials: Optional[List[str]] = None,
+        # Pre-filtered product IDs (from product_attributes query)
+        include_product_ids: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """
         Get candidates using keyset cursor for O(1) pagination.
@@ -602,6 +604,7 @@ class CandidateSelectionModule:
             new_arrivals_only=new_arrivals_only,
             new_arrivals_days=new_arrivals_days,
             include_materials=include_materials,
+            include_product_ids=include_product_ids,
         )
 
         # Step 2b: Python fallback for seen exclusion
@@ -731,6 +734,124 @@ class CandidateSelectionModule:
     # Postgres handles uuid[] up to ~5000 efficiently; beyond that use Python fallback.
     SQL_EXCLUDE_IDS_LIMIT = 5000
 
+    # Max pre-filter IDs to send to SQL. Postgres ANY() is efficient up to ~5000 UUIDs.
+    SQL_INCLUDE_IDS_LIMIT = 5000
+
+    # =========================================================
+    # Pre-filter: Query product_attributes for matching IDs
+    # =========================================================
+
+    # Maps attribute filter keys to product_attributes columns and query types.
+    # 'single' = text column, use .in_()
+    # 'multi' = text[] array column, use .overlaps()
+    # 'jsonb_field' = field inside construction JSONB, handled in Python fallback
+    _PRE_FILTER_COLUMN_MAP = {
+        'formality': ('formality', 'single'),
+        'color_family': ('color_family', 'single'),
+        'silhouette': ('silhouette', 'single'),
+        'pattern': ('pattern', 'single'),
+        'fit': ('fit_type', 'single'),
+        'coverage': ('coverage_level', 'single'),
+        'seasons': ('seasons', 'multi'),
+        'style_tags': ('style_tags', 'multi'),
+        'occasions': ('occasions', 'multi'),
+        # These live inside construction JSONB -- kept in Python fallback
+        # 'sleeves': ('construction->sleeve_type', 'jsonb_field'),
+        # 'neckline': ('construction->neckline', 'jsonb_field'),
+        # 'length': ('construction->length', 'jsonb_field'),
+    }
+
+    def pre_filter_by_attributes(
+        self,
+        attribute_filters: Dict[str, Any],
+    ) -> Optional[List[str]]:
+        """
+        Query product_attributes to get product IDs matching attribute filters.
+
+        This runs BEFORE the main keyset RPC call. The returned IDs are passed as
+        include_product_ids to the SQL function, so every candidate returned already
+        satisfies the attribute filters.
+
+        Only handles top-level columns (formality, seasons, style_tags, etc.).
+        JSONB fields (neckline, sleeve, length from construction) are still
+        handled by _apply_attribute_filters() as a Python-level fallback.
+
+        Args:
+            attribute_filters: Dict with keys like include_formality, exclude_seasons, etc.
+
+        Returns:
+            List of matching sku_id strings, or None if no pre-filterable attributes are active.
+        """
+        if not attribute_filters:
+            return None
+
+        # Determine which filters can be pushed to the pre-filter query
+        # vs which must stay in Python (JSONB fields)
+        has_prefilterable = False
+        for key in attribute_filters:
+            # Extract dimension name: 'include_formality' -> 'formality', 'exclude_seasons' -> 'seasons'
+            dimension = key.replace('include_', '').replace('exclude_', '')
+            if dimension in self._PRE_FILTER_COLUMN_MAP:
+                has_prefilterable = True
+                break
+
+        if not has_prefilterable:
+            return None
+
+        try:
+            import time
+            t_start = time.time()
+
+            # Build the Supabase query
+            query = self.supabase.table('product_attributes').select('sku_id')
+
+            for key, values in attribute_filters.items():
+                if not values:
+                    continue
+
+                is_exclude = key.startswith('exclude_')
+                dimension = key.replace('include_', '').replace('exclude_', '')
+
+                if dimension not in self._PRE_FILTER_COLUMN_MAP:
+                    continue  # JSONB field, skip -- handled in Python
+
+                column, col_type = self._PRE_FILTER_COLUMN_MAP[dimension]
+
+                # Lowercase the values for case-insensitive matching
+                # NOTE: product_attributes stores mixed-case values, so we use ilike for single
+                # and overlaps for arrays (which are case-sensitive in Postgres)
+                if col_type == 'single':
+                    if is_exclude:
+                        # Exclude: NOT IN (val1, val2, ...)
+                        # Supabase: .not_.in_(column, values)
+                        query = query.not_.in_(column, values)
+                    else:
+                        # Include: IN (val1, val2, ...)
+                        query = query.in_(column, values)
+
+                elif col_type == 'multi':
+                    if is_exclude:
+                        # Exclude any product that has overlap with excluded values
+                        # Supabase: .not_.overlaps(column, values)
+                        query = query.not_.overlaps(column, values)
+                    else:
+                        # Include: product must have at least one matching value
+                        # Supabase: .overlaps(column, values)
+                        query = query.overlaps(column, values)
+
+            result = query.execute()
+
+            matching_ids = [str(r['sku_id']) for r in (result.data or [])]
+
+            elapsed_ms = (time.time() - t_start) * 1000
+            print(f"[CandidateSelection] Pre-filter query: {len(matching_ids)} products match attribute filters ({elapsed_ms:.0f}ms)")
+
+            return matching_ids
+
+        except Exception as e:
+            print(f"[CandidateSelection] Pre-filter query failed (non-fatal, falling back to Python): {e}")
+            return None
+
     def _retrieve_exploration_keyset(
         self,
         hard_filters: HardFilters,
@@ -746,6 +867,8 @@ class CandidateSelectionModule:
         new_arrivals_days: int = 7,
         # Material inclusion filter (SQL-level)
         include_materials: Optional[List[str]] = None,
+        # Pre-filtered product IDs (from product_attributes query)
+        include_product_ids: Optional[List[str]] = None,
     ) -> List[Candidate]:
         """Retrieve exploration items with deterministic ordering.
 
@@ -810,6 +933,8 @@ class CandidateSelectionModule:
                 'exclude_product_ids': sql_exclude_ids,
                 # Material inclusion filter (SQL-level)
                 'include_materials': include_materials,
+                # Pre-filtered product IDs (from product_attributes query)
+                'include_product_ids': include_product_ids,
             }
 
             # Debug log article type filtering
@@ -818,6 +943,9 @@ class CandidateSelectionModule:
 
             if sql_exclude_ids:
                 print(f"[CandidateSelection] SQL-level exclude_product_ids: {len(sql_exclude_ids)} items")
+
+            if include_product_ids:
+                print(f"[CandidateSelection] SQL-level include_product_ids (pre-filter): {len(include_product_ids)} items")
 
             # Log sale/new filters
             if on_sale_only:

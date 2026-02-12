@@ -12,7 +12,7 @@
    - [GET /api/recs/v2/feed](#get-apirecsv2feed) -- Primary feed endpoint
    - [GET /api/recs/v2/sale](#get-apirecsv2sale) -- Sale items
    - [GET /api/recs/v2/new-arrivals](#get-apirecsv2new-arrivals) -- New arrivals
-   - ~~GET /api/recs/v2/feed/keyset~~ (use /feed instead)
+   - [GET /api/recs/v2/feed/keyset](#get-apirecsv2feedkeyset) -- Keyset pagination (full filter parity)
    - ~~GET /api/recs/v2/feed/endless~~ (deprecated)
 3. [User Actions](#user-actions) (1 endpoint, instant response)
    - [POST /api/recs/v2/feed/action](#post-apirecsv2feedaction) -- Record interaction
@@ -153,7 +153,7 @@ All 401 responses include `WWW-Authenticate: Bearer` header.
 ### GET /api/recs/v2/feed
 
 **The primary feed endpoint.** Returns personalized product recommendations with keyset cursor pagination.
-Supports 23+ filters, session-aware scoring, age/weather context scoring, and diversity constraints.
+Supports 40+ filters (21 attribute dimensions with include/exclude), session-aware scoring, age/weather context scoring, and diversity constraints.
 
 #### Pagination Flow (Cursor-Based)
 
@@ -209,26 +209,6 @@ Supports 23+ filters, session-aware scoring, age/weather context scoring, and di
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `exclude_styles` | string | Comma-separated coverage styles to avoid: `deep-necklines`, `sheer`, `cutouts`, `backless`, `strapless` |
-| `include_occasions` | string | Comma-separated occasions: `casual`, `office`, `evening`, `beach`, `active` |
-
-##### Pattern Filters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `include_patterns` | string | Preferred patterns: `solid`, `stripes`, `floral`, `geometric`, `animal-print`, `plaid` |
-| `exclude_patterns` | string | Patterns to avoid |
-
-##### Attribute Filters (Soft Scoring)
-
-These are soft preferences that boost matching items rather than hard-exclude non-matching ones.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `fit` | string | Fit preferences: `slim`, `regular`, `relaxed`, `oversized` |
-| `length` | string | Length preferences: `cropped`, `standard`, `long` |
-| `sleeves` | string | Sleeve preferences: `short`, `long`, `sleeveless`, `3/4` |
-| `neckline` | string | Neckline preferences: `crew`, `v-neck`, `scoop`, `turtleneck`, `mock` |
-| `rise` | string | Rise preferences (bottoms): `high`, `mid`, `low` |
 
 ##### Price Filters
 
@@ -236,6 +216,132 @@ These are soft preferences that boost matching items rather than hard-exclude no
 |-----------|------|-------------|
 | `min_price` | float | Minimum price (>= 0) |
 | `max_price` | float | Maximum price (>= 0) |
+| `on_sale_only` | bool | Only return items on sale. Default: `false` |
+
+##### Attribute Filters (Hard Include/Exclude)
+
+All attribute filters are **hard filters** -- items that don't match are strictly excluded. Every attribute supports both `include_` (whitelist) and `exclude_` (blacklist) variants. All values are **comma-separated** and **case-insensitive**.
+
+**Include behavior:**
+- Single-value attributes: item's value must be in the include list. Items with `null` values are **excluded**.
+- Multi-value attributes: item must have **at least one** value matching the include list. Items with empty/null lists are **excluded**.
+
+**Exclude behavior:**
+- Single-value attributes: item's value must NOT be in the exclude list. Items with `null` values **pass through**.
+- Multi-value attributes: item must have **no** values matching the exclude list. Items with empty/null lists **pass through**.
+
+You can combine `include_` and `exclude_` on the same attribute (e.g., include Casual + Smart Casual formality, but exclude any that also match a specific exclusion).
+
+###### Formality
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_formality` | string | Formality levels to include. Values: `Casual`, `Smart Casual`, `Semi-Formal`, `Formal` |
+| `exclude_formality` | string | Formality levels to exclude |
+
+###### Occasions
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_occasions` | string | Occasions to include. Values: `casual`, `office`, `evening`, `beach`, `active`, `date_night`, `party`, `work`, `everyday`, `vacation` |
+| `exclude_occasions` | string | Occasions to exclude |
+
+###### Seasons
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_seasons` | string | Seasons to include. Values: `Spring`, `Summer`, `Fall`, `Winter` |
+| `exclude_seasons` | string | Seasons to exclude |
+
+###### Style Tags
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_style_tags` | string | Style tags to include. Values: `Classic`, `Trendy`, `Bold`, `Minimal`, `Street`, `Boho`, `Romantic`, `Edgy`, `Preppy` |
+| `exclude_style_tags` | string | Style tags to exclude |
+
+###### Color Family
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_color_family` | string | Color families to include. Values: `Neutrals`, `Blues`, `Browns`, `Greens`, `Pinks`, `Reds`, `Purples`, `Yellows`, `Oranges`, `Whites`, `Blacks`, `Grays` |
+| `exclude_color_family` | string | Color families to exclude |
+
+###### Patterns
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_patterns` | string | Patterns to include. Values: `solid`, `stripes`, `floral`, `geometric`, `animal-print`, `plaid`, `polka-dot`, `abstract`, `checkered` |
+| `exclude_patterns` | string | Patterns to exclude |
+
+###### Silhouette
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_silhouette` | string | Silhouettes to include. Values: `Fitted`, `A-Line`, `Straight`, `Wide Leg`, `Skinny`, `Relaxed`, `Bodycon`, `Oversized`, `Flared` |
+| `exclude_silhouette` | string | Silhouettes to exclude |
+
+###### Fit
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_fit` | string | Fits to include. Values: `slim`, `regular`, `relaxed`, `oversized` |
+| `exclude_fit` | string | Fits to exclude |
+
+###### Length
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_length` | string | Lengths to include. Values: `cropped`, `standard`, `long`, `mini`, `midi`, `maxi` |
+| `exclude_length` | string | Lengths to exclude |
+
+###### Sleeves
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_sleeves` | string | Sleeve types to include. Values: `short`, `long`, `sleeveless`, `3/4`, `cap`, `puff` |
+| `exclude_sleeves` | string | Sleeve types to exclude |
+
+###### Neckline
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_neckline` | string | Necklines to include. Values: `crew`, `v-neck`, `scoop`, `turtleneck`, `mock`, `boat`, `square`, `halter`, `off-shoulder`, `sweetheart` |
+| `exclude_neckline` | string | Necklines to exclude |
+
+###### Rise
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_rise` | string | Rise to include (bottoms). Values: `high`, `mid`, `low` |
+| `exclude_rise` | string | Rise to exclude |
+
+###### Coverage
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_coverage` | string | Coverage levels to include. Values: `Full`, `Moderate`, `Partial`, `Minimal` |
+| `exclude_coverage` | string | Coverage levels to exclude |
+
+###### Materials
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_materials` | string | Materials to include. Values: `cotton`, `linen`, `silk`, `polyester`, `wool`, `denim`, `leather`, `satin`, `chiffon`, `knit`, `velvet`, `rayon`, `nylon` |
+| `exclude_materials` | string | Materials to exclude |
+
+##### Deprecated Parameters
+
+These still work but map to the new `include_` equivalents internally. Prefer the new params.
+
+| Parameter | Maps to | Description |
+|-----------|---------|-------------|
+| `fit` | `include_fit` | Comma-separated fits |
+| `length` | `include_length` | Comma-separated lengths |
+| `sleeves` | `include_sleeves` | Comma-separated sleeve types |
+| `neckline` | `include_neckline` | Comma-separated necklines |
+| `rise` | `include_rise` | Comma-separated rises |
+| `preferred_brands` | `include_brands` | Comma-separated brands |
 
 #### Response
 
@@ -387,17 +493,15 @@ GET /api/recs/v2/new-arrivals?categories=tops&include_brands=Zara,H%26M&page_siz
 
 ### GET /api/recs/v2/feed/keyset
 
-**Raw keyset pagination endpoint.** Functionally identical to `/feed` but with fewer filter parameters exposed. Use `/feed` for the full filter set.
+**Keyset pagination endpoint with full filter parity.** Functionally identical to `/feed` with the same 40+ filter parameters. Does not auto-persist seen_ids in the background (caller manages session).
 
 #### Query Parameters
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `session_id` | string | No | auto | Session ID |
-| `cursor` | string | No | null | Cursor from previous response |
-| `page_size` | int | No | 50 | Items per page (1-200) |
-| `gender` | string | No | "female" | Gender filter |
-| `categories` | string | No | null | Comma-separated categories |
+Same as [GET /api/recs/v2/feed](#query-parameters) -- all filters, cursor, pagination, and attribute include/exclude params are supported.
+
+The only differences from `/feed`:
+- No background auto-persist of seen_ids (caller manages session lifecycle)
+- Does not accept the deprecated legacy params (`fit`, `length`, `sleeves`, `neckline`, `rise`, `preferred_brands`) -- use the `include_` variants directly
 
 #### Response
 
@@ -407,7 +511,7 @@ Same format as `/feed`.
 
 ### ~~GET /api/recs/v2/feed/endless~~ (DEPRECATED)
 
-**Deprecated.** Use `GET /api/recs/v2/feed` instead, which provides keyset cursor pagination (O(1)), 23+ filters, session scoring, and context-aware scoring.
+**Deprecated.** Use `GET /api/recs/v2/feed` instead, which provides keyset cursor pagination (O(1)), 40+ filters (21 attribute dimensions with include/exclude), session scoring, and context-aware scoring.
 
 ---
 
@@ -1263,9 +1367,29 @@ GET  /api/recs/v2/feed?session_id=X&cursor=Y  -> Feed now boosts floral midi dre
 ### 4. Filtered Feeds
 
 ```
+# Basic category + color + price
 GET /api/recs/v2/feed?categories=dresses&include_colors=black,navy&min_price=50&max_price=200
-GET /api/recs/v2/sale?categories=tops&page_size=20
-GET /api/recs/v2/new-arrivals?include_brands=Zara,H%26M
+
+# Formal office wear, no bold patterns
+GET /api/recs/v2/feed?include_formality=Formal,Semi-Formal&include_occasions=office&exclude_patterns=animal-print,geometric
+
+# Summer casual tops in neutral tones, excluding polyester
+GET /api/recs/v2/feed?categories=tops&include_seasons=Summer&include_formality=Casual&include_color_family=Neutrals&exclude_materials=polyester
+
+# Fitted silhouette dresses, midi/maxi only, no strapless
+GET /api/recs/v2/feed?categories=dresses&include_silhouette=Fitted,Bodycon&include_length=midi,maxi&exclude_neckline=off-shoulder
+
+# Sale items with brand + style filter
+GET /api/recs/v2/sale?include_brands=Zara,H%26M&include_style_tags=Classic,Minimal&on_sale_only=true
+
+# New arrivals in specific color families
+GET /api/recs/v2/new-arrivals?include_color_family=Blues,Greens&include_seasons=Spring
+
+# Combine include + exclude on same dimension
+GET /api/recs/v2/feed?include_formality=Casual,Smart Casual&exclude_coverage=Minimal
+
+# Keyset endpoint (same filters)
+GET /api/recs/v2/feed/keyset?categories=bottoms&include_fit=slim,regular&include_rise=high&exclude_materials=leather
 ```
 
 ---

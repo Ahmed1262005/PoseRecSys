@@ -628,7 +628,6 @@ class RecommendationPipeline:
         # Calculate how many candidates to fetch
         # With SQL-level seen exclusion, fetch_size no longer needs to compensate
         # for seen items — every row SQL returns is guaranteed unseen.
-        # Base fetch: always get a healthy batch from the catalog for reranker quality.
         # Check if any Python-level filters are active (need over-fetch)
         has_attribute_filters = any([
             include_formality, exclude_formality,
@@ -646,14 +645,87 @@ class RecommendationPipeline:
             exclude_occasions,
             include_patterns, exclude_patterns,
         ])
-        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types or has_attribute_filters)
-        filter_multiplier = 3 if has_python_filters else 1  # Fetch 3x more if Python filtering
+        has_python_filters = bool(include_colors or exclude_colors or preferred_brands or exclude_brands or article_types)
+
+        # Step 4b: Pre-filter by product_attributes if attribute filters are active.
+        # This queries product_attributes for matching sku_ids BEFORE the main SQL RPC,
+        # so every candidate returned already satisfies the attribute filters.
+        # JSONB fields (neckline, sleeve, length) are still handled in Python fallback.
+        pre_filter_ids = None
+        pre_filter_count = None
+        if has_attribute_filters:
+            # Build attribute_filters dict early for the pre-filter query
+            _af_params_for_prefilter = {
+                'include_formality': include_formality, 'exclude_formality': exclude_formality,
+                'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
+                'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
+                'include_color_family': include_color_family, 'exclude_color_family': exclude_color_family,
+                'include_silhouette': include_silhouette, 'exclude_silhouette': exclude_silhouette,
+                'include_fit': include_fit, 'exclude_fit': exclude_fit,
+                'include_coverage': include_coverage, 'exclude_coverage': exclude_coverage,
+                'include_pattern': include_patterns, 'exclude_pattern': exclude_patterns,
+                'exclude_occasions': exclude_occasions,
+                # Multi-value
+                'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
+                'include_style_tags': include_style_tags, 'exclude_style_tags': exclude_style_tags,
+                'include_occasions': include_occasions,
+            }
+            active_prefilter = {k: v for k, v in _af_params_for_prefilter.items() if v}
+
+            if active_prefilter:
+                pre_filter_ids = self.candidate_module.pre_filter_by_attributes(active_prefilter)
+                if pre_filter_ids is not None:
+                    pre_filter_count = len(pre_filter_ids)
+                    if pre_filter_count == 0:
+                        # No products match the attribute filters -- short circuit
+                        print(f"[Pipeline] Pre-filter returned 0 matching products -- returning empty feed")
+                        return {
+                            "user_id": user_id or anon_id,
+                            "session_id": session_id,
+                            "cursor": None,
+                            "strategy": "exploration",
+                            "results": [],
+                            "pagination": {
+                                "page": 0,
+                                "page_size": page_size,
+                                "items_returned": 0,
+                                "session_seen_count": len(db_seen_ids),
+                                "has_more": False,
+                            },
+                            "metadata": {
+                                "candidates_retrieved": 0,
+                                "candidates_after_python_filters": 0,
+                                "candidates_after_feasibility_filter": 0,
+                                "candidates_after_occasion_filter": None,
+                                "candidates_after_scoring": 0,
+                                "candidates_after_dedup": 0,
+                                "pre_filter_count": 0,
+                                "pre_filter_short_circuit": True,
+                                "sasrec_available": self.ranker.is_loaded,
+                                "seed_vector_available": bool(user_state.taste_vector),
+                                "has_onboarding": bool(user_state.onboarding_profile),
+                                "user_state_type": user_state.state_type,
+                                "by_source": {},
+                                "keyset_pagination": True,
+                                "db_seen_history_count": db_history_count,
+                                "feed_version": self.version_id,
+                            },
+                        }
+                    # Cap pre-filter IDs for SQL performance
+                    if pre_filter_count > self.candidate_module.SQL_INCLUDE_IDS_LIMIT:
+                        print(f"[Pipeline] Pre-filter returned {pre_filter_count} IDs, capping to {self.candidate_module.SQL_INCLUDE_IDS_LIMIT} for SQL")
+                        pre_filter_ids = pre_filter_ids[:self.candidate_module.SQL_INCLUDE_IDS_LIMIT]
+
+        # With pre-filtering, no need for 3x multiplier on attribute filters
+        # Only over-fetch for color/brand/article_type Python filters
+        filter_multiplier = 3 if has_python_filters else 1
         base_fetch = max(500, page_size * 10)  # At least 500, or 10x requested page
         fetch_size = base_fetch * filter_multiplier
         fetch_size = min(fetch_size, 5000)  # Safety cap
 
         # Step 5: Get candidates using keyset cursor
         # Seen IDs are excluded at the SQL level for efficiency
+        # Pre-filtered IDs constrain SQL to only return matching products
         candidates = self.candidate_module.get_candidates_keyset(
             user_state,
             gender,
@@ -666,6 +738,7 @@ class RecommendationPipeline:
             new_arrivals_only=new_arrivals_only,
             new_arrivals_days=new_arrivals_days,
             include_materials=include_materials,
+            include_product_ids=pre_filter_ids,
         )
 
         # Step 5a: Session-Aware Retrieval (Contextual Recall)
@@ -706,9 +779,12 @@ class RecommendationPipeline:
             except Exception as e:
                 print(f"[Pipeline] Session-intent recall skipped (non-fatal): {e}")
 
+        # Track candidates retrieved for metadata
+        pre_filter_count_for_meta = len(candidates)
+
         # Step 5b: Apply Python-level hard filters (colors, brands, article_types)
         # These are more reliable than SQL-level filtering
-        pre_filter_count = len(candidates)
+        pre_python_filter_count = len(candidates)
 
         # Apply color filter
         if include_colors or exclude_colors:
@@ -723,12 +799,17 @@ class RecommendationPipeline:
             candidates = self._apply_article_type_filter(candidates, article_types)
 
         post_filter_count = len(candidates)
-        if pre_filter_count != post_filter_count:
-            print(f"[Pipeline] Python filters: {pre_filter_count} -> {post_filter_count} candidates")
+        if pre_python_filter_count != post_filter_count:
+            print(f"[Pipeline] Python filters: {pre_python_filter_count} -> {post_filter_count} candidates")
 
         # Step 5b2: Apply generic attribute hard filters (include/exclude)
         # Build attribute_filters dict from all new filter params
         attribute_filters = {}
+        # NOTE: include_occasions is NOT here -- it has dedicated filter paths
+        # (feasibility filter + _filter_by_occasions with occasion expansion).
+        # exclude_occasions IS here since it has no dedicated path.
+        # NOTE: include_patterns/exclude_patterns are NOT here -- they are
+        # handled via profile.patterns_liked and the existing pattern scoring path.
         _af_params = {
             'include_formality': include_formality, 'exclude_formality': exclude_formality,
             'include_seasons': include_seasons, 'exclude_seasons': exclude_seasons,
@@ -742,8 +823,7 @@ class RecommendationPipeline:
             'include_rise': include_rise, 'exclude_rise': exclude_rise,
             'include_coverage': include_coverage, 'exclude_coverage': exclude_coverage,
             'include_materials': include_materials, 'exclude_materials': exclude_materials,
-            'include_pattern': include_patterns, 'exclude_pattern': exclude_patterns,
-            'include_occasions': include_occasions, 'exclude_occasions': exclude_occasions,
+            'exclude_occasions': exclude_occasions,
         }
         for k, v in _af_params.items():
             if v:
@@ -957,8 +1037,9 @@ class RecommendationPipeline:
                 "has_more": has_more
             },
             "metadata": {
-                "candidates_retrieved": pre_filter_count,
+                "candidates_retrieved": pre_filter_count_for_meta,
                 "candidates_after_python_filters": post_filter_count,
+                "pre_filter_count": pre_filter_count,
                 "candidates_after_feasibility_filter": feasibility_stats.get("passed") if feasibility_stats else post_filter_count,
                 "candidates_after_occasion_filter": len(candidates) if include_occasions else None,
                 "candidates_after_scoring": len(ranked_candidates),
