@@ -267,7 +267,8 @@ class RecommendationPipeline:
         gender: str = "female",
         categories: Optional[List[str]] = None,
         page: int = 0,
-        page_size: int = 50
+        page_size: int = 50,
+        debug: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate endless scroll feed with session state tracking.
@@ -382,7 +383,7 @@ class RecommendationPipeline:
         for c in page_results:
             by_source[c.source] += 1
 
-        return {
+        resp = {
             "user_id": user_id or anon_id or "anonymous",
             "session_id": session_id,
             "strategy": strategy,
@@ -405,6 +406,11 @@ class RecommendationPipeline:
                 "endless_scroll": True
             }
         }
+
+        if not debug:
+            resp.pop("metadata", None)
+
+        return resp
 
     # =========================================================
     # Keyset Cursor Feed Generation (V2)
@@ -471,6 +477,7 @@ class RecommendationPipeline:
         include_materials: Optional[List[str]] = None,
         exclude_materials: Optional[List[str]] = None,
         exclude_occasions: Optional[List[str]] = None,
+        debug: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate feed using keyset cursor for O(1) pagination.
@@ -1038,7 +1045,7 @@ class RecommendationPipeline:
         for c in page_results:
             by_source[c.source] += 1
 
-        return {
+        resp = {
             "user_id": user_id or anon_id or "anonymous",
             "session_id": session_id,
             "cursor": next_cursor,
@@ -1098,6 +1105,12 @@ class RecommendationPipeline:
                 "feed_version": self.session_service.get_feed_version(session_id).version_id if self.session_service.get_feed_version(session_id) else None
             }
         }
+
+        # Strip internal metadata in production (only include when debug=True)
+        if not debug:
+            resp.pop("metadata", None)
+
+        return resp
 
     def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session info for debugging."""

@@ -1449,7 +1449,8 @@ async def get_pipeline_feed(
     exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     on_sale_only: bool = Query(False, description="Only show items on sale"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    debug: bool = Query(False, description="Include internal pipeline metadata in response (for debugging only)")
 ):
     """Get personalized feed using the full recommendation pipeline with keyset pagination."""
     
@@ -1612,6 +1613,7 @@ async def get_pipeline_feed(
         include_materials=include_materials_list,
         exclude_materials=exclude_materials_filter_list,
         exclude_occasions=exclude_occasions_list,
+        debug=debug,
     )
 
     # Auto-persist seen_ids to Supabase in background (replaces manual /session/sync)
@@ -1663,7 +1665,8 @@ async def get_sale_items(
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    debug: bool = Query(False, description="Include internal pipeline metadata in response")
 ):
     """Get personalized sale items."""
     
@@ -1704,6 +1707,7 @@ async def get_sale_items(
         page_size=page_size,
         on_sale_only=True,
         user_metadata=user.user_metadata,
+        debug=debug,
     )
 
     # Auto-persist seen_ids in background
@@ -1754,7 +1758,8 @@ async def get_new_arrivals(
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    debug: bool = Query(False, description="Include internal pipeline metadata in response")
 ):
     """Get personalized new arrivals."""
     
@@ -1795,6 +1800,7 @@ async def get_new_arrivals(
         page_size=page_size,
         new_arrivals_only=True,
         user_metadata=user.user_metadata,
+        debug=debug,
     )
 
     # Auto-persist seen_ids in background
@@ -1831,7 +1837,8 @@ async def get_endless_feed(
     gender: str = Query("female", description="Gender filter"),
     categories: Optional[str] = Query(None, description="Comma-separated category filter"),
     page: int = Query(0, ge=0, description="Page number (0-indexed)"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    debug: bool = Query(False, description="Include internal metadata in response")
 ):
     """Get endless scroll feed with session state tracking."""
     
@@ -1851,7 +1858,8 @@ async def get_endless_feed(
         gender=gender,
         categories=cat_list,
         page=page,
-        page_size=page_size
+        page_size=page_size,
+        debug=debug
     )
 
     return response
@@ -1936,7 +1944,8 @@ async def get_keyset_feed(
     exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     on_sale_only: bool = Query(False, description="Only show items on sale"),
     cursor: Optional[str] = Query(None, description="Opaque cursor from previous response (NULL for first page)"),
-    page_size: int = Query(50, ge=1, le=200, description="Items per page")
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    debug: bool = Query(False, description="Include internal pipeline metadata in response")
 ):
     """Get keyset cursor paginated feed with full filter support."""
     
@@ -1995,6 +2004,7 @@ async def get_keyset_feed(
         include_materials=_parse_csv(include_materials),
         exclude_materials=_parse_csv(exclude_materials_filter),
         exclude_occasions=_parse_csv(exclude_occasions),
+        debug=debug,
     )
 
     return response
