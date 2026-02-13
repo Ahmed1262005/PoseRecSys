@@ -235,6 +235,11 @@ def _flatten_product(row: dict) -> dict:
         "silhouette": attrs.get("silhouette") or construction.get("silhouette") or "",
         "sleeve_type": construction.get("sleeve_type") or row.get("sleeve") or "",
         "trending_score": float(row.get("trending_score") or 0),
+        # Additional Gemini attributes for style mapping
+        "sheen": attrs.get("sheen") or "",
+        "texture": attrs.get("texture") or "",
+        "pattern_scale": attrs.get("pattern_scale") or "",
+        "trend_tags": attrs.get("trend_tags") or [],
         # Coverage & body type (from Gemini Vision)
         "coverage_level": attrs.get("coverage_level") or "",
         "skin_exposure": attrs.get("skin_exposure") or "",
@@ -1606,9 +1611,14 @@ _FORMALITY_MAP: Dict[str, List[str]] = {
 
 
 def _map_to_general_styles(flat: dict) -> List[str]:
-    """Map a product's style_tags + occasions + formality to general style labels."""
+    """Map a product's attributes to general style labels.
+
+    Uses style_tags + occasions + formality keyword maps, PLUS attribute-based
+    heuristics for Statement (and other styles that benefit from richer signals).
+    """
     result: Set[str] = set()
 
+    # --- 1. Keyword maps (style_tags, occasions, formality) ---
     for tag in (flat.get("style_tags") or []):
         key = tag.strip().lower()
         if key in _STYLE_TAG_MAP:
@@ -1622,6 +1632,105 @@ def _map_to_general_styles(flat: dict) -> List[str]:
     formality = (flat.get("formality") or "").strip().lower()
     if formality in _FORMALITY_MAP:
         result.update(_FORMALITY_MAP[formality])
+
+    # Also check trend_tags through the style_tag map
+    for tag in (flat.get("trend_tags") or []):
+        key = tag.strip().lower()
+        if key in _STYLE_TAG_MAP:
+            result.update(_STYLE_TAG_MAP[key])
+
+    # --- 2. Attribute-based Statement detection ---
+    # Products with bold/dramatic attributes are Statement even if style_tags
+    # don't explicitly say so.  We use a scoring approach: each signal adds
+    # a point, and >= 2 points triggers Statement.
+    if "Statement" not in result:
+        statement_score = 0
+
+        # Pattern signals (bold prints)
+        pattern = (flat.get("pattern") or "").lower()
+        _STATEMENT_PATTERNS = {
+            "animal print", "animal", "leopard", "zebra", "snake",
+            "abstract", "graphic", "color block", "colour block",
+            "tie-dye", "tie dye", "tropical", "baroque",
+            "geometric", "camouflage", "camo",
+        }
+        if pattern in _STATEMENT_PATTERNS:
+            statement_score += 1
+
+        # Large-scale pattern
+        pattern_scale = (flat.get("pattern_scale") or "").lower()
+        if pattern_scale == "large":
+            statement_score += 1
+
+        # Sheen signals (metallic, sequin, glitter)
+        sheen = (flat.get("sheen") or "").lower()
+        _STATEMENT_SHEENS = {"metallic", "sequin", "glitter", "holographic", "iridescent"}
+        if sheen in _STATEMENT_SHEENS:
+            statement_score += 2  # Strong signal
+
+        # Texture signals (dramatic textures)
+        texture = (flat.get("texture") or "").lower()
+        _STATEMENT_TEXTURES = {
+            "faux fur", "fur", "feathered", "feather", "velvet",
+            "sequin", "beaded", "embossed", "quilted",
+        }
+        if texture in _STATEMENT_TEXTURES:
+            statement_score += 1
+
+        # Fabric signals (statement fabrics)
+        fabric = (flat.get("apparent_fabric") or "").lower()
+        _STATEMENT_FABRICS = {
+            "sequin", "metallic", "leather", "faux leather", "patent",
+            "vinyl", "pvc", "latex", "faux fur", "fur", "feather",
+            "velvet", "brocade", "organza", "tulle",
+        }
+        if fabric in _STATEMENT_FABRICS:
+            statement_score += 1
+
+        # Neckline signals (dramatic necklines)
+        neckline = (flat.get("neckline") or "").lower()
+        _STATEMENT_NECKLINES = {
+            "plunging", "deep v", "one shoulder", "one-shoulder",
+            "asymmetric", "asymmetrical", "strapless", "halter",
+            "off shoulder", "off-shoulder", "bardot",
+        }
+        if neckline in _STATEMENT_NECKLINES:
+            statement_score += 1
+
+        # Silhouette signals
+        silhouette = (flat.get("silhouette") or "").lower()
+        _STATEMENT_SILHOUETTES = {
+            "asymmetric", "asymmetrical", "dramatic", "voluminous",
+            "sculptural", "exaggerated", "balloon", "cocoon",
+        }
+        if silhouette in _STATEMENT_SILHOUETTES:
+            statement_score += 1
+
+        # Coverage details signals (bold/revealing design choices)
+        coverage_details = flat.get("coverage_details") or []
+        _STATEMENT_COVERAGE = {
+            "cutouts", "sheer_panels", "sheer", "high_slit",
+            "backless", "open_back", "midriff_exposed",
+            "lace_up", "corset",
+        }
+        for cd in coverage_details:
+            if cd.strip().lower() in _STATEMENT_COVERAGE:
+                statement_score += 1
+                break  # Count once
+
+        # Primary color signals (bold, attention-grabbing colors)
+        primary_color = (flat.get("primary_color") or "").lower()
+        _STATEMENT_COLORS = {
+            "red", "hot pink", "fuchsia", "magenta", "neon",
+            "electric blue", "cobalt", "emerald", "gold", "silver",
+            "orange", "yellow", "lime", "purple",
+        }
+        if primary_color in _STATEMENT_COLORS:
+            statement_score += 1
+
+        # Threshold: 2+ signals = Statement
+        if statement_score >= 2:
+            result.add("Statement")
 
     return sorted(result) if result else []
 
