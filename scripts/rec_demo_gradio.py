@@ -698,14 +698,18 @@ def candidate_to_dict(c: RealCandidate) -> dict:
     }
 
 
-def candidate_to_feed_dict(c: RealCandidate) -> dict:
+def candidate_to_feed_dict(c: RealCandidate, flat_idx: Optional[int] = None) -> dict:
     """Convert candidate to a displayable dict with scores."""
+    gen_styles = []
+    if flat_idx is not None and flat_idx < len(ALL_FLATS):
+        gen_styles = ALL_FLATS[flat_idx].get("general_styles") or []
     return {
         "product_id": c.item_id, "name": c.name, "brand": c.brand,
         "article_type": c.article_type, "broad_category": c.broad_category,
         "price": c.price, "image_url": c.image_url,
         "gallery_images": getattr(c, "gallery_images", []) or [],
         "style_tags": c.style_tags, "occasions": c.occasions,
+        "general_styles": gen_styles,
         "pattern": c.pattern, "formality": c.formality,
         "fit_type": c.fit, "color_family": c.color_family,
         "neckline": c.neckline, "sleeve_type": c.sleeve,
@@ -1295,10 +1299,13 @@ def render_product_card(item: dict, show_scores: bool = True) -> str:
         price_str += ' <span style="color:#1565c0;font-weight:bold">NEW</span>'
 
     tags_html = ""
-    for s in (item.get("style_tags") or [])[:3]:
+    # Show general style labels (pre-computed from style_tags + occasions + formality)
+    gen_styles = item.get("general_styles") or []
+    if not gen_styles:
+        # Fallback to raw style_tags if general_styles not available
+        gen_styles = (item.get("style_tags") or [])[:3]
+    for s in gen_styles[:4]:
         tags_html += f'<span class="card-tag">{_html.escape(str(s))}</span>'
-    for o in (item.get("occasions") or [])[:2]:
-        tags_html += f'<span class="card-tag card-tag-occasion">{_html.escape(str(o))}</span>'
 
     score_html = ""
     if show_scores:
@@ -1315,7 +1322,7 @@ def render_product_card(item: dict, show_scores: bool = True) -> str:
         </div>'''
 
     attrs = []
-    for key in ["pattern", "formality", "fit_type", "neckline", "sleeve_type", "length", "color_family",
+    for key in ["pattern", "fit_type", "neckline", "sleeve_type", "length", "color_family",
                  "coverage_level", "skin_exposure", "model_body_type", "model_size_estimate"]:
         v = item.get(key)
         if v and v not in ("Moderate", "Medium", "Unknown"):
@@ -1479,10 +1486,149 @@ ALL_FLATS, ALL_CANDIDATES, ALL_SEARCH_RESULTS = fetch_product_pool()
 # Derive dropdown values from real data
 DB_BRANDS = sorted(set(f["brand"] for f in ALL_FLATS if f.get("brand")))
 DB_ARTICLE_TYPES = sorted(set(f["article_type"] for f in ALL_FLATS if f.get("article_type")))
-DB_STYLES = sorted(set(s for f in ALL_FLATS for s in (f.get("style_tags") or [])))
+DB_STYLES_RAW = sorted(set(s for f in ALL_FLATS for s in (f.get("style_tags") or [])))
 DB_COLORS = sorted(set(c for f in ALL_FLATS for c in (f.get("colors") or [])))
 DB_PATTERNS = sorted(set(f["pattern"] for f in ALL_FLATS if f.get("pattern")))
-DB_OCCASIONS = sorted(set(o for f in ALL_FLATS for o in (f.get("occasions") or [])))
+DB_OCCASIONS_RAW = sorted(set(o for f in ALL_FLATS for o in (f.get("occasions") or [])))
+
+# --- General style options (replaces 100+ style_tags + occasions + formality) ---
+GENERAL_STYLE_OPTIONS = [
+    "Casual", "Classic", "Minimalist", "Preppy", "Office",
+    "Activewear", "Streetwear", "Trendy", "Romantic", "Edgy",
+    "Boho", "Night Out", "Occasionwear", "Statement", "Maternity", "Evening",
+]
+
+# Mapping from raw style_tags / occasions / formality values -> general style(s)
+# Keys are lowercased.  Each raw value can map to one or more general styles.
+_STYLE_TAG_MAP: Dict[str, List[str]] = {
+    # --- Casual ---
+    "casual": ["Casual"], "everyday": ["Casual"], "relaxed": ["Casual"],
+    "comfortable": ["Casual"], "easy": ["Casual"], "laid-back": ["Casual"],
+    "weekend": ["Casual"], "basic": ["Casual"], "cozy": ["Casual"],
+    "lounge": ["Casual"], "loungewear": ["Casual"], "athleisure": ["Casual", "Activewear"],
+    # --- Classic ---
+    "classic": ["Classic"], "timeless": ["Classic"], "traditional": ["Classic"],
+    "polished": ["Classic"], "refined": ["Classic"], "sophisticated": ["Classic"],
+    "tailored": ["Classic"], "elegant": ["Classic", "Evening"],
+    # --- Minimalist ---
+    "minimal": ["Minimalist"], "minimalist": ["Minimalist"], "clean": ["Minimalist"],
+    "simple": ["Minimalist"], "understated": ["Minimalist"], "modern": ["Minimalist"],
+    "sleek": ["Minimalist"],
+    # --- Preppy ---
+    "preppy": ["Preppy"], "collegiate": ["Preppy"], "ivy": ["Preppy"],
+    "heritage": ["Preppy"], "nautical": ["Preppy"], "sporty-chic": ["Preppy"],
+    # --- Office ---
+    "office": ["Office"], "work": ["Office"], "professional": ["Office"],
+    "business": ["Office"], "business casual": ["Office"], "corporate": ["Office"],
+    "workwear": ["Office"], "smart casual": ["Office"],
+    # --- Activewear ---
+    "activewear": ["Activewear"], "athletic": ["Activewear"], "sporty": ["Activewear"],
+    "sportswear": ["Activewear"], "workout": ["Activewear"], "fitness": ["Activewear"],
+    "performance": ["Activewear"], "gym": ["Activewear"], "running": ["Activewear"],
+    "yoga": ["Activewear"], "training": ["Activewear"],
+    # --- Streetwear ---
+    "streetwear": ["Streetwear"], "street": ["Streetwear"], "urban": ["Streetwear"],
+    "hip-hop": ["Streetwear"], "skate": ["Streetwear"], "graphic": ["Streetwear"],
+    "oversized": ["Streetwear"],
+    # --- Trendy ---
+    "trendy": ["Trendy"], "fashion-forward": ["Trendy"], "on-trend": ["Trendy"],
+    "contemporary": ["Trendy"], "modern chic": ["Trendy"], "y2k": ["Trendy"],
+    "retro": ["Trendy"], "vintage-inspired": ["Trendy"], "cutout": ["Trendy"],
+    "bold": ["Trendy", "Statement"],
+    # --- Romantic ---
+    "romantic": ["Romantic"], "feminine": ["Romantic"], "floral": ["Romantic"],
+    "girly": ["Romantic"], "soft": ["Romantic"], "delicate": ["Romantic"],
+    "whimsical": ["Romantic"], "dreamy": ["Romantic"], "pretty": ["Romantic"],
+    "dainty": ["Romantic"], "cottagecore": ["Romantic"],
+    # --- Edgy ---
+    "edgy": ["Edgy"], "grunge": ["Edgy"], "punk": ["Edgy"], "goth": ["Edgy"],
+    "rock": ["Edgy"], "rebellious": ["Edgy"], "alternative": ["Edgy"],
+    "dark": ["Edgy"], "distressed": ["Edgy"], "leather": ["Edgy"],
+    "moto": ["Edgy"],
+    # --- Boho ---
+    "boho": ["Boho"], "bohemian": ["Boho"], "hippie": ["Boho"],
+    "free-spirited": ["Boho"], "earthy": ["Boho"], "artisan": ["Boho"],
+    "crochet": ["Boho"], "festival": ["Boho"], "tribal": ["Boho"],
+    "eclectic": ["Boho"],
+    # --- Night Out ---
+    "night out": ["Night Out"], "going out": ["Night Out"], "club": ["Night Out"],
+    "party": ["Night Out"], "clubwear": ["Night Out"], "sexy": ["Night Out"],
+    "date night": ["Night Out"], "date": ["Night Out"], "nightlife": ["Night Out"],
+    # --- Occasionwear ---
+    "occasion": ["Occasionwear"], "wedding": ["Occasionwear"], "wedding guest": ["Occasionwear"],
+    "bridal": ["Occasionwear"], "formal": ["Occasionwear", "Evening"],
+    "cocktail": ["Occasionwear"], "ceremony": ["Occasionwear"],
+    "special occasion": ["Occasionwear"], "prom": ["Occasionwear"],
+    "graduation": ["Occasionwear"], "bridesmaid": ["Occasionwear"],
+    # --- Statement ---
+    "statement": ["Statement"], "dramatic": ["Statement"], "maximalist": ["Statement"],
+    "avant-garde": ["Statement"], "artistic": ["Statement"], "loud": ["Statement"],
+    "show-stopping": ["Statement"], "eye-catching": ["Statement"],
+    # --- Maternity ---
+    "maternity": ["Maternity"], "pregnancy": ["Maternity"], "nursing": ["Maternity"],
+    "bump-friendly": ["Maternity"],
+    # --- Evening ---
+    "evening": ["Evening"], "gala": ["Evening"], "black tie": ["Evening"],
+    "dinner": ["Evening"], "upscale": ["Evening"], "luxe": ["Evening"],
+    "glamorous": ["Evening"], "glam": ["Evening"],
+}
+
+# Occasion -> general style mapping
+_OCCASION_MAP: Dict[str, List[str]] = {
+    "everyday": ["Casual"], "casual": ["Casual"], "weekend": ["Casual"],
+    "work": ["Office"], "office": ["Office"], "business": ["Office"],
+    "professional": ["Office"],
+    "party": ["Night Out"], "club": ["Night Out"], "night out": ["Night Out"],
+    "nightlife": ["Night Out"], "date night": ["Night Out"], "date": ["Night Out"],
+    "going out": ["Night Out"],
+    "wedding": ["Occasionwear"], "wedding guest": ["Occasionwear"],
+    "formal event": ["Occasionwear"], "ceremony": ["Occasionwear"],
+    "cocktail": ["Occasionwear"], "prom": ["Occasionwear"],
+    "graduation": ["Occasionwear"], "bridal": ["Occasionwear"],
+    "special occasion": ["Occasionwear"],
+    "evening": ["Evening"], "dinner": ["Evening"], "gala": ["Evening"],
+    "black tie": ["Evening"],
+    "gym": ["Activewear"], "workout": ["Activewear"], "sports": ["Activewear"],
+    "yoga": ["Activewear"], "running": ["Activewear"], "training": ["Activewear"],
+    "vacation": ["Casual", "Boho"], "travel": ["Casual"],
+    "festival": ["Boho"], "beach": ["Casual", "Boho"],
+}
+
+# Formality -> general style mapping
+_FORMALITY_MAP: Dict[str, List[str]] = {
+    "very casual": ["Casual"], "casual": ["Casual"],
+    "smart casual": ["Office", "Classic"], "business casual": ["Office"],
+    "business": ["Office"], "business formal": ["Office", "Classic"],
+    "semi-formal": ["Evening", "Occasionwear"],
+    "formal": ["Evening", "Occasionwear"],
+    "black tie": ["Evening"],
+}
+
+
+def _map_to_general_styles(flat: dict) -> List[str]:
+    """Map a product's style_tags + occasions + formality to general style labels."""
+    result: Set[str] = set()
+
+    for tag in (flat.get("style_tags") or []):
+        key = tag.strip().lower()
+        if key in _STYLE_TAG_MAP:
+            result.update(_STYLE_TAG_MAP[key])
+
+    for occ in (flat.get("occasions") or []):
+        key = occ.strip().lower()
+        if key in _OCCASION_MAP:
+            result.update(_OCCASION_MAP[key])
+
+    formality = (flat.get("formality") or "").strip().lower()
+    if formality in _FORMALITY_MAP:
+        result.update(_FORMALITY_MAP[formality])
+
+    return sorted(result) if result else []
+
+
+# Pre-compute general_styles for every product
+for _flat in ALL_FLATS:
+    _flat["general_styles"] = _map_to_general_styles(_flat)
 
 # Additional dropdown values for Filter Explorer (Tab 6)
 DB_FORMALITY = sorted(set(f.get("formality") for f in ALL_FLATS if f.get("formality")))
@@ -1915,20 +2061,14 @@ def _candidate_matches_filters(c: RealCandidate, filters: dict) -> bool:
         if not any(v.lower() == val for v in filters["article_types"]):
             return False
 
-    # -- Style & Formality --
+    # -- Style (general style labels, pre-computed from style_tags+occasions+formality) --
     if filters.get("styles"):
-        item_styles = set(s.lower() for s in (c.style_tags or []))
-        if not item_styles.intersection(s.lower() for s in filters["styles"]):
-            return False
-
-    if filters.get("formality"):
-        val = (c.formality or "").lower()
-        if not val or not any(v.lower() == val for v in filters["formality"]):
-            return False
-
-    if filters.get("occasions"):
-        item_occ = set(o.lower() for o in (c.occasions or []))
-        if not item_occ.intersection(o.lower() for o in filters["occasions"]):
+        flat_idx = filters.get("_current_flat_idx")
+        if flat_idx is not None and flat_idx < len(ALL_FLATS):
+            item_gen = set(ALL_FLATS[flat_idx].get("general_styles") or [])
+        else:
+            item_gen = set(s.lower() for s in (c.style_tags or []))
+        if not item_gen.intersection(filters["styles"]):
             return False
 
     if filters.get("seasons"):
@@ -2053,15 +2193,13 @@ def _build_facet_summary(matched_flats: List[dict], total: int) -> str:
         "Brand": Counter(),
         "Category": Counter(),
         "Article Type": Counter(),
-        "Style Tags": Counter(),
-        "Formality": Counter(),
+        "General Style": Counter(),
         "Pattern": Counter(),
         "Color Family": Counter(),
         "Fit Type": Counter(),
         "Neckline": Counter(),
         "Sleeve Type": Counter(),
         "Length": Counter(),
-        "Occasions": Counter(),
         "Seasons": Counter(),
         "Materials": Counter(),
         "Silhouette": Counter(),
@@ -2072,7 +2210,6 @@ def _build_facet_summary(matched_flats: List[dict], total: int) -> str:
         if f.get("brand"): facets["Brand"][f["brand"]] += 1
         if f.get("broad_category"): facets["Category"][f["broad_category"]] += 1
         if f.get("article_type"): facets["Article Type"][f["article_type"]] += 1
-        if f.get("formality"): facets["Formality"][f["formality"]] += 1
         if f.get("pattern"): facets["Pattern"][f["pattern"]] += 1
         if f.get("color_family"): facets["Color Family"][f["color_family"]] += 1
         if f.get("fit") or f.get("fit_type"): facets["Fit Type"][f.get("fit") or f.get("fit_type")] += 1
@@ -2081,10 +2218,8 @@ def _build_facet_summary(matched_flats: List[dict], total: int) -> str:
         if f.get("length"): facets["Length"][f["length"]] += 1
         if f.get("silhouette"): facets["Silhouette"][f["silhouette"]] += 1
         facets["On Sale"]["Yes" if f.get("is_on_sale") else "No"] += 1
-        for s in (f.get("style_tags") or []):
-            facets["Style Tags"][s] += 1
-        for o in (f.get("occasions") or []):
-            facets["Occasions"][o] += 1
+        for gs in (f.get("general_styles") or []):
+            facets["General Style"][gs] += 1
         for s in (f.get("seasons") or []):
             facets["Seasons"][s] += 1
         for m in (f.get("materials") or []):
@@ -2128,8 +2263,8 @@ def _build_facet_summary(matched_flats: List[dict], total: int) -> str:
 
 def _build_filter_data_table(matched_flats: List[dict], max_rows: int = 50) -> List[List]:
     """Build a data table (list of lists) from matched flat dicts."""
-    cols = ["name", "brand", "category", "article_type", "style_tags", "occasions",
-            "formality", "pattern", "color_family", "fit", "neckline", "sleeve",
+    cols = ["name", "brand", "category", "article_type", "general_styles",
+            "pattern", "color_family", "fit", "neckline", "sleeve",
             "length", "silhouette", "price", "materials", "seasons",
             "coverage_level", "skin_exposure", "model_body_type", "model_size_estimate"]
     rows = []
@@ -2150,14 +2285,15 @@ def _build_filter_data_table(matched_flats: List[dict], max_rows: int = 50) -> L
     return rows
 
 
-FILTER_TABLE_HEADERS = ["Name", "Brand", "Category", "Article Type", "Styles", "Occasions",
-                        "Formality", "Pattern", "Color Family", "Fit", "Neckline", "Sleeve",
+FILTER_TABLE_HEADERS = ["Name", "Brand", "Category", "Article Type", "General Style",
+                        "Pattern", "Color Family", "Fit", "Neckline", "Sleeve",
                         "Length", "Silhouette", "Price", "Materials", "Seasons",
                         "Coverage", "Skin Exp.", "Model Body Type", "Model Size"]
 
 
 def tab6_apply_filters(
-    categories, article_types, styles, formality, occasions, seasons,
+    categories, article_types, styles,
+    seasons,
     color_families, primary_colors, patterns,
     fit_types, necklines, sleeve_types, lengths, silhouettes,
     brands, exclude_brands, min_price, max_price, on_sale,
@@ -2171,8 +2307,6 @@ def tab6_apply_filters(
         "categories": categories or [],
         "article_types": article_types or [],
         "styles": styles or [],
-        "formality": formality or [],
-        "occasions": occasions or [],
         "seasons": seasons or [],
         "color_families": color_families or [],
         "primary_colors": primary_colors or [],
@@ -2197,7 +2331,7 @@ def tab6_apply_filters(
     # Check if ANY filter is active
     has_any_filter = any([
         filters["categories"], filters["article_types"], filters["styles"],
-        filters["formality"], filters["occasions"], filters["seasons"],
+        filters["seasons"],
         filters["color_families"], filters["primary_colors"], filters["patterns"],
         filters["fit_types"], filters["necklines"], filters["sleeve_types"],
         filters["lengths"], filters["silhouettes"],
@@ -2228,7 +2362,10 @@ def tab6_apply_filters(
             # Don't re-check silhouette in _candidate_matches_filters
             temp_filters = {k: v for k, v in filters.items() if k != "silhouettes"}
         else:
-            temp_filters = filters
+            temp_filters = dict(filters)
+
+        # Pass flat index so style filter can look up pre-computed general_styles
+        temp_filters["_current_flat_idx"] = i
 
         if _candidate_matches_filters(c, temp_filters):
             matched_indices.append(i)
@@ -2250,7 +2387,7 @@ def tab6_apply_filters(
         grid_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:4px;">'
         for idx in sample_indices:
             c = ALL_CANDIDATES[idx]
-            d = candidate_to_feed_dict(c)
+            d = candidate_to_feed_dict(c, flat_idx=idx)
             d["rank"] = idx + 1
             d["source"] = ""
             grid_html += render_product_card(d, show_scores=False)
@@ -2323,7 +2460,7 @@ def build_app():
                         gr.Markdown("### Search Signal")
                         t2_query = gr.Textbox(label="Search Query", placeholder="e.g. floral summer dress")
                         t2_colors = gr.Dropdown(choices=DB_COLORS, label="Color Filter", multiselect=True)
-                        t2_styles = gr.Dropdown(choices=DB_STYLES, label="Style Filter", multiselect=True)
+                        t2_styles = gr.Dropdown(choices=GENERAL_STYLE_OPTIONS, label="Style Filter", multiselect=True)
                         t2_btn_search = gr.Button("Send Search Signal", variant="secondary")
                         gr.Markdown("---")
                         t2_btn_reset_seen = gr.Button("Reset Seen Items", variant="stop")
@@ -2475,18 +2612,10 @@ purchase, Nike, hoodie""")
                                 multiselect=True, allow_custom_value=False,
                             )
 
-                        # -- Style & Formality --
-                        with gr.Accordion("Style & Formality", open=False):
+                        # -- Style --
+                        with gr.Accordion("Style", open=False):
                             t6_styles = gr.Dropdown(
-                                choices=DB_STYLES, label="Style Tags",
-                                multiselect=True, allow_custom_value=False,
-                            )
-                            t6_formality = gr.Dropdown(
-                                choices=DB_FORMALITY, label="Formality",
-                                multiselect=True, allow_custom_value=False,
-                            )
-                            t6_occasions = gr.Dropdown(
-                                choices=DB_OCCASIONS, label="Occasions",
+                                choices=GENERAL_STYLE_OPTIONS, label="General Style",
                                 multiselect=True, allow_custom_value=False,
                             )
                             t6_seasons = gr.Dropdown(
@@ -2590,8 +2719,8 @@ purchase, Nike, hoodie""")
 
                 # All filter inputs for the click handler
                 _t6_filter_inputs = [
-                    t6_categories, t6_article_types, t6_styles, t6_formality,
-                    t6_occasions, t6_seasons,
+                    t6_categories, t6_article_types, t6_styles,
+                    t6_seasons,
                     t6_color_families, t6_primary_colors, t6_patterns,
                     t6_fit_types, t6_necklines, t6_sleeve_types, t6_lengths, t6_silhouettes,
                     t6_brands, t6_exclude_brands, t6_min_price, t6_max_price, t6_on_sale,
@@ -2609,7 +2738,8 @@ purchase, Nike, hoodie""")
                 def _t6_clear():
                     """Reset all filter widgets to defaults."""
                     return (
-                        [], [], [], [], [], [],       # categories thru seasons
+                        [], [], [],                    # categories, article_types, styles
+                        [],                            # seasons
                         [], [], [],                    # color_families, primary_colors, patterns
                         [], [], [], [], [],            # fit thru silhouettes
                         [], [], 0, 0, False,           # brands, exclude, prices, sale
@@ -2639,5 +2769,5 @@ if __name__ == "__main__":
     print(f"  {len(ACTION_SCENARIOS)} action scenarios")
     print(f"  {len(ALL_CANDIDATES)} real products from DB")
     app = build_app()
-    app.launch(server_name="0.0.0.0", server_port=7861, share=False,
+    app.launch(server_name="0.0.0.0", server_port=7862, share=False,
                css=CUSTOM_CSS)
