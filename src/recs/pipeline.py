@@ -735,6 +735,15 @@ class RecommendationPipeline:
         if include_formality:
             print(f"[Pipeline] Formality filter (after cross-dim): {include_formality}")
 
+        # Determine if Python-level brand bucketing will be active.
+        # When it is, skip the SQL brand boost so we get a diverse candidate pool
+        # for the 60/30/10 tier allocation to work on.
+        _onboarding_brands = (
+            user_state.onboarding_profile.preferred_brands
+            if user_state.onboarding_profile else []
+        ) or []
+        will_bucket_brands = bool(_onboarding_brands) and not preferred_brands
+
         candidates = self.candidate_module.get_candidates_keyset(
             user_state,
             gender,
@@ -773,6 +782,7 @@ class RecommendationPipeline:
             attr_exclude_length=_tc(exclude_length),
             attr_include_occasions=expanded_occasions,        # Already expanded with DB values
             attr_exclude_occasions=expanded_exclude_occasions,
+            hybrid_brand_fetch=will_bucket_brands,
         )
 
         # Step 5a: Session-Aware Retrieval (Contextual Recall)
@@ -893,6 +903,22 @@ class RecommendationPipeline:
             }
             if pre_occasion_count != post_occasion_count:
                 print(f"[Pipeline] Occasion filter ({include_occasions}): {pre_occasion_count} -> {post_occasion_count} candidates")
+
+        # Step 5e: Brand tier bucketing (3-tier: preferred / cluster-adjacent / discovery)
+        # Only apply when the user has onboarding preferred brands and NO runtime
+        # brand filter is active (runtime brand filter already hard-includes brands
+        # via _apply_brand_filter, making bucketing redundant).
+        # Uses will_bucket_brands computed before SQL retrieval (which also skipped
+        # the SQL brand boost to ensure a diverse candidate pool).
+        if will_bucket_brands:
+            bucket_target = max(200, page_size * 5)
+            seed_str = user_id or anon_id or "default"
+            candidates = self._apply_brand_tier_bucketing(
+                candidates=candidates,
+                preferred_brands=_onboarding_brands,
+                target_size=bucket_target,
+                seed=seed_str,
+            )
 
         # Step 6: Rank candidates (SASRec + embedding scoring)
         ranked_candidates = self.ranker.rank_candidates(user_state, candidates)
@@ -1519,6 +1545,105 @@ class RecommendationPipeline:
             filtered.append(candidate)
 
         return filtered
+
+    def _apply_brand_tier_bucketing(
+        self,
+        candidates: List[Candidate],
+        preferred_brands: List[str],
+        target_size: int = 200,
+        seed: str = "default",
+        tier1_pct: float = 0.60,
+        tier2_pct: float = 0.30,
+    ) -> List[Candidate]:
+        """
+        Apply 3-tier brand bucketing to shape the candidate pool.
+
+        Matches the Gradio demo's approach: instead of a flat SQL boost,
+        explicitly allocate candidate slots by brand affinity tier.
+
+        Tier 1 (60%): Preferred brands — user explicitly chose these
+        Tier 2 (30%): Cluster-adjacent brands — same style cluster, not preferred
+        Tier 3 (10%): Random — diversity / discovery from outside any cluster
+
+        If any tier is short, remaining budget is backfilled from other tiers.
+        Deterministic shuffle using seed for consistent ordering across pages.
+
+        Args:
+            candidates: Full candidate pool after hard filtering.
+            preferred_brands: User's preferred brands from onboarding.
+            target_size: Number of candidates to keep (default 200).
+            seed: Deterministic seed for shuffle (typically user_id).
+            tier1_pct: Fraction for preferred brands (default 0.60).
+            tier2_pct: Fraction for cluster-adjacent brands (default 0.30).
+
+        Returns:
+            Bucketed candidate list with balanced brand distribution.
+        """
+        from recs.brand_clusters import get_cluster_adjacent_brands, get_cluster_for_item
+
+        if not preferred_brands:
+            return candidates
+
+        pref_lower = {b.lower().strip() for b in preferred_brands}
+        adjacent_lower = get_cluster_adjacent_brands(preferred_brands)
+
+        # Bucket candidates into 3 tiers
+        tier1: List[Candidate] = []  # preferred brands
+        tier2: List[Candidate] = []  # cluster-adjacent brands
+        tier3: List[Candidate] = []  # everything else (discovery)
+
+        for c in candidates:
+            brand_lower = (c.brand or "").lower().strip()
+            if not brand_lower:
+                tier3.append(c)
+                continue
+
+            if brand_lower in pref_lower:
+                tier1.append(c)
+            elif brand_lower in adjacent_lower:
+                tier2.append(c)
+            else:
+                tier3.append(c)
+
+        # Deterministic shuffle for consistent ordering
+        rng = random.Random(hash(seed))
+        rng.shuffle(tier1)
+        rng.shuffle(tier2)
+        rng.shuffle(tier3)
+
+        # If the pool is already smaller than target, keep everything
+        total = len(candidates)
+        if total <= target_size:
+            # Still shuffle to mix tiers, but keep all items
+            combined = tier1 + tier2 + tier3
+            rng.shuffle(combined)
+            print(f"[Pipeline] Brand bucketing: pool ({total}) <= target ({target_size}), "
+                  f"keeping all (T1={len(tier1)}, T2={len(tier2)}, T3={len(tier3)})")
+            return combined
+
+        # Allocate budgets: 60% / 30% / 10%
+        budget1 = min(len(tier1), int(target_size * tier1_pct))
+        budget2 = min(len(tier2), int(target_size * tier2_pct))
+        budget3 = target_size - budget1 - budget2
+
+        selected = tier1[:budget1] + tier2[:budget2] + tier3[:max(0, budget3)]
+
+        # Backfill if short (e.g., not enough cluster-adjacent brands)
+        if len(selected) < target_size:
+            remaining = tier1[budget1:] + tier2[budget2:] + tier3[max(0, budget3):]
+            rng.shuffle(remaining)
+            selected.extend(remaining[:target_size - len(selected)])
+
+        # Final shuffle to interleave tiers
+        rng.shuffle(selected)
+
+        actual_t1 = sum(1 for c in selected if (c.brand or "").lower().strip() in pref_lower)
+        actual_t2 = sum(1 for c in selected if (c.brand or "").lower().strip() in adjacent_lower)
+        actual_t3 = len(selected) - actual_t1 - actual_t2
+        print(f"[Pipeline] Brand bucketing: {total} -> {len(selected)} candidates "
+              f"(T1={actual_t1}/{budget1}, T2={actual_t2}/{budget2}, T3={actual_t3}/{max(0, budget3)})")
+
+        return selected
 
     def _apply_article_type_filter(
         self,

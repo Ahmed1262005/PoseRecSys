@@ -12,7 +12,7 @@ Each cluster has metadata traits used for scoring and matching.
 Python dict for fast iteration. Can move to DB table later.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 
@@ -377,6 +377,18 @@ DEFAULT_CLUSTER = "G"
 
 
 # =============================================================================
+# Reverse Mapping: cluster_id -> set of lowercase brand names
+# Built at import time from BRAND_CLUSTER_MAP + BRAND_SECONDARY_CLUSTER.
+# =============================================================================
+
+CLUSTER_TO_BRANDS: Dict[str, Set[str]] = {}
+for _brand, (_cid, _conf) in BRAND_CLUSTER_MAP.items():
+    CLUSTER_TO_BRANDS.setdefault(_cid, set()).add(_brand)
+for _brand, (_cid, _conf) in BRAND_SECONDARY_CLUSTER.items():
+    CLUSTER_TO_BRANDS.setdefault(_cid, set()).add(_brand)
+
+
+# =============================================================================
 # Lookup Functions
 # =============================================================================
 
@@ -428,3 +440,40 @@ def compute_cluster_scores_from_brands(
         if max_score > 0:
             scores = {k: v / max_score for k, v in scores.items()}
     return scores
+
+
+def get_cluster_adjacent_brands(preferred_brands: List[str]) -> Set[str]:
+    """
+    Find all brands in the same clusters as the preferred brands,
+    excluding the preferred brands themselves.
+
+    Used for 3-tier candidate bucketing:
+      Tier 1 (60%): preferred brands (exact match)
+      Tier 2 (30%): cluster-adjacent brands (same style cluster)
+      Tier 3 (10%): everything else (discovery)
+
+    Args:
+        preferred_brands: User's preferred brand names from onboarding.
+
+    Returns:
+        Set of lowercase brand names that are cluster-adjacent but not preferred.
+    """
+    pref_lower = {b.lower().strip() for b in preferred_brands}
+
+    # Find all clusters the preferred brands belong to (primary + secondary)
+    pref_cluster_ids: Set[str] = set()
+    for brand in pref_lower:
+        for cluster_id, _confidence in get_brand_clusters(brand):
+            pref_cluster_ids.add(cluster_id)
+
+    if not pref_cluster_ids:
+        return set()
+
+    # Collect all brands in those clusters
+    adjacent: Set[str] = set()
+    for cid in pref_cluster_ids:
+        adjacent.update(CLUSTER_TO_BRANDS.get(cid, set()))
+
+    # Remove the preferred brands themselves
+    adjacent -= pref_lower
+    return adjacent

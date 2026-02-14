@@ -534,6 +534,7 @@ class CandidateSelectionModule:
         attr_exclude_length: Optional[List[str]] = None,
         attr_include_occasions: Optional[List[str]] = None,
         attr_exclude_occasions: Optional[List[str]] = None,
+        hybrid_brand_fetch: bool = False,
     ) -> List[Candidate]:
         """
         Get candidates using keyset cursor for O(1) pagination.
@@ -612,7 +613,10 @@ class CandidateSelectionModule:
         # Use user_id as seed for consistent ordering across pages
         random_seed = user_state.user_id or user_state.anon_id or "default"
 
-        # Get preferred brands from profile for brand-priority retrieval
+        # Get preferred brands from profile for brand-priority retrieval.
+        # When hybrid_brand_fetch=True, we STILL pass preferred_brands so the
+        # brand-boosted SQL leg of the split fetch has brands to boost.
+        # The hybrid fetch handles the 65/35 split internally.
         preferred_brands = None
         if user_state.onboarding_profile and user_state.onboarding_profile.preferred_brands:
             preferred_brands = user_state.onboarding_profile.preferred_brands
@@ -654,6 +658,7 @@ class CandidateSelectionModule:
             attr_exclude_length=attr_exclude_length,
             attr_include_occasions=attr_include_occasions,
             attr_exclude_occasions=attr_exclude_occasions,
+            hybrid_brand_fetch=hybrid_brand_fetch,
         )
 
         # Step 2b: Python fallback for seen exclusion
@@ -823,11 +828,17 @@ class CandidateSelectionModule:
         attr_exclude_length: Optional[List[str]] = None,
         attr_include_occasions: Optional[List[str]] = None,
         attr_exclude_occasions: Optional[List[str]] = None,
+        hybrid_brand_fetch: bool = False,
     ) -> List[Candidate]:
         """Retrieve exploration items with deterministic ordering.
 
         Attribute filters are applied directly in SQL via a LEFT JOIN to
         product_attributes. No pre-filter step needed.
+
+        When hybrid_brand_fetch=True and preferred_brands are present, uses a
+        split fetch strategy: 65% from brand-boosted SQL + 35% from general SQL.
+        This ensures the candidate pool has enough preferred brand items for
+        3-tier bucketing while also including cluster-adjacent and discovery items.
 
         Args:
             hard_filters: Hard filters from user state
@@ -932,16 +943,45 @@ class CandidateSelectionModule:
             if new_arrivals_only:
                 print(f"[CandidateSelection] New arrivals filter enabled ({new_arrivals_days} days)")
 
-            # Use brand-boosted function if preferred brands are provided
-            # This gives +0.5 SQL-level boost to preferred brands, ensuring they appear in results
-            if preferred_brands:
+            # Brand retrieval strategy:
+            # - No brands: general SQL (exploration)
+            # - Brands + hybrid mode: split fetch — 65% brand-boosted + 35% general
+            #   This ensures the pool has enough preferred brand items for 60/30/10
+            #   bucketing while also including cluster-adjacent and discovery items.
+            # - Brands + no hybrid: brand-boosted SQL only (legacy behavior)
+            if preferred_brands and hybrid_brand_fetch:
+                brand_limit = int(limit * 0.65)
+                general_limit = limit - brand_limit
+
+                # Fetch 1: Brand-boosted (gives preferred brand items for T1)
+                brand_params = {**params, 'p_limit': brand_limit, 'preferred_brands': preferred_brands}
+                brand_result = self.supabase.rpc('get_exploration_keyset_with_brands', brand_params).execute()
+                brand_candidates = [self._row_to_candidate(row, source="exploration") for row in (brand_result.data or [])]
+
+                # Fetch 2: General (gives diverse items for T2/T3)
+                general_params = {**params, 'p_limit': general_limit}
+                general_result = self.supabase.rpc('get_exploration_keyset', general_params).execute()
+                general_candidates = [self._row_to_candidate(row, source="exploration") for row in (general_result.data or [])]
+
+                # Merge, deduplicate (brand-boosted items take priority)
+                existing_ids = {c.item_id for c in brand_candidates}
+                for c in general_candidates:
+                    if c.item_id not in existing_ids:
+                        brand_candidates.append(c)
+                        existing_ids.add(c.item_id)
+
+                candidates = brand_candidates
+                print(f"[CandidateSelection] Hybrid brand fetch: {len(brand_candidates)} total "
+                      f"(brand-boosted={len(brand_result.data or [])}, general={len(general_result.data or [])})")
+
+            elif preferred_brands:
                 print(f"[CandidateSelection] Preferred brands (SQL + Python boost): {preferred_brands}")
                 params['preferred_brands'] = preferred_brands
                 result = self.supabase.rpc('get_exploration_keyset_with_brands', params).execute()
+                candidates = [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
             else:
                 result = self.supabase.rpc('get_exploration_keyset', params).execute()
-
-            candidates = [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
+                candidates = [self._row_to_candidate(row, source="exploration") for row in (result.data or [])]
 
             # Python fallback: filter overflow exclude_ids that didn't fit in SQL
             if overflow_exclude_ids:
