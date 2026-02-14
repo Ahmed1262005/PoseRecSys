@@ -1068,6 +1068,36 @@ FEED_CATEGORIES = [
 ]
 
 
+# Material group mapping — maps apparent_fabric keywords to shopper-friendly groups
+MATERIAL_GROUPS: dict[str, list[str]] = {
+    "Cotton": ["cotton", "cotton blend", "organic cotton"],
+    "Polyester": ["polyester", "polyester blend", "recycled polyester"],
+    "Denim": ["denim"],
+    "Knit": ["knit", "ribbed knit", "knitted fabric", "jersey"],
+    "Silk & Satin": ["silk", "silk blend", "satin", "charmeuse"],
+    "Linen": ["linen", "linen blend"],
+    "Wool & Cashmere": ["wool", "wool blend", "cashmere", "merino"],
+    "Leather & Suede": ["leather", "faux leather", "suede", "faux suede"],
+    "Lace & Mesh": ["lace", "mesh", "crochet", "tulle"],
+    "Chiffon & Sheer": ["chiffon", "crepe", "georgette"],
+    "Velvet & Plush": ["velvet", "velour", "fleece", "faux fur", "terry", "french terry"],
+    "Nylon & Spandex": ["nylon", "nylon blend", "polyamide", "spandex", "lycra"],
+    "Viscose & Rayon": ["viscose", "viscose blend", "rayon", "rayon blend", "modal", "modal blend", "lyocell", "lyocell blend"],
+}
+
+# Build reverse lookup: fabric keyword -> group name
+_FABRIC_TO_GROUP: dict[str, str] = {}
+for _group, _fabrics in MATERIAL_GROUPS.items():
+    for _fab in _fabrics:
+        _FABRIC_TO_GROUP[_fab] = _group
+
+
+def _map_to_material_group(flat: dict) -> str:
+    """Map a product's apparent_fabric to a material group. Returns '' if no match."""
+    fabric = (flat.get("apparent_fabric") or "").strip().lower()
+    return _FABRIC_TO_GROUP.get(fabric, "")
+
+
 def _classify_category(item: dict) -> str:
     """Map an item's broad_category/article_type to a display category."""
     bcat = (item.get("broad_category") or "").lower()
@@ -1787,9 +1817,10 @@ def _map_to_general_styles(flat: dict) -> List[str]:
     return sorted(result) if result else []
 
 
-# Pre-compute general_styles for every product
+# Pre-compute general_styles and material_group for every product
 for _flat in ALL_FLATS:
     _flat["general_styles"] = _map_to_general_styles(_flat)
+    _flat["material_group"] = _map_to_material_group(_flat)
 
 # Additional dropdown values for Filter Explorer (Tab 6)
 DB_FORMALITY = sorted(set(f.get("formality") for f in ALL_FLATS if f.get("formality")))
@@ -2345,9 +2376,10 @@ def _load_full_filter_pool() -> None:
         flats = [_flatten_product(row) for row in all_rows]
         flats = [f for f in flats if f.get("image_url")]
 
-        # Pre-compute general_styles for every product
+        # Pre-compute general_styles and material_group for every product
         for f in flats:
             f["general_styles"] = _map_to_general_styles(f)
+            f["material_group"] = _map_to_material_group(f)
 
         print("[FilterPool] Ready")
         _full_filter_pool = flats
@@ -2482,10 +2514,10 @@ def _flat_matches_filters(f: dict, filters: dict) -> bool:
     if filters.get("on_sale") and not f.get("is_on_sale"):
         return False
 
-    # -- Materials --
+    # -- Material group --
     if filters.get("materials"):
-        item_mats = set(m.lower() for m in (f.get("materials") or []))
-        if not item_mats.intersection(m.lower() for m in filters["materials"]):
+        item_group = f.get("material_group") or ""
+        if item_group not in filters["materials"]:
             return False
 
     # -- Gemini coverage & body type --
@@ -3031,7 +3063,7 @@ purchase, Nike, hoodie""")
                         # -- Material --
                         with gr.Accordion("Material", open=False):
                             t6_materials = gr.Dropdown(
-                                choices=DB_MATERIALS, label="Materials",
+                                choices=sorted(MATERIAL_GROUPS.keys()), label="Material",
                                 multiselect=True, allow_custom_value=False,
                             )
 
