@@ -9,12 +9,13 @@ Recommendation System Demo — Interactive Gradio UI.
   Tab 5: Search Results — how search reranking changes with actions
 
 Uses REAL product data from Supabase (images, attributes, prices, brands).
+Default pool: 5,000 products (override with DEMO_POOL_SIZE env var).
 
 Usage:
     cd /mnt/d/ecommerce/recommendationSystem
     source .venv/bin/activate
     PYTHONPATH=src python scripts/rec_demo_gradio.py
-    # -> http://localhost:7861
+    # -> http://localhost:7862
 """
 
 import copy
@@ -24,6 +25,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -45,9 +47,17 @@ from scoring.constants.brand_data import (
     BRAND_TO_CLUSTER as SHARED_BRAND_TO_CLUSTER,
     derive_price_range as shared_derive_price_range,
 )
-from recs.session_scoring import SessionScoringEngine, SessionScores
+from recs.session_scoring import (
+    SessionScoringEngine, SessionScores,
+    extract_intent_filters, extract_search_signals,
+)
 from recs.feed_reranker import GreedyConstrainedReranker, RerankerConfig
 from search.reranker import SessionReranker
+import traceback
+import functools
+import logging
+
+logger = logging.getLogger("rec_demo")
 
 
 # =============================================================================
@@ -209,7 +219,7 @@ def _flatten_product(row: dict) -> dict:
         "name": row.get("name") or "Unknown",
         "brand": row.get("brand") or "Unknown",
         "category": row.get("category") or "",
-        "broad_category": row.get("category") or row.get("broad_category") or attrs.get("category_l1", "").lower() or "",
+        "broad_category": (attrs.get("category_l1") or "").lower() if (attrs.get("category_l1") or "").lower() in ("tops", "bottoms", "dresses", "outerwear") else "",
         "article_type": row.get("article_type") or attrs.get("category_l2") or "",
         "price": float(row.get("price") or 0),
         "original_price": float(row.get("original_price") or 0),
@@ -299,7 +309,7 @@ def _row_to_search_result(flat: dict) -> dict:
     return d
 
 
-DEMO_POOL_SIZE = int(os.getenv("DEMO_POOL_SIZE", "10000"))
+DEMO_POOL_SIZE = int(os.getenv("DEMO_POOL_SIZE", "5000"))
 
 
 def fetch_product_pool() -> Tuple[List[dict], List[RealCandidate], List[dict]]:
@@ -342,7 +352,7 @@ def fetch_product_pool() -> Tuple[List[dict], List[RealCandidate], List[dict]]:
         "in_stock", True
     ).not_.is_("primary_image_url", "null").execute()
     total = count_result.count or 0
-    print(f"  Total in-stock products with images: {total}")
+    # total known, skip logging
 
     target = min(DEMO_POOL_SIZE, total)
     batch_size = 1000
@@ -362,7 +372,7 @@ def fetch_product_pool() -> Tuple[List[dict], List[RealCandidate], List[dict]]:
                 break
             all_rows.extend(result.data)
             elapsed = time.time() - t0
-            print(f"    Batch {offset // batch_size + 1}: {len(result.data)} rows ({elapsed:.1f}s) -- total {len(all_rows)}/{total}")
+            # batch progress (silent)
             offset += batch_size
             if len(result.data) < batch_size:
                 break
@@ -385,7 +395,7 @@ def fetch_product_pool() -> Tuple[List[dict], List[RealCandidate], List[dict]]:
                 continue
             all_rows.extend(result.data)
             elapsed = time.time() - t0
-            print(f"    Batch {idx + 1}/{num_batches}: offset {off}, {len(result.data)} rows ({elapsed:.1f}s) -- total {len(all_rows)}")
+            # batch progress (silent)
             if len(all_rows) >= target:
                 break
 
@@ -393,12 +403,12 @@ def fetch_product_pool() -> Tuple[List[dict], List[RealCandidate], List[dict]]:
     if len(all_rows) > target:
         all_rows = all_rows[:target]
 
-    print(f"  Fetched {len(all_rows)} products total")
+    # fetched, skip logging
 
     # Flatten and convert
     flats = [_flatten_product(row) for row in all_rows]
     flats = [f for f in flats if f["image_url"]]
-    print(f"  {len(flats)} products with images after filtering")
+    # filtered, skip logging
 
     candidates = [_row_to_candidate(f, i) for i, f in enumerate(flats)]
     search_results = [_row_to_search_result(f) for f in flats]
@@ -832,8 +842,6 @@ def inject_session_intent_candidates(
     Returns:
         Updated candidate list (same length or longer if pool was short).
     """
-    from recs.session_scoring import extract_intent_filters
-
     intent = extract_intent_filters(session_scores)
     if not intent["has_intent"]:
         return base_candidates
@@ -906,20 +914,29 @@ def profile_to_user_context(p: DemoProfile) -> UserContext:
 
 
 def profile_to_search_profile(p: DemoProfile) -> dict:
+    """Convert a DemoProfile to search profile dict.
+
+    Uses flat field names that ProfileScorer expects (not nested soft_prefs/hard_filters).
+    """
     return {
-        "soft_prefs": {
-            "preferred_brands": p.preferred_brands,
-            "preferred_styles": p.preferred_styles,
-            "preferred_colors": p.preferred_colors,
-            "preferred_patterns": p.preferred_patterns,
-            "preferred_fits": [], "preferred_sleeves": [],
-            "preferred_lengths": [], "preferred_necklines": [],
-            "preferred_formality": [],
-        },
-        "hard_filters": {
-            "include_occasions": p.preferred_occasions,
-            "exclude_brands": [], "exclude_colors": [], "exclude_materials": [],
-        },
+        "preferred_brands": p.preferred_brands or [],
+        "style_persona": [p.style_persona] if p.style_persona else [],
+        "preferred_styles": p.preferred_styles or [],
+        "preferred_colors": p.preferred_colors or [],
+        "preferred_patterns": p.preferred_patterns or [],
+        "preferred_fits": [],
+        "preferred_sleeves": [],
+        "preferred_lengths": [],
+        "preferred_necklines": [],
+        "preferred_formality": [],
+        "occasions": p.preferred_occasions or [],
+        "exclude_brands": [],
+        "colors_to_avoid": [],
+        "styles_to_avoid": [],
+        "patterns_liked": p.preferred_patterns or [],
+        "patterns_avoided": [],
+        "global_min_price": p.min_price if p.min_price > 0 else None,
+        "global_max_price": p.max_price if p.max_price > 0 else None,
     }
 
 
@@ -993,7 +1010,7 @@ def run_feed_pipeline(profile: DemoProfile, session_scores: Optional[SessionScor
                       seen_ids: Optional[set] = None) -> List[dict]:
     """Run the full feed pipeline: profile + context scoring -> session scoring -> reranking."""
     if candidates is None:
-        candidates = get_candidates_for_profile(profile, ALL_CANDIDATES, 200)
+        candidates = get_cached_candidates(profile, 200)
 
     ctx = profile_to_user_context(profile)
 
@@ -1070,7 +1087,7 @@ def run_categorized_feed(profile: DemoProfile, session_scores: Optional[SessionS
     Uses a larger candidate pool (500) to ensure enough items per category,
     runs the scoring pipeline once, then splits into category buckets.
     """
-    candidates = get_candidates_for_profile(profile, ALL_CANDIDATES, 500)
+    candidates = get_cached_candidates(profile, 500)
     # Run full scoring pipeline on all 500
     all_items = run_feed_pipeline(profile, session_scores=session_scores,
                                   candidates=candidates, n=200)
@@ -1107,13 +1124,12 @@ def run_categorized_feed(profile: DemoProfile, session_scores: Optional[SessionS
 
 def render_categorized_feed(categorized: Dict[str, List[dict]], title: str = "Feed") -> str:
     """Render a categorized feed as HTML with sections."""
-    total = sum(len(v) for v in categorized.values())
-    parts = [f"<h2>{_html.escape(title)} ({total} items)</h2>"]
+    parts = [f"<h2>{_html.escape(title)}</h2>"]
     for cat_label in [l for l, _ in FEED_CATEGORIES] + ["Other"]:
         items = categorized.get(cat_label)
         if not items:
             continue
-        parts.append(f'<div class="category-section"><h3>{_html.escape(cat_label)} ({len(items)})</h3>')
+        parts.append(f'<div class="category-section"><h3>{_html.escape(cat_label)}</h3>')
         for item in items:
             parts.append(render_product_card(item))
         parts.append('</div>')
@@ -1248,6 +1264,37 @@ CUSTOM_CSS = """
     border-radius: 8px; background: #fafafa;
 }
 .evolution-step h4 { margin: 0 0 4px 0; font-size: 12px; color: #1565c0; }
+
+.filter-hint { padding: 20px; text-align: center; color: #666; }
+.filter-count { padding: 8px 12px; background: #f0f4ff; border-radius: 8px; margin-bottom: 8px; color: #222; }
+
+/* Dark mode overrides */
+.dark .result-card { background: #1e1e2e; border-color: #444; }
+.dark .result-card:hover { box-shadow: 0 2px 12px rgba(255,255,255,0.06); }
+.dark .card-title { color: #e0e0e0; }
+.dark .card-brand-price { color: #aaa; }
+.dark .card-rank { color: #888; }
+.dark .card-attrs { color: #aaa; }
+.dark .card-tag { background: #2a2d4a; color: #8e99f3; }
+.dark .card-tag-occasion { background: #3e2f1a; color: #ffb74d; }
+.dark .card-image-placeholder { background: #2a2a3a; color: #888; }
+.dark .score-breakdown { background: #252535; color: #ccc; }
+.dark .profile-card { background: #1e1e2e; border-color: #444; }
+.dark .profile-card h3 { color: #8e99f3; }
+.dark .profile-detail { color: #aaa; }
+.dark .diff-card { border-color: #444; }
+.dark .diff-up { background: #1b2e1b; }
+.dark .diff-down { background: #2e1b1b; }
+.dark .diff-new { background: #1b2333; }
+.dark .diff-same { background: #1e1e2e; }
+.dark .session-state { background: #2a2518; border-color: #444; color: #ccc; }
+.dark .session-state h4 { color: #ffb74d; }
+.dark .evolution-step { background: #1e1e2e; border-color: #444; }
+.dark .evolution-step h4 { color: #8e99f3; }
+.dark .category-section { border-color: #444; }
+.dark .category-section h3 { color: #8e99f3; }
+.dark .filter-hint { color: #aaa; }
+.dark .filter-count { background: #1e2340; color: #e0e0e0; }
 """
 
 
@@ -1350,7 +1397,7 @@ def render_product_card(item: dict, show_scores: bool = True) -> str:
 def render_feed(items: List[dict], title: str = "Feed") -> str:
     if not items:
         return f"<p><i>No items in {title}</i></p>"
-    html_parts = [f"<h3>{_html.escape(title)} ({len(items)} items)</h3>"]
+    html_parts = [f"<h3>{_html.escape(title)}</h3>"]
     for item in items:
         html_parts.append(render_product_card(item))
     return "\n".join(html_parts)
@@ -1486,7 +1533,12 @@ def render_diff(before: List[dict], after: List[dict]) -> str:
 # =============================================================================
 
 print("Loading product data from Supabase...")
-ALL_FLATS, ALL_CANDIDATES, ALL_SEARCH_RESULTS = fetch_product_pool()
+try:
+    ALL_FLATS, ALL_CANDIDATES, ALL_SEARCH_RESULTS = fetch_product_pool()
+except Exception as e:
+    print(f"  ERROR: Failed to fetch products from Supabase: {e}")
+    print("  Starting with empty product pool. Check SUPABASE_URL and SUPABASE_SERVICE_KEY.")
+    ALL_FLATS, ALL_CANDIDATES, ALL_SEARCH_RESULTS = [], [], []
 
 # Derive dropdown values from real data
 DB_BRANDS = sorted(set(f["brand"] for f in ALL_FLATS if f.get("brand")))
@@ -1757,7 +1809,7 @@ DB_SKIN_EXPOSURE = sorted(set(f.get("skin_exposure") for f in ALL_FLATS if f.get
 DB_MODEL_BODY_TYPES = sorted(set(f.get("model_body_type") for f in ALL_FLATS if f.get("model_body_type")))
 DB_MODEL_SIZE_ESTIMATES = sorted(set(f.get("model_size_estimate") for f in ALL_FLATS if f.get("model_size_estimate")))
 
-print(f"  {len(ALL_CANDIDATES)} candidates, {len(DB_BRANDS)} brands, {len(DB_ARTICLE_TYPES)} article types")
+    # globals ready, skip logging
 
 PREMADE_PROFILES = _build_premade_profiles()
 PROFILE_NAMES = list(PREMADE_PROFILES.keys())
@@ -1765,14 +1817,66 @@ PROFILE_NAMES = list(PREMADE_PROFILES.keys())
 _tab2_state: Dict[str, dict] = {}
 _tab3_state: Dict[str, dict] = {}
 
+# -- Candidate cache: avoids re-iterating 5K items on every button click ------
+_candidate_cache: Dict[str, Tuple[List[RealCandidate], float]] = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def get_cached_candidates(profile: DemoProfile, n: int = 200) -> List[RealCandidate]:
+    """Get candidates for a profile, caching to avoid repeated 5K iterations."""
+    key = f"{profile.profile_id}:{n}"
+    if key in _candidate_cache:
+        cached, ts = _candidate_cache[key]
+        if time.time() - ts < _CACHE_TTL:
+            return cached
+    result = get_candidates_for_profile(profile, ALL_CANDIDATES, n)
+    _candidate_cache[key] = (result, time.time())
+    return result
+
+
+def _safe_callback(n_outputs: int):
+    """Decorator that wraps Gradio callbacks with error handling.
+
+    On exception, returns an HTML error message in the first output slot
+    and empty strings for the rest, preventing raw tracebacks in the UI.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in {fn.__name__}: {e}", exc_info=True)
+                err_html = (
+                    f'<div style="padding:16px;background:#fce4ec;border:1px solid #ef9a9a;'
+                    f'border-radius:8px;margin:8px 0;">'
+                    f'<b style="color:#c62828;">Error in {fn.__name__}:</b><br>'
+                    f'<pre style="color:#333;font-size:12px;white-space:pre-wrap;">'
+                    f'{_html.escape(str(e))}</pre></div>'
+                )
+                return tuple([err_html] + [""] * (n_outputs - 1))
+        return wrapper
+    return decorator
+
+
+def _check_data_loaded() -> None:
+    """Raise if product data was not loaded at startup."""
+    if not ALL_CANDIDATES:
+        raise RuntimeError(
+            "No product data available. Check that SUPABASE_URL and "
+            "SUPABASE_SERVICE_KEY are set and Supabase is reachable."
+        )
+
 
 # =============================================================================
 # TAB 1: PREMADE PROFILES
 # =============================================================================
 
+@_safe_callback(3)
 def tab1_select_profile(profile_name: str):
     if not profile_name or profile_name not in PREMADE_PROFILES:
         return "Select a profile", "", ""
+    _check_data_loaded()
     p = PREMADE_PROFILES[profile_name]
     profile_html = render_profile_card(p)
     feed = run_feed_pipeline(p, session_scores=None, n=20)
@@ -1780,14 +1884,16 @@ def tab1_select_profile(profile_name: str):
     return profile_html, feed_html, ""
 
 
+@_safe_callback(4)
 def tab1_apply_scenario(profile_name: str, scenario_name: str):
     if not profile_name or profile_name not in PREMADE_PROFILES:
         return "Select a profile first", "", "", ""
     if not scenario_name or scenario_name not in ACTION_SCENARIOS:
         return "Select a scenario", "", "", ""
+    _check_data_loaded()
 
     p = PREMADE_PROFILES[profile_name]
-    candidates = get_candidates_for_profile(p, ALL_CANDIDATES, 200)
+    candidates = get_cached_candidates(p, 200)
 
     before_feed = run_feed_pipeline(p, session_scores=None, candidates=candidates, n=20)
 
@@ -1810,16 +1916,18 @@ def tab1_apply_scenario(profile_name: str, scenario_name: str):
 # TAB 2: INTERACTIVE PLAYGROUND
 # =============================================================================
 
+@_safe_callback(4)
 def tab2_init(profile_name: str):
     if not profile_name or profile_name not in PREMADE_PROFILES:
         return "Select a profile", "", "", "No session"
+    _check_data_loaded()
 
     p = PREMADE_PROFILES[profile_name]
-    candidates = get_candidates_for_profile(p, ALL_CANDIDATES, 200)
+    candidates = get_cached_candidates(p, 200)
     session = session_engine.initialize_from_onboarding(preferred_brands=p.preferred_brands)
 
     _tab2_state[profile_name] = {
-        "profile": p, "candidates": candidates, "session": session,
+        "profile": p, "candidates": list(candidates), "session": session,
         "action_log": [], "seen_ids": set(),
     }
 
@@ -1829,8 +1937,9 @@ def tab2_init(profile_name: str):
             "Feed items: " + ", ".join(item["brand"] + " " + str(item["article_type"]) for item in feed[:10]))
 
 
+@_safe_callback(3)
 def tab2_do_action(profile_name: str, action_type: str, brand: str, item_type: str, attrs_json: str):
-    if profile_name not in _tab2_state:
+    if not profile_name or profile_name not in _tab2_state:
         return "Initialize a profile first", "", ""
 
     st = _tab2_state[profile_name]
@@ -1905,8 +2014,9 @@ def _search_local_pool(query: str, n: int = 20) -> List[dict]:
     return [item for _, item in scored[:n]]
 
 
+@_safe_callback(3)
 def tab2_do_search(profile_name: str, query: str, filter_colors: list, filter_styles: list):
-    if profile_name not in _tab2_state:
+    if not profile_name or profile_name not in _tab2_state:
         return "Initialize a profile first", "", ""
 
     st = _tab2_state[profile_name]
@@ -1915,7 +2025,6 @@ def tab2_do_search(profile_name: str, query: str, filter_colors: list, filter_st
     search_results = _search_local_pool(query, n=20)
 
     # Extract structured signals from what the search returned
-    from recs.session_scoring import extract_search_signals
     signals = extract_search_signals(search_results, top_n=10)
 
     # Merge in explicit UI filter selections
@@ -1985,9 +2094,11 @@ def _age_to_group(age: int) -> str:
         return "65+"
 
 
+@_safe_callback(3)
 def tab3_build_and_run(age, style, city, country,
                        temp, weather, season,
                        brands, categories):
+    _check_data_loaded()
     age = int(age)
     age_group = _age_to_group(age)
     brand_list = brands or []
@@ -2021,6 +2132,7 @@ def tab3_build_and_run(age, style, city, country,
     return render_profile_card(p), render_categorized_feed(categorized, "Generated Feed"), render_session_state(session)
 
 
+@_safe_callback(3)
 def tab3_do_action(action_type, brand, item_type):
     if "custom" not in _tab3_state:
         return "Build a profile first", "", ""
@@ -2041,9 +2153,11 @@ def tab3_do_action(action_type, brand, item_type):
 # TAB 4: ACTION DEEP DIVE
 # =============================================================================
 
+@_safe_callback(3)
 def tab4_run_sequence(profile_name: str, actions_text: str):
     if not profile_name or profile_name not in PREMADE_PROFILES:
         return "Select a profile", "", ""
+    _check_data_loaded()
 
     p = PREMADE_PROFILES[profile_name]
     candidates = get_candidates_for_profile(p, ALL_CANDIDATES, 200)
@@ -2129,11 +2243,13 @@ def tab4_run_sequence(profile_name: str, actions_text: str):
 # TAB 5: SEARCH RESULTS
 # =============================================================================
 
+@_safe_callback(4)
 def tab5_compare(profile_name: str, scenario_name: str):
     if not profile_name or profile_name not in PREMADE_PROFILES:
         return "Select a profile", "", "", ""
     if not scenario_name or scenario_name not in ACTION_SCENARIOS:
         return "Select a scenario", "", "", ""
+    _check_data_loaded()
 
     p = PREMADE_PROFILES[profile_name]
     results = get_search_results_for_profile(p, ALL_SEARCH_RESULTS, 60)
@@ -2152,92 +2268,210 @@ def tab5_compare(profile_name: str, scenario_name: str):
 
 
 # =============================================================================
-# TAB 6 – FILTER EXPLORER
+# TAB 6 – FILTER EXPLORER  (uses full product pool from Supabase, loaded at startup)
 # =============================================================================
 
+# -- Full product pool for filter explorer (loaded at startup in background) ---
+_full_filter_pool: Optional[List[dict]] = None
+_full_filter_pool_ready = threading.Event()
+_full_filter_pool_error: Optional[str] = None
 
-def _candidate_matches_filters(c: RealCandidate, filters: dict) -> bool:
-    """Check if a candidate passes ALL filter groups (AND across groups, OR within)."""
+
+def _load_full_filter_pool() -> None:
+    """Fetch ALL in-stock products from Supabase into _full_filter_pool.
+
+    Called once in a background thread at startup.  Sets
+    _full_filter_pool_ready when done (or on error).
+    """
+    global _full_filter_pool, _full_filter_pool_error
+
+    try:
+        from supabase import create_client
+
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY env vars required")
+
+        sb = create_client(url, key)
+
+        SELECT_COLS = (
+            "id, name, brand, category, broad_category, article_type, "
+            "price, original_price, in_stock, fit, length, sleeve, "
+            "neckline, rise, base_color, colors, materials, style_tags, "
+            "primary_image_url, gallery_images, trending_score, "
+            "gender, "
+            "product_attributes!left("
+            "  category_l1, category_l2, category_l3, "
+            "  construction, primary_color, color_family, secondary_colors, "
+            "  pattern, pattern_scale, apparent_fabric, texture, sheen, "
+            "  style_tags, occasions, seasons, formality, trend_tags, "
+            "  fit_type, stretch, rise, leg_shape, silhouette, "
+            "  coverage_level, skin_exposure, coverage_details, "
+            "  model_body_type, model_size_estimate"
+            ")"
+        )
+
+        batch_size = 1000
+        all_rows: list = []
+        offset = 0
+
+        # Get total count
+        count_result = sb.table("products").select("id", count="exact").eq(
+            "in_stock", True
+        ).not_.is_("primary_image_url", "null").execute()
+        total = count_result.count or 0
+        # loading full pool
+
+        while True:
+            t0 = time.time()
+            result = sb.table("products").select(SELECT_COLS).eq(
+                "in_stock", True
+            ).not_.is_("primary_image_url", "null").range(
+                offset, offset + batch_size - 1
+            ).execute()
+            if not result.data:
+                break
+            all_rows.extend(result.data)
+            elapsed = time.time() - t0
+            if len(all_rows) % 10000 < batch_size:
+                pass  # silent progress
+            offset += batch_size
+            if len(result.data) < batch_size:
+                break
+
+        # fetched, flattening
+
+        flats = [_flatten_product(row) for row in all_rows]
+        flats = [f for f in flats if f.get("image_url")]
+
+        # Pre-compute general_styles for every product
+        for f in flats:
+            f["general_styles"] = _map_to_general_styles(f)
+
+        print("[FilterPool] Ready")
+        _full_filter_pool = flats
+
+    except Exception as exc:
+        _full_filter_pool_error = str(exc)
+        print(f"[FilterPool] ERROR loading full pool: {exc}")
+
+    finally:
+        _full_filter_pool_ready.set()
+
+
+def _get_full_filter_pool() -> List[dict]:
+    """Return the full product pool, waiting for the background load if needed."""
+    global _full_filter_pool
+
+    if _full_filter_pool is not None:
+        return _full_filter_pool
+
+    # Wait for background thread (with timeout so we don't hang forever)
+    if not _full_filter_pool_ready.wait(timeout=120):
+        raise RuntimeError("Full product pool load timed out after 120s.")
+
+    if _full_filter_pool_error:
+        raise RuntimeError(f"Full product pool failed to load: {_full_filter_pool_error}")
+
+    if _full_filter_pool is None:
+        raise RuntimeError("Full product pool is empty after loading.")
+
+    return _full_filter_pool
+
+
+# Load the full filter pool at startup (blocking) so Tab 6 is ready immediately
+print("[FilterPool] Starting full pool load (this runs before the UI opens)...")
+_load_full_filter_pool()
+
+
+def _flat_matches_filters(f: dict, filters: dict) -> bool:
+    """Check if a flat product dict passes ALL filter groups.
+
+    Works directly on flat dicts (no RealCandidate needed).
+    AND across filter groups, OR within a group.
+    """
 
     # -- Category & Type --
     if filters.get("categories"):
-        val = (c.broad_category or "").lower()
+        val = (f.get("broad_category") or "").lower()
         if not any(v.lower() == val for v in filters["categories"]):
             return False
 
     if filters.get("article_types"):
-        val = (c.article_type or "").lower()
+        val = (f.get("article_type") or "").lower()
         if not any(v.lower() == val for v in filters["article_types"]):
             return False
 
-    # -- Style (general style labels, pre-computed from style_tags+occasions+formality) --
+    # -- Style (general style labels, pre-computed) --
     if filters.get("styles"):
-        flat_idx = filters.get("_current_flat_idx")
-        if flat_idx is not None and flat_idx < len(ALL_FLATS):
-            item_gen = set(ALL_FLATS[flat_idx].get("general_styles") or [])
-        else:
-            item_gen = set(s.lower() for s in (c.style_tags or []))
+        item_gen = set(f.get("general_styles") or [])
         if not item_gen.intersection(filters["styles"]):
             return False
 
     if filters.get("seasons"):
-        item_seasons = set(s.lower() for s in (c.seasons or []))
+        item_seasons = set(s.lower() for s in (f.get("seasons") or []))
         if not item_seasons.intersection(s.lower() for s in filters["seasons"]):
             return False
 
     # -- Color & Pattern --
     if filters.get("color_families"):
-        val = (c.color_family or "").lower()
+        val = (f.get("color_family") or "").lower()
         if not any(v.lower() == val for v in filters["color_families"]):
             return False
 
     if filters.get("primary_colors"):
-        # primary_color isn't on RealCandidate, check colors list or flat
-        item_colors = set(cl.lower() for cl in (c.colors or []))
+        # Check both primary_color and colors list
+        pc = (f.get("primary_color") or "").lower()
+        item_colors = set(cl.lower() for cl in (f.get("colors") or []))
+        if pc:
+            item_colors.add(pc)
         if not item_colors.intersection(v.lower() for v in filters["primary_colors"]):
             return False
 
     if filters.get("patterns"):
-        val = (c.pattern or "").lower()
+        val = (f.get("pattern") or "").lower()
         if not any(v.lower() == val for v in filters["patterns"]):
             return False
 
     # -- Construction --
     if filters.get("fit_types"):
-        val = (c.fit or "").lower()
+        val = (f.get("fit") or f.get("fit_type") or "").lower()
         if not any(v.lower() == val for v in filters["fit_types"]):
             return False
 
     if filters.get("necklines"):
-        val = (c.neckline or "").lower()
+        val = (f.get("neckline") or "").lower()
         if not any(v.lower() == val for v in filters["necklines"]):
             return False
 
     if filters.get("sleeve_types"):
-        val = (c.sleeve or "").lower()
+        val = (f.get("sleeve") or f.get("sleeve_type") or "").lower()
         if not any(v.lower() == val for v in filters["sleeve_types"]):
             return False
 
     if filters.get("lengths"):
-        val = (c.length or "").lower()
+        val = (f.get("length") or "").lower()
         if not any(v.lower() == val for v in filters["lengths"]):
             return False
 
-    # silhouette is handled externally via _flat_matches_silhouette
-    # (not on RealCandidate slots), so skip it here
+    if filters.get("silhouettes"):
+        val = (f.get("silhouette") or "").lower()
+        if not any(v.lower() == val for v in filters["silhouettes"]):
+            return False
 
     # -- Brand & Price --
     if filters.get("brands"):
-        val = (c.brand or "").lower()
+        val = (f.get("brand") or "").lower()
         if not any(v.lower() == val for v in filters["brands"]):
             return False
 
     if filters.get("exclude_brands"):
-        val = (c.brand or "").lower()
+        val = (f.get("brand") or "").lower()
         if any(v.lower() == val for v in filters["exclude_brands"]):
             return False
 
-    price = float(c.price or 0)
+    price = float(f.get("price") or 0)
     if filters.get("min_price") is not None and filters["min_price"] > 0:
         if price < filters["min_price"]:
             return False
@@ -2245,43 +2479,68 @@ def _candidate_matches_filters(c: RealCandidate, filters: dict) -> bool:
         if price > filters["max_price"]:
             return False
 
-    if filters.get("on_sale") and not c.is_on_sale:
+    if filters.get("on_sale") and not f.get("is_on_sale"):
         return False
 
     # -- Materials --
     if filters.get("materials"):
-        item_mats = set(m.lower() for m in (c.materials or []))
+        item_mats = set(m.lower() for m in (f.get("materials") or []))
         if not item_mats.intersection(m.lower() for m in filters["materials"]):
             return False
 
     # -- Gemini coverage & body type --
     if filters.get("coverage_levels"):
-        val = (c.coverage_level or "").strip()
+        val = (f.get("coverage_level") or "").strip()
         if not val or not any(v == val for v in filters["coverage_levels"]):
             return False
 
     if filters.get("skin_exposure"):
-        val = (c.skin_exposure or "").strip()
+        val = (f.get("skin_exposure") or "").strip()
         if not val or not any(v == val for v in filters["skin_exposure"]):
             return False
 
     if filters.get("model_body_types"):
-        val = (c.model_body_type or "").strip()
+        val = (f.get("model_body_type") or "").strip()
         if not val or not any(v == val for v in filters["model_body_types"]):
             return False
 
     if filters.get("model_size_estimates"):
-        val = (c.model_size_estimate or "").strip()
+        val = (f.get("model_size_estimate") or "").strip()
         if not val or not any(v == val for v in filters["model_size_estimates"]):
             return False
 
     return True
 
 
-def _flat_matches_silhouette(flat: dict, silhouettes: List[str]) -> bool:
-    """Check silhouette filter against flat dict (not on RealCandidate)."""
-    val = (flat.get("silhouette") or "").lower()
-    return any(v.lower() == val for v in silhouettes)
+def _flat_to_card_dict(f: dict, rank: int = 0) -> dict:
+    """Convert a flat product dict to a display dict for render_product_card."""
+    return {
+        "product_id": f.get("product_id", ""),
+        "name": f.get("name", "Unknown"),
+        "brand": f.get("brand", "Unknown"),
+        "article_type": f.get("article_type", ""),
+        "broad_category": f.get("broad_category", ""),
+        "price": f.get("price", 0),
+        "original_price": f.get("original_price", 0),
+        "image_url": f.get("image_url", ""),
+        "gallery_images": f.get("gallery_images") or [],
+        "is_on_sale": f.get("is_on_sale", False),
+        "is_new": False,
+        "general_styles": f.get("general_styles") or [],
+        "style_tags": f.get("style_tags") or [],
+        "pattern": f.get("pattern", ""),
+        "fit_type": f.get("fit") or f.get("fit_type", ""),
+        "neckline": f.get("neckline", ""),
+        "sleeve_type": f.get("sleeve") or f.get("sleeve_type", ""),
+        "length": f.get("length", ""),
+        "color_family": f.get("color_family", ""),
+        "coverage_level": f.get("coverage_level", ""),
+        "skin_exposure": f.get("skin_exposure", ""),
+        "model_body_type": f.get("model_body_type", ""),
+        "model_size_estimate": f.get("model_size_estimate", ""),
+        "rank": rank,
+        "source": "",
+    }
 
 
 def _build_facet_summary(matched_flats: List[dict], total: int) -> str:
@@ -2400,6 +2659,7 @@ FILTER_TABLE_HEADERS = ["Name", "Brand", "Category", "Article Type", "General St
                         "Coverage", "Skin Exp.", "Model Body Type", "Model Size"]
 
 
+@_safe_callback(3)
 def tab6_apply_filters(
     categories, article_types, styles,
     seasons,
@@ -2409,7 +2669,10 @@ def tab6_apply_filters(
     materials,
     coverage_levels, skin_exposure, model_body_types, model_size_estimates,
 ):
-    """Apply filters to the 10K product pool and return results."""
+    """Apply filters to the FULL product pool (~96K items) and return results.
+
+    The full pool is lazy-loaded from Supabase on first use.
+    """
     t0 = time.time()
 
     filters = {
@@ -2454,57 +2717,36 @@ def tab6_apply_filters(
     if not has_any_filter:
         return (
             "",
-            '<div style="padding:20px;text-align:center;color:#666;">'
+            '<div class="filter-hint">'
             '<h3>Select at least one filter to explore the product pool.</h3></div>',
             [[""] * len(FILTER_TABLE_HEADERS)],
         )
 
-    # Filter candidates — use candidate for most filters + flat for silhouette
-    has_silhouette_filter = bool(filters["silhouettes"])
+    # Load the full product pool (lazy -- first call fetches from Supabase)
+    pool = _get_full_filter_pool()
+    total = len(pool)
 
-    matched_indices = []
-    for i, c in enumerate(ALL_CANDIDATES):
-        # Quick silhouette pre-check using flat dict
-        if has_silhouette_filter:
-            if not _flat_matches_silhouette(ALL_FLATS[i], filters["silhouettes"]):
-                continue
-            # Don't re-check silhouette in _candidate_matches_filters
-            temp_filters = {k: v for k, v in filters.items() if k != "silhouettes"}
-        else:
-            temp_filters = dict(filters)
-
-        # Pass flat index so style filter can look up pre-computed general_styles
-        temp_filters["_current_flat_idx"] = i
-
-        if _candidate_matches_filters(c, temp_filters):
-            matched_indices.append(i)
-
+    # Filter directly on flat dicts (no RealCandidate needed)
+    matched_flats = [f for f in pool if _flat_matches_filters(f, filters)]
+    n = len(matched_flats)
     elapsed = time.time() - t0
-
-    # Build matched flats
-    matched_flats = [ALL_FLATS[i] for i in matched_indices]
-    n = len(matched_indices)
 
     summary_html = ""
 
     # Product card grid (up to 80 products)
     GRID_SIZE = 80
-    sample_indices = matched_indices[:GRID_SIZE] if n <= GRID_SIZE else random.sample(matched_indices, GRID_SIZE)
-    sample_indices.sort()
+    sample = matched_flats[:GRID_SIZE] if n <= GRID_SIZE else random.sample(matched_flats, GRID_SIZE)
 
-    if matched_indices:
+    if matched_flats:
         grid_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:4px;">'
-        for idx in sample_indices:
-            c = ALL_CANDIDATES[idx]
-            d = candidate_to_feed_dict(c, flat_idx=idx)
-            d["rank"] = idx + 1
-            d["source"] = ""
+        for i, f in enumerate(sample):
+            d = _flat_to_card_dict(f, rank=i + 1)
             grid_html += render_product_card(d, show_scores=False)
         grid_html += '</div>'
     else:
         grid_html = '<p style="color:#c62828;"><i>No matching products.</i></p>'
 
-    # 3. Data table
+    # Data table
     table_data = _build_filter_data_table(matched_flats)
     if not table_data:
         table_data = [[""] * len(FILTER_TABLE_HEADERS)]
@@ -2703,8 +2945,9 @@ purchase, Nike, hoodie""")
             # TAB 6
             with gr.TabItem("6. Filter Explorer"):
                 gr.Markdown(
-                    "Explore the **full product pool** with every available filter dimension. "
-                    "AND across groups, OR within a group. Results update in-memory (no API calls)."
+                    "Explore **all in-stock products** with every available filter dimension. "
+                    "AND across groups, OR within a group. The full pool loads from Supabase "
+                    "in the background at startup."
                 )
 
                 with gr.Row():
@@ -2876,7 +3119,6 @@ if __name__ == "__main__":
     print("Building Recommendation Demo UI...")
     print(f"  {len(PREMADE_PROFILES)} premade profiles")
     print(f"  {len(ACTION_SCENARIOS)} action scenarios")
-    print(f"  {len(ALL_CANDIDATES)} real products from DB")
+    print("  Products loaded from DB")
     app = build_app()
-    app.launch(server_name="0.0.0.0", server_port=7862, share=False,
-               css=CUSTOM_CSS)
+    app.launch(server_name="0.0.0.0", server_port=7862, share=False, css=CUSTOM_CSS)
