@@ -220,7 +220,7 @@ def _flatten_product(row: dict) -> dict:
         "brand": row.get("brand") or "Unknown",
         "category": row.get("category") or "",
         "broad_category": (attrs.get("category_l1") or "").lower() if (attrs.get("category_l1") or "").lower() in ("tops", "bottoms", "dresses", "outerwear") else "",
-        "article_type": row.get("article_type") or attrs.get("category_l2") or "",
+        "article_type": attrs.get("category_l2") or row.get("article_type") or "",
         "price": float(row.get("price") or 0),
         "original_price": float(row.get("original_price") or 0),
         "is_on_sale": bool(row.get("original_price") and row["original_price"] > (row.get("price") or 0)),
@@ -2452,14 +2452,6 @@ def _flat_matches_filters(f: dict, filters: dict) -> bool:
         if not any(v.lower() == val for v in filters["color_families"]):
             return False
 
-    if filters.get("primary_colors"):
-        # Check both primary_color and colors list
-        pc = (f.get("primary_color") or "").lower()
-        item_colors = set(cl.lower() for cl in (f.get("colors") or []))
-        if pc:
-            item_colors.add(pc)
-        if not item_colors.intersection(v.lower() for v in filters["primary_colors"]):
-            return False
 
     if filters.get("patterns"):
         val = (f.get("pattern") or "").lower()
@@ -2695,7 +2687,7 @@ FILTER_TABLE_HEADERS = ["Name", "Brand", "Category", "Article Type", "General St
 def tab6_apply_filters(
     categories, article_types, styles,
     seasons,
-    color_families, primary_colors, patterns,
+    color_families, patterns,
     fit_types, necklines, sleeve_types, lengths, silhouettes,
     brands, exclude_brands, min_price, max_price, on_sale,
     materials,
@@ -2713,7 +2705,6 @@ def tab6_apply_filters(
         "styles": styles or [],
         "seasons": seasons or [],
         "color_families": color_families or [],
-        "primary_colors": primary_colors or [],
         "patterns": patterns or [],
         "fit_types": fit_types or [],
         "necklines": necklines or [],
@@ -2736,7 +2727,7 @@ def tab6_apply_filters(
     has_any_filter = any([
         filters["categories"], filters["article_types"], filters["styles"],
         filters["seasons"],
-        filters["color_families"], filters["primary_colors"], filters["patterns"],
+        filters["color_families"], filters["patterns"],
         filters["fit_types"], filters["necklines"], filters["sleeve_types"],
         filters["lengths"], filters["silhouettes"],
         filters["brands"], filters["exclude_brands"],
@@ -3013,10 +3004,6 @@ purchase, Nike, hoodie""")
                                 choices=DB_COLOR_FAMILIES, label="Color Family",
                                 multiselect=True, allow_custom_value=False,
                             )
-                            t6_primary_colors = gr.Dropdown(
-                                choices=DB_PRIMARY_COLORS, label="Primary Color",
-                                multiselect=True, allow_custom_value=False,
-                            )
                             t6_patterns = gr.Dropdown(
                                 choices=DB_PATTERNS, label="Pattern",
                                 multiselect=True, allow_custom_value=False,
@@ -3105,7 +3092,7 @@ purchase, Nike, hoodie""")
                 _t6_filter_inputs = [
                     t6_categories, t6_article_types, t6_styles,
                     t6_seasons,
-                    t6_color_families, t6_primary_colors, t6_patterns,
+                    t6_color_families, t6_patterns,
                     t6_fit_types, t6_necklines, t6_sleeve_types, t6_lengths, t6_silhouettes,
                     t6_brands, t6_exclude_brands, t6_min_price, t6_max_price, t6_on_sale,
                     t6_materials,
@@ -3124,7 +3111,7 @@ purchase, Nike, hoodie""")
                     return (
                         [], [], [],                    # categories, article_types, styles
                         [],                            # seasons
-                        [], [], [],                    # color_families, primary_colors, patterns
+                        [], [],                        # color_families, patterns
                         [], [], [], [], [],            # fit thru silhouettes
                         [], [], 0, 0, False,           # brands, exclude, prices, sale
                         [],                            # materials
