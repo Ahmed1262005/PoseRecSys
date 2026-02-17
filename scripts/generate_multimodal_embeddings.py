@@ -15,8 +15,8 @@ Two versions are generated for A/B testing:
     v2: Structured attributes + source_description excerpt
 
 Usage:
-    # Generate v1 (attributes only) with 4 DB workers
-    PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1 --workers 4
+    # Generate v1 (attributes only)
+    PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1
 
     # Generate v2 (attributes + description)
     PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 2
@@ -27,8 +27,8 @@ Usage:
     # Resume from where you left off (skips already-processed products)
     PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1 --resume
 
-    # Process a specific batch size with more workers
-    PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1 --batch-size 200 --workers 6
+    # Faster batching with shorter delay (if Supabase plan allows)
+    PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1 --batch-delay 0.2
 
     # Dry run (don't write to DB, just show text templates)
     PYTHONPATH=src python scripts/generate_multimodal_embeddings.py --version 1 --dry-run --limit 5
@@ -38,12 +38,26 @@ import argparse
 import json
 import sys
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue, Empty
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+
+# ============================================================================
+# Retry Helper
+# ============================================================================
+
+def retry_with_backoff(fn, *args, max_retries=3, base_delay=1.0, **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff on failure."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"    Retry {attempt+1}/{max_retries} after {delay:.1f}s: {e}")
+            time.sleep(delay)
 
 
 # ============================================================================
@@ -292,17 +306,31 @@ def fetch_existing_product_ids(supabase_client, version: int) -> set:
 
 
 def upsert_records(supabase_client, records: List[Dict]) -> Tuple[int, int]:
-    """Upsert a batch of records. Returns (success_count, error_count)."""
+    """Upsert a batch of records with retry. Returns (success_count, error_count)."""
     if not records:
         return 0, 0
-    try:
-        supabase_client.table("product_multimodal_embeddings").upsert(
-            records, on_conflict="product_id,version",
-        ).execute()
-        return len(records), 0
-    except Exception as e:
-        print(f"  ERROR upserting batch of {len(records)}: {e}")
-        return 0, len(records)
+    total_ok = 0
+    total_err = 0
+    # Small chunks to avoid overwhelming Supabase
+    chunk_size = 25
+    for i in range(0, len(records), chunk_size):
+        chunk = records[i:i + chunk_size]
+        try:
+            retry_with_backoff(
+                lambda c=chunk: supabase_client.table("product_multimodal_embeddings").upsert(
+                    c, on_conflict="product_id,version",
+                ).execute(),
+                max_retries=4,
+                base_delay=2.0,
+            )
+            total_ok += len(chunk)
+        except Exception as e:
+            print(f"  ERROR upserting chunk of {len(chunk)} (gave up after retries): {e}")
+            total_err += len(chunk)
+        # Brief pause between chunks to avoid connection exhaustion
+        if i + chunk_size < len(records):
+            time.sleep(0.3)
+    return total_ok, total_err
 
 
 # ============================================================================
@@ -327,102 +355,86 @@ def embedding_to_pgvector_str(emb: np.ndarray) -> str:
     return "[" + ",".join(f"{x:.8f}" for x in emb) + "]"
 
 
-def encode_text_batch(encode_fn, texts: List[str]) -> List[np.ndarray]:
-    """Encode a list of texts. FashionCLIP processes one at a time."""
-    return [encode_fn(t) for t in texts]
-
-
 # ============================================================================
-# Parallel Batch Prefetcher
+# Batch Data Fetcher (sequential with retry)
 # ============================================================================
 
-class BatchPrefetcher:
+def fetch_batch_data(
+    supabase_client,
+    attrs_batch: List[Dict],
+    existing_ids: set,
+) -> Dict:
     """
-    Pre-fetches DB data (attributes, product info, image embeddings) in
-    background threads while the main thread runs FashionCLIP encoding.
+    Fetch all data needed for a batch. Sequential DB calls with retry
+    to avoid overwhelming Supabase's HTTP/2 connection pool.
 
-    Architecture:
-        Thread pool fetches next batch's data from Supabase while
-        main thread encodes current batch with FashionCLIP.
+    Returns dict with product_info, image_embeddings, attr_by_id, to_process_ids.
     """
+    product_ids = [str(row["sku_id"]) for row in attrs_batch]
+    to_process_ids = [pid for pid in product_ids if pid not in existing_ids]
 
-    def __init__(self, supabase_client, num_workers: int = 4):
-        self.sb = supabase_client
-        self.pool = ThreadPoolExecutor(max_workers=num_workers)
-
-    def prefetch_batch_data(
-        self,
-        attrs_batch: List[Dict],
-        existing_ids: set,
-    ) -> Dict:
-        """
-        Fetch all data needed for a batch in parallel.
-
-        Runs 2 parallel DB queries:
-        1. Product info (name, brand, in_stock)
-        2. Image embeddings
-
-        Returns dict with product_info, image_embeddings, attr_by_id, to_process_ids.
-        """
-        product_ids = [str(row["sku_id"]) for row in attrs_batch]
-        to_process_ids = [pid for pid in product_ids if pid not in existing_ids]
-
-        if not to_process_ids:
-            return {
-                "to_process_ids": [],
-                "product_info": {},
-                "image_embeddings": {},
-                "attr_by_id": {},
-                "skipped": len(product_ids),
-            }
-
-        # Run both DB fetches in parallel
-        future_info = self.pool.submit(fetch_product_info, self.sb, to_process_ids)
-        future_embs = self.pool.submit(fetch_primary_image_embeddings, self.sb, to_process_ids)
-
-        product_info = future_info.result()
-        image_embeddings = future_embs.result()
-        attr_by_id = {str(row["sku_id"]): row for row in attrs_batch}
-
+    if not to_process_ids:
         return {
-            "to_process_ids": to_process_ids,
-            "product_info": product_info,
-            "image_embeddings": image_embeddings,
-            "attr_by_id": attr_by_id,
-            "skipped": len(product_ids) - len(to_process_ids),
+            "to_process_ids": [],
+            "product_info": {},
+            "image_embeddings": {},
+            "attr_by_id": {},
+            "skipped": len(product_ids),
         }
 
-    def shutdown(self):
-        self.pool.shutdown(wait=False)
+    # Sequential DB fetches with retry (no parallel — avoids HTTP/2 exhaustion)
+    product_info = retry_with_backoff(
+        fetch_product_info, supabase_client, to_process_ids,
+        max_retries=4, base_delay=2.0,
+    )
+    time.sleep(0.2)  # Brief pause between requests
+
+    image_embeddings = retry_with_backoff(
+        fetch_primary_image_embeddings, supabase_client, to_process_ids,
+        max_retries=4, base_delay=2.0,
+    )
+
+    attr_by_id = {str(row["sku_id"]): row for row in attrs_batch}
+
+    return {
+        "to_process_ids": to_process_ids,
+        "product_info": product_info,
+        "image_embeddings": image_embeddings,
+        "attr_by_id": attr_by_id,
+        "skipped": len(product_ids) - len(to_process_ids),
+    }
 
 
 # ============================================================================
 # Core Processing
 # ============================================================================
 
-def process_batch_parallel(
-    prefetcher: BatchPrefetcher,
+def process_batch(
+    supabase_client,
     encode_text_fn,
     attrs_batch: List[Dict],
     version: int,
     alpha: float,
     existing_ids: set,
     dry_run: bool = False,
-    upsert_workers: int = 2,
 ) -> Tuple[int, int, int]:
     """
-    Process a batch with parallel DB I/O.
+    Process a batch with sequential DB I/O and retry logic.
 
-    1. Prefetch product info + image embeddings in parallel threads
+    1. Fetch product info + image embeddings (sequential, with retry)
     2. Build text strings (CPU, fast)
-    3. Encode all texts with FashionCLIP (CPU/GPU, bottleneck)
+    3. Encode texts one at a time with FashionCLIP (skips on error)
     4. Combine embeddings (CPU, fast)
-    5. Upsert in background thread
+    5. Upsert in small sequential chunks with retry
 
     Returns (processed, skipped, errors).
     """
-    # Step 1: Parallel DB fetch
-    data = prefetcher.prefetch_batch_data(attrs_batch, existing_ids)
+    # Step 1: Sequential DB fetch with retry
+    try:
+        data = fetch_batch_data(supabase_client, attrs_batch, existing_ids)
+    except Exception as e:
+        print(f"  ERROR fetching batch data (gave up after retries): {e}")
+        return 0, 0, len(attrs_batch)
 
     to_process_ids = data["to_process_ids"]
     product_info = data["product_info"]
@@ -469,18 +481,17 @@ def process_batch_parallel(
     if dry_run or not items_to_encode:
         return processed, skipped, errors
 
-    # Step 3: Batch encode all texts with FashionCLIP
-    texts = [item[4] for item in items_to_encode]
-    try:
-        text_embeddings = encode_text_batch(encode_text_fn, texts)
-    except Exception as e:
-        print(f"  ERROR batch encoding: {e}")
-        return 0, skipped, len(items_to_encode)
-
-    # Step 4: Combine embeddings and build upsert records
+    # Step 3: Encode texts individually (skip failures instead of failing entire batch)
     records = []
-    for i, (pid, product, attrs, img_emb, text) in enumerate(items_to_encode):
-        text_emb = text_embeddings[i]
+    for pid, product, attrs, img_emb, text in items_to_encode:
+        try:
+            text_emb = encode_text_fn(text)
+        except Exception as e:
+            # Skip this product but continue with the rest
+            errors += 1
+            continue
+
+        # Step 4: Combine embeddings
         multimodal_emb = combine_embeddings(img_emb, text_emb, alpha=alpha)
 
         records.append({
@@ -494,20 +505,12 @@ def process_batch_parallel(
         })
         processed += 1
 
-    # Step 5: Upsert in chunks (parallel if multiple chunks)
-    chunk_size = 50
-    chunks = [records[i:i + chunk_size] for i in range(0, len(records), chunk_size)]
-
-    with ThreadPoolExecutor(max_workers=upsert_workers) as upsert_pool:
-        futures = [
-            upsert_pool.submit(upsert_records, prefetcher.sb, chunk)
-            for chunk in chunks
-        ]
-        for future in as_completed(futures):
-            ok, err = future.result()
-            if err:
-                errors += err
-                processed -= err
+    # Step 5: Upsert with retry (sequential small chunks inside upsert_records)
+    if records:
+        ok, err = upsert_records(supabase_client, records)
+        if err:
+            errors += err
+            processed -= err
 
     return processed, skipped, errors
 
@@ -534,8 +537,8 @@ def main():
         help="Products per batch. Default: 100",
     )
     parser.add_argument(
-        "--workers", type=int, default=4,
-        help="Number of DB I/O worker threads. Default: 4",
+        "--batch-delay", type=float, default=0.5,
+        help="Seconds to wait between batches (avoids Supabase rate limits). Default: 0.5",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -559,7 +562,7 @@ def main():
     print(f"  Versions:    {versions}")
     print(f"  Alpha:       {args.alpha} (image) / {1 - args.alpha:.1f} (text)")
     print(f"  Batch size:  {args.batch_size}")
-    print(f"  Workers:     {args.workers} (DB I/O threads)")
+    print(f"  Batch delay: {args.batch_delay}s")
     print(f"  Resume:      {args.resume}")
     print(f"  Dry run:     {args.dry_run}")
     print(f"  Limit:       {args.limit or 'all'}")
@@ -587,9 +590,6 @@ def main():
     print(f"[3/3] Found {total_attrs:,} product attribute records")
     print()
 
-    # Create prefetcher with worker threads
-    prefetcher = BatchPrefetcher(sb, num_workers=args.workers)
-
     for version in versions:
         print(f"{'='*60}")
         print(f"Generating v{version} embeddings...")
@@ -605,37 +605,41 @@ def main():
         total_processed = 0
         total_skipped = 0
         total_errors = 0
+        batch_num = 0
         t_start = time.time()
 
-        # Pipeline: prefetch next batch while processing current batch
-        # Fetch first batch
-        next_batch = fetch_products_with_attributes(sb, args.batch_size, offset)
-
-        while next_batch:
-            current_batch = next_batch
-            offset += args.batch_size
-
+        while True:
             # Check limit
             if args.limit and total_processed >= args.limit:
                 print(f"\n  Reached limit of {args.limit} products")
                 break
 
-            # Start prefetching next batch in background
-            next_future = prefetcher.pool.submit(
-                fetch_products_with_attributes, sb, args.batch_size, offset
-            )
+            # Fetch next batch of attributes
+            try:
+                attrs_batch = retry_with_backoff(
+                    fetch_products_with_attributes, sb, args.batch_size, offset,
+                    max_retries=4, base_delay=2.0,
+                )
+            except Exception as e:
+                print(f"  ERROR fetching attrs batch at offset {offset}: {e}")
+                break
 
-            # Process current batch
+            if not attrs_batch:
+                break  # No more data
+
+            batch_num += 1
+            offset += args.batch_size
+
+            # Process current batch (all sequential with retry)
             batch_t = time.time()
-            processed, skipped, errors = process_batch_parallel(
-                prefetcher=prefetcher,
+            processed, skipped, errors = process_batch(
+                supabase_client=sb,
                 encode_text_fn=encode_text_fn,
-                attrs_batch=current_batch,
+                attrs_batch=attrs_batch,
                 version=version,
                 alpha=args.alpha,
                 existing_ids=existing_ids,
                 dry_run=args.dry_run,
-                upsert_workers=min(2, args.workers),
             )
 
             total_processed += processed
@@ -644,12 +648,10 @@ def main():
             batch_ms = int((time.time() - batch_t) * 1000)
 
             # Progress
-            progress = offset
             elapsed = time.time() - t_start
             rate = total_processed / elapsed if elapsed > 0 else 0
-            eta = (total_attrs - progress) / rate / 60 if rate > 0 else 0
+            eta = (total_attrs - offset) / rate / 60 if rate > 0 else 0
 
-            batch_num = (offset - args.batch_size) // args.batch_size + 1
             print(
                 f"  Batch {batch_num}: "
                 f"processed={processed}, skipped={skipped}, errors={errors} "
@@ -658,12 +660,9 @@ def main():
                 f"({rate:.1f}/s, ETA {eta:.1f}min)"
             )
 
-            # Get prefetched next batch
-            next_batch = next_future.result()
-
-            # Check limit again
-            if args.limit and total_processed >= args.limit:
-                break
+            # Delay between batches to avoid overwhelming Supabase
+            if args.batch_delay > 0:
+                time.sleep(args.batch_delay)
 
         elapsed = time.time() - t_start
         print(f"\n  v{version} complete:")
@@ -675,7 +674,6 @@ def main():
             print(f"    Rate:      {total_processed/elapsed:.1f} products/sec")
         print()
 
-    prefetcher.shutdown()
     print("Done.")
 
 

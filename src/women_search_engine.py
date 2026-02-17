@@ -405,7 +405,7 @@ class WomenSearchEngine:
         self._load_model()
 
         with torch.no_grad():
-            inputs = self._processor(text=[query], return_tensors='pt', padding=True)
+            inputs = self._processor(text=[query], return_tensors='pt', padding=True, truncation=True, max_length=77)
             if torch.cuda.is_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
             emb = self._model.get_text_features(**inputs)

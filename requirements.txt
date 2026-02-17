@@ -38,5 +38,6 @@ openai>=1.0.0
 redis>=5.0.0
 
 # Utilities
+pydantic-settings
 pyyaml
 scikit-learn
