@@ -46,38 +46,6 @@ _FACET_FIELDS = [
 ]
 
 
-# Map category_l2 values to their parent category_l1.
-# Used to infer category_l1 when the planner only extracts category_l2.
-_CATEGORY_L2_TO_L1 = {
-    # Tops
-    "t-shirt": "Tops", "tee": "Tops", "blouse": "Tops", "shirt": "Tops",
-    "sweater": "Tops", "cardigan": "Tops", "hoodie": "Tops", "tank top": "Tops",
-    "crop top": "Tops", "camisole": "Tops", "tube top": "Tops", "polo": "Tops",
-    "bodysuit": "Tops", "turtleneck": "Tops", "pullover": "Tops", "vest": "Tops",
-    "top": "Tops", "tops": "Tops", "knit top": "Tops", "sweatshirt": "Tops",
-    # Bottoms
-    "pants": "Bottoms", "jeans": "Bottoms", "trousers": "Bottoms", "shorts": "Bottoms",
-    "skirt": "Bottoms", "leggings": "Bottoms", "palazzo pants": "Bottoms",
-    "wide leg pants": "Bottoms", "joggers": "Bottoms", "culottes": "Bottoms",
-    # Dresses
-    "dress": "Dresses", "dresses": "Dresses", "midi dress": "Dresses",
-    "maxi dress": "Dresses", "mini dress": "Dresses", "gown": "Dresses",
-    "romper": "Dresses", "jumpsuit": "Dresses",
-    # Outerwear
-    "jacket": "Outerwear", "jackets": "Outerwear", "coat": "Outerwear",
-    "blazer": "Outerwear", "puffer": "Outerwear", "puffer jacket": "Outerwear",
-    "bomber jacket": "Outerwear", "denim jacket": "Outerwear",
-    "leather jacket": "Outerwear", "trench coat": "Outerwear",
-    "parka": "Outerwear", "windbreaker": "Outerwear",
-    # Activewear
-    "sports bra": "Activewear", "athletic shorts": "Activewear",
-    "workout top": "Activewear", "yoga pants": "Activewear",
-    # Swimwear
-    "bikini": "Swimwear", "swimsuit": "Swimwear", "one piece": "Swimwear",
-    "cover up": "Swimwear",
-}
-
-
 class HybridSearchService:
     """
     Main search service combining Algolia + FashionCLIP.
@@ -246,26 +214,6 @@ class HybridSearchService:
             # Clean query for Algolia (strip meta-terms + extracted terms)
             algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
 
-        # =====================================================================
-        # STEP 1b: Infer category_l1 from category_l2 if missing
-        # =====================================================================
-        # The planner sometimes extracts category_l2 (e.g. "Turtleneck") but
-        # not category_l1 (e.g. "Tops"). Infer it so the post-filter can
-        # hard-drop wrong-category results from semantic search.
-        if not getattr(request, "category_l1", None) and getattr(request, "category_l2", None):
-            inferred_l1 = set()
-            for l2_val in (request.category_l2 or []):
-                l1 = _CATEGORY_L2_TO_L1.get(l2_val.lower())
-                if l1:
-                    inferred_l1.add(l1)
-            if inferred_l1:
-                request = request.model_copy(update={"category_l1": list(inferred_l1)})
-                logger.info(
-                    "Inferred category_l1 from category_l2",
-                    category_l2=request.category_l2,
-                    inferred_l1=list(inferred_l1),
-                )
-
         # Allow request-level override of semantic weight.
         _SEMANTIC_BOOST_DEFAULT = 0.4
         if abs(request.semantic_boost - _SEMANTIC_BOOST_DEFAULT) > 1e-9:
@@ -326,31 +274,23 @@ class HybridSearchService:
             clip_query = semantic_query_override if semantic_query_override else request.query
 
             # Build a relaxed request for semantic search when planner is active.
-            # Keep category as a HARD constraint (prevents wrong-category
-            # results like pants for "top" queries). Relax attribute filters
-            # (colors, patterns, occasions) to soft scoring for better recall.
-            #
-            # The semantic RPC only filters on broad_category via the
-            # `categories` param. Map category_l1 → categories so the SQL
-            # level filters by category, not just the post-filter.
+            # Only keep hard constraints that are safe at the SQL level:
+            # - price range (objective, never wrong)
+            # - brand exclusions (user explicitly doesn't want these)
+            # - brand inclusions (only for exact brand queries)
+            # Everything else (colors, patterns, occasions, categories) is handled
+            # by the post-filter with soft scoring for better recall.
             if search_plan is not None:
-                semantic_categories = request.categories  # keep if already set
-                if not semantic_categories and request.category_l1:
-                    # Use category_l1 values as the categories filter.
-                    # category_l1 values ("Tops", "Bottoms", etc.) are close
-                    # enough to broad_category for effective SQL-level filtering.
-                    semantic_categories = request.category_l1
                 semantic_request = request.model_copy(update={
-                    "categories": semantic_categories,
+                    "categories": None,
                     "colors": None,
                     "patterns": None,
                     "occasions": None,
                 })
                 logger.info(
                     "Using relaxed filters for semantic search (planner active)",
-                    kept=["price", "brands", "exclude_brands", "categories"],
-                    semantic_categories=semantic_categories,
-                    removed=["colors", "patterns", "occasions"],
+                    kept=["price", "brands", "exclude_brands"],
+                    removed=["categories", "colors", "patterns", "occasions"],
                 )
             else:
                 semantic_request = request
@@ -1318,7 +1258,6 @@ class HybridSearchService:
 
     # Score adjustments for soft filtering
     _SOFT_MATCH_BOOST = 0.05    # Boost for matching a soft filter
-    _SOFT_MISMATCH_PENALTY = -0.03  # Penalty for clear mismatch on a soft filter
     _SOFT_MISMATCH_PENALTY = 0.0  # No penalty -- just don't boost
 
     def _post_filter_semantic(
@@ -1406,26 +1345,6 @@ class HybridSearchService:
             else:
                 filtered = [r for r in filtered
                             if r.get("category_l2") and r["category_l2"].lower() in vals]
-
-        # Log post-filter effectiveness for debugging
-        post_filter_dropped = len(results) - len(filtered)
-        if post_filter_dropped > 0:
-            logger.info(
-                "Post-filter hard drops on semantic results",
-                before=len(results),
-                after=len(filtered),
-                dropped=post_filter_dropped,
-                active_hard_filters={
-                    k: v for k, v in {
-                        "categories": request.categories,
-                        "category_l1": request.category_l1,
-                        "category_l2": request.category_l2,
-                        "brands": request.brands,
-                        "min_price": request.min_price,
-                        "max_price": request.max_price,
-                    }.items() if v
-                },
-            )
 
         # =====================================================================
         # SOFT vs HARD ATTRIBUTE FILTERS
@@ -1563,32 +1482,24 @@ class HybridSearchService:
         if not soft_checks:
             return results
 
-        # Score each result: boost matches, penalize clear mismatches
+        # Score each result
         for item in results:
+            soft_boost = 0.0
             matches = 0
-            mismatches = 0
             for check_type, data_field, vals in soft_checks:
                 if check_type == "single":
                     val = item.get(data_field)
-                    if val:
-                        if val.lower() in vals:
-                            matches += 1
-                        else:
-                            # Product has a value but it doesn't match —
-                            # clear mismatch (e.g. "Denim" when user wants "Silk")
-                            mismatches += 1
+                    if val and val.lower() in vals:
+                        matches += 1
                 elif check_type == "multi":
                     arr = item.get(data_field)
                     if arr and any(v.lower() in vals for v in arr):
                         matches += 1
-                    elif arr:
-                        mismatches += 1
 
-            score_delta = (matches * self._SOFT_MATCH_BOOST) + (mismatches * self._SOFT_MISMATCH_PENALTY)
-            if score_delta != 0:
-                item["rrf_score"] = item.get("rrf_score", 0) + score_delta
+            if matches > 0:
+                soft_boost = matches * self._SOFT_MATCH_BOOST
+                item["rrf_score"] = item.get("rrf_score", 0) + soft_boost
                 item["_soft_matches"] = matches
-                item["_soft_mismatches"] = mismatches
 
         # Re-sort by boosted rrf_score
         results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
