@@ -207,7 +207,7 @@ def _build_card(product) -> str:
     # Source indicator
     source_parts = []
     if _get("algolia_rank"):
-        source_parts.append(f"A#{_get('algolia_rank')}")
+        source_parts.append(f"K#{_get('algolia_rank')}")
     if _get("semantic_rank"):
         source_parts.append(f"S#{_get('semantic_rank')}")
     if _get("rrf_score"):
@@ -238,14 +238,14 @@ def _build_stats(total_loaded: int, timing: dict, intent: str, page: int) -> str
     """Build the stats bar HTML."""
     total_ms = timing.get("total_ms", 0)
     planner_ms = timing.get("planner_ms", 0)
-    algolia_ms = timing.get("algolia_ms", 0)
+    keyword_ms = timing.get("algolia_ms", 0)
     semantic_ms = timing.get("semantic_ms", 0)
 
     return (
         f'<div class="stats-bar">'
         f'<span><span class="stat-highlight">{total_loaded}</span> products loaded &middot; page {page}</span>'
         f'<span>Intent: <span class="stat-highlight">{intent}</span> &middot; '
-        f'Planner: {planner_ms}ms &middot; Algolia: {algolia_ms}ms &middot; Semantic: {semantic_ms}ms &middot; Total: {total_ms}ms</span>'
+        f'Planner: {planner_ms}ms &middot; Keyword: {keyword_ms}ms &middot; Semantic: {semantic_ms}ms &middot; Total: {total_ms}ms</span>'
         f'</div>'
     )
 
