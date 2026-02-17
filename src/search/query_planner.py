@@ -186,7 +186,9 @@ You must return a JSON object with these fields:
    For compound queries, MERGE sets (union the values for each key).
 
    SET A — ARM/SHOULDER COVERAGE
-   Triggers: "hides arms", "cover arms", "don't show arms", "long sleeves", "covers shoulders"
+   Triggers: "hides arms", "cover arms", "don't show arms", "long sleeves", "longer sleeves", "covers shoulders"
+   IMPORTANT: When the user specifies "long sleeves" (even alongside other preferences like
+   "lightweight" or "breathable"), ALWAYS apply this set. The sleeve preference is explicit.
      sleeve_type: ["Short", "Cap", "Spaghetti", "Sleeveless"]
      neckline: ["Off-Shoulder", "One Shoulder", "Strapless"]
 
@@ -241,10 +243,14 @@ You must return a JSON object with these fields:
       neckline gets the union of both: ["V-Neck","Sweetheart","Halter","Off-Shoulder","One Shoulder","Strapless"]
       sleeve_type: ["Short","Cap","Spaghetti","Sleeveless"]
    5. When the user says "with X" (e.g. "with sleeves"), exclude the opposite using the matching set.
-   6. ALWAYS set category_l1 to constrain product types:
-      - If user mentions a type (top, dress, pants): set that category
-      - If vague/coverage query ("covers shoulders", "modest outfit"): set ["Tops","Dresses","Outerwear"]
-   7. Be generous — showing a product that violates the user's request is MUCH worse than over-filtering.
+   6. ONLY use exclude_filters when the user expresses a NEGATIVE constraint — wanting to
+      avoid, hide, or cover something. Queries like "sexy", "classy", "elegant", "cute"
+      are POSITIVE preferences, NOT coverage/modesty requests. Do NOT generate exclude_filters
+      for positive vibe/aesthetic queries.
+   7. category_l1 goes in **filters** (not exclude_filters) to constrain product types:
+      - If user mentions a type (top, dress, pants): set that category in filters
+      - If vague query: set category_l1 in filters to ["Tops","Dresses","Outerwear"]
+   8. Be generous with exclusions ONLY when the user asks to avoid something.
 
 7. **max_price**: Float or null. Extract from "under $50" -> 50.0, "below $100" -> 100.0, etc.
 
