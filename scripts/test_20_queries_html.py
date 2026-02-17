@@ -18,54 +18,63 @@ from search.hybrid_search import HybridSearchService
 from search.models import HybridSearchRequest, SortBy
 
 QUERIES = [
-    # Texture + category + color
-    "fitted ribbed turtleneck in burgundy",
-    "chunky cable knit cardigan in cream",
-    "pleated satin midi skirt in emerald green",
-    "quilted puffer vest in black",
-    # Fabric + construction + fit
-    "sheer lace bodysuit with long sleeves",
-    "silk wrap dress with ruching",
-    "linen wide leg palazzo pants",
-    "velvet blazer with satin lapels",
-    # Pattern + category + detail
-    "floral maxi dress with smocked bodice",
-    "striped knit polo shirt cropped",
-    "plaid wool mini skirt with pleats",
-    "polka dot chiffon blouse with bow tie neck",
-    # Material + fit + color
-    "high waisted wide leg linen pants in olive green",
-    "oversized cropped denim jacket with distressing",
-    "leather mini skirt with front slit",
-    "cashmere v-neck sweater in camel",
-    # Construction + texture + style
-    "ribbed knit tank top with square neckline",
-    "corduroy straight leg trousers in brown",
-    "mesh long sleeve top with ruffle trim",
-    "off shoulder satin midi dress for a wedding",
+    # Coverage / body concerns
+    "Help me find a top that hides my arms",
+    "Top that doesn't show bra straps",
+    # Occasion
+    "Outfit for a wedding guest",
+    "Business casual outfits for work",
+    # Aesthetic / vibe
+    "Quiet luxury outfit",
+    "French girl outfit",
+    # Concrete attributes — outerwear & tops
+    "Wool coat with belt",
+    "Ribbed knit top with square neckline",
+    # Concrete attributes — bottoms & dresses
+    "High rise wide leg jeans",
+    "Midi dress with sleeves",
+    # Fit / body type
+    "Jeans for short legs",
+    # Modesty
+    "Hijab-friendly dress",
+    # Color
+    "Cherry red mini dress",
+    # Season / weather
+    "Transitional spring jacket",
+    "Something warm but not bulky",
+    # Brand / similarity
+    "Reformation dupe",
+    # Price
+    "Under $50 date night dress",
+    # Fabric
+    "Cashmere sweater",
+    # Stress test — fragment
+    "black mini going out",
+    # Dialogue — long natural language
+    "I'm going to a wedding and want something elegant not too revealing and not super expensive",
 ]
 
 CATEGORIES = [
-    "Texture + Category + Color",
-    "Texture + Category + Color",
-    "Texture + Category + Color",
-    "Texture + Category + Color",
-    "Fabric + Construction + Fit",
-    "Fabric + Construction + Fit",
-    "Fabric + Construction + Fit",
-    "Fabric + Construction + Fit",
-    "Pattern + Category + Detail",
-    "Pattern + Category + Detail",
-    "Pattern + Category + Detail",
-    "Pattern + Category + Detail",
-    "Material + Fit + Color",
-    "Material + Fit + Color",
-    "Material + Fit + Color",
-    "Material + Fit + Color",
-    "Construction + Texture + Style",
-    "Construction + Texture + Style",
-    "Construction + Texture + Style",
-    "Construction + Texture + Style",
+    "Coverage",
+    "Coverage",
+    "Occasion",
+    "Occasion / Work",
+    "Aesthetic / Vibe",
+    "Aesthetic / Vibe",
+    "Concrete Attribute",
+    "Concrete Attribute",
+    "Concrete Attribute",
+    "Concrete Attribute",
+    "Fit / Body Type",
+    "Modesty",
+    "Color",
+    "Season / Weather",
+    "Season / Weather",
+    "Brand / Similarity",
+    "Price",
+    "Fabric",
+    "Stress Test",
+    "Dialogue",
 ]
 
 TOP_N = 8
