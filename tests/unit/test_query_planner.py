@@ -162,7 +162,7 @@ class TestPlanToRequestUpdates:
         planner = QueryPlanner.__new__(QueryPlanner)
         planner._enabled = False  # Don't need real API
 
-        updates, expanded, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
             planner.plan_to_request_updates(sample_plan_floral_jacket)
         )
 
@@ -180,7 +180,7 @@ class TestPlanToRequestUpdates:
         planner = QueryPlanner.__new__(QueryPlanner)
         planner._enabled = False
 
-        updates, expanded, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
             planner.plan_to_request_updates(sample_plan_brand_exact)
         )
 
@@ -193,7 +193,7 @@ class TestPlanToRequestUpdates:
         planner = QueryPlanner.__new__(QueryPlanner)
         planner._enabled = False
 
-        updates, expanded, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
             planner.plan_to_request_updates(sample_plan_vague)
         )
 
@@ -211,7 +211,7 @@ class TestPlanToRequestUpdates:
             intent="specific",
             filters={"invalid_field": ["value"], "patterns": ["Floral"]},
         )
-        updates, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "invalid_field" not in updates
         assert "patterns" in updates
@@ -225,7 +225,7 @@ class TestPlanToRequestUpdates:
             intent="specific",
             filters={"patterns": [], "colors": ["Red"]},
         )
-        updates, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "patterns" not in updates
         assert "colors" in updates

@@ -113,7 +113,7 @@ class HybridSearchService:
             HybridSearchResponse with results and metadata.
         """
         t_start = time.time()
-        timing: Dict[str, int] = {}
+        timing: Dict[str, Any] = {}
 
         # Step 0: Normalize query (decode HTML entities, collapse whitespace)
         clean_query = html_mod.unescape(request.query).strip()
@@ -153,6 +153,7 @@ class HybridSearchService:
             (
                 plan_updates,
                 expanded_filters,
+                exclude_filters_from_plan,
                 matched_terms,
                 algolia_query,
                 semantic_query_override,
@@ -178,6 +179,7 @@ class HybridSearchService:
                     "LLM planner applied filters",
                     query=request.query,
                     filters=updates,
+                    exclude_filters=exclude_filters_from_plan,
                     expanded=expanded_filters,
                     algolia_query=algolia_query,
                     semantic_query=semantic_query_override,
@@ -281,15 +283,19 @@ class HybridSearchService:
             # Everything else (colors, patterns, occasions, categories) is handled
             # by the post-filter with soft scoring for better recall.
             if search_plan is not None:
+                # Relax attribute filters but KEEP category_l1 as hard filter.
+                # This prevents category pollution (bottoms appearing for top queries).
                 semantic_request = request.model_copy(update={
                     "categories": None,
                     "colors": None,
                     "patterns": None,
                     "occasions": None,
+                    # category_l1 and category_l2 are KEPT — they're structural
                 })
+                kept_fields = ["price", "brands", "exclude_brands", "category_l1", "category_l2"]
                 logger.info(
                     "Using relaxed filters for semantic search (planner active)",
-                    kept=["price", "brands", "exclude_brands"],
+                    kept=kept_fields,
                     removed=["categories", "colors", "patterns", "occasions"],
                 )
             else:
@@ -317,10 +323,77 @@ class HybridSearchService:
         # When the LLM planner provided expanded_filters, use lenient matching
         # so visually-correct results aren't dropped due to label mismatches
         # (e.g. "Tropical" pattern on a leaf-print jacket when filter is "Floral").
+        #
+        # Progressive relaxation: if post-filtering drops ALL semantic results
+        # to 0, retry with progressively looser exclusion settings:
+        #   1. Strict (default): exclusion filters drop matching + null items
+        #   2. Lenient nulls: exclusion filters keep null/N/A items
+        #   3. No exclusions: skip exclusion filters entirely
+        # Uses saved copy of enriched results to avoid re-fetching from DB.
+        relaxation_level = None
         if semantic_results:
+            # Save enriched results before filtering so we can retry without
+            # re-fetching from pgvector (expensive network call).
+            enriched_snapshot = list(semantic_results)
+            pre_filter_count = len(enriched_snapshot)
+
             semantic_results = self._post_filter_semantic(
-                semantic_results, request, expanded_filters=expanded_filters,
+                enriched_snapshot, request, expanded_filters=expanded_filters,
             )
+
+            # Check if we have active exclusion filters that could be relaxed
+            _EXCLUDE_FIELDS = (
+                "exclude_neckline", "exclude_sleeve_type", "exclude_length",
+                "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
+                "exclude_colors", "exclude_materials", "exclude_occasions",
+                "exclude_seasons", "exclude_formality", "exclude_rise",
+                "exclude_style_tags",
+            )
+            has_exclusions = any(getattr(request, f, None) for f in _EXCLUDE_FIELDS)
+
+            if len(semantic_results) == 0 and has_exclusions and pre_filter_count > 0:
+                # Retry 1: Keep exclusion filters but stop dropping null-valued items.
+                # Many products have missing attribute data (N/A); strict mode
+                # drops these, which can eliminate too many candidates.
+                logger.info(
+                    "Progressive relaxation: retry with lenient nulls",
+                    pre_filter_count=pre_filter_count,
+                )
+                semantic_results = self._post_filter_semantic(
+                    list(enriched_snapshot), request,
+                    expanded_filters=expanded_filters,
+                    drop_nulls=False,
+                )
+                relaxation_level = "lenient_nulls"
+
+            if len(semantic_results) == 0 and has_exclusions and pre_filter_count > 0:
+                # Retry 2: Skip exclusion filters entirely — the user's query
+                # was too restrictive for the catalog. Return relevant results
+                # even if some excluded attributes might be present.
+                logger.info(
+                    "Progressive relaxation: retry without exclusion filters",
+                    pre_filter_count=pre_filter_count,
+                )
+                relaxed_request = request.model_copy(update={
+                    f: None for f in _EXCLUDE_FIELDS
+                })
+                semantic_results = self._post_filter_semantic(
+                    list(enriched_snapshot), relaxed_request,
+                    expanded_filters=expanded_filters,
+                )
+                relaxation_level = "no_exclusions"
+
+            if relaxation_level:
+                logger.info(
+                    "Progressive relaxation recovered results",
+                    relaxation_level=relaxation_level,
+                    recovered=len(semantic_results),
+                    pre_filter_count=pre_filter_count,
+                )
+
+        # Record relaxation in timing metadata so callers can see it
+        if relaxation_level:
+            timing["relaxation_level"] = relaxation_level
 
         # Step 5: Merge with RRF
         merged = self._reciprocal_rank_fusion(
@@ -329,6 +402,59 @@ class HybridSearchService:
             algolia_weight=algolia_weight,
             semantic_weight=semantic_weight,
         )
+
+        # Step 5b: Apply exclusion filters on ALL merged results.
+        # Semantic results were already filtered in step 4c, but Algolia results
+        # only had NOT clauses in the filter string — which can miss products
+        # with null/missing attributes (Algolia NOT clauses don't exclude nulls).
+        # Use drop_nulls=True: if the user explicitly excludes certain attribute
+        # values, products with unknown/missing attributes are suspect and should
+        # be excluded from the final results.
+        has_any_exclusion = any(
+            getattr(request, f, None)
+            for f in (
+                "exclude_neckline", "exclude_sleeve_type", "exclude_length",
+                "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
+                "exclude_colors", "exclude_materials", "exclude_occasions",
+                "exclude_seasons", "exclude_formality", "exclude_rise",
+                "exclude_style_tags",
+            )
+        )
+        if has_any_exclusion and merged:
+            pre_count = len(merged)
+            strict_merged = self._apply_exclusion_filters(merged, request, drop_nulls=True)
+            # If strict filtering removes too many results (below page_size),
+            # fall back to lenient mode that keeps null-attribute products
+            min_needed = request.page_size
+            if len(strict_merged) >= min_needed:
+                merged = strict_merged
+                if len(merged) < pre_count:
+                    logger.info(
+                        "Post-merge exclusion filter (strict) caught items",
+                        before=pre_count,
+                        after=len(merged),
+                        dropped=pre_count - len(merged),
+                    )
+            else:
+                lenient_merged = self._apply_exclusion_filters(merged, request, drop_nulls=False)
+                if len(lenient_merged) >= min_needed:
+                    merged = lenient_merged
+                    logger.info(
+                        "Post-merge exclusion filter fell back to lenient mode",
+                        strict_count=len(strict_merged),
+                        lenient_count=len(lenient_merged),
+                        before=pre_count,
+                    )
+                else:
+                    # Even lenient mode has too few — use strict anyway
+                    # (better to show fewer correct results than wrong ones)
+                    merged = strict_merged
+                    logger.info(
+                        "Post-merge exclusion filter: strict mode low but lenient not better",
+                        strict_count=len(strict_merged),
+                        lenient_count=len(lenient_merged),
+                        before=pre_count,
+                    )
 
         # Step 6: Rerank with session/profile + context scoring
         # For EXACT brand queries, disable brand diversity cap — the user
@@ -1027,6 +1153,23 @@ class HybridSearchService:
         "materials": "apparent_fabric",
     }
 
+    # Map exclude_* request fields -> Algolia facet attribute name (for NOT clauses)
+    _EXCLUDE_FIELD_TO_ALGOLIA_FACET = {
+        "exclude_neckline": "neckline",
+        "exclude_sleeve_type": "sleeve_type",
+        "exclude_length": "length",
+        "exclude_fit_type": "fit_type",
+        "exclude_silhouette": "silhouette",
+        "exclude_patterns": "pattern",
+        "exclude_colors": "primary_color",
+        "exclude_materials": "apparent_fabric",
+        "exclude_occasions": "occasions",
+        "exclude_seasons": "seasons",
+        "exclude_formality": "formality",
+        "exclude_rise": "rise",
+        "exclude_style_tags": "style_tags",
+    }
+
     def _build_algolia_filters_split(
         self, request: HybridSearchRequest,
     ) -> Tuple[Optional[str], Optional[List[str]]]:
@@ -1079,6 +1222,14 @@ class HybridSearchService:
 
         if request.max_price is not None:
             hard_parts.append(f"price <= {request.max_price}")
+
+        # --- Exclusion filters (always hard — NOT clauses) ---
+        for req_field, algolia_facet in self._EXCLUDE_FIELD_TO_ALGOLIA_FACET.items():
+            req_vals = getattr(request, req_field, None)
+            if not req_vals:
+                continue
+            for val in req_vals:
+                hard_parts.append(f'NOT {algolia_facet}:"{val}"')
 
         # --- Attribute filters become optional ---
         for req_field in self._OPTIONAL_WHEN_PLANNED:
@@ -1190,6 +1341,14 @@ class HybridSearchService:
         if request.max_price is not None:
             parts.append(f"price <= {request.max_price}")
 
+        # Exclusion filters (NOT clauses)
+        for req_field, algolia_facet in self._EXCLUDE_FIELD_TO_ALGOLIA_FACET.items():
+            req_vals = getattr(request, req_field, None)
+            if not req_vals:
+                continue
+            for val in req_vals:
+                parts.append(f'NOT {algolia_facet}:"{val}"')
+
         if not parts:
             return None
         return " AND ".join(parts)
@@ -1265,6 +1424,7 @@ class HybridSearchService:
         results: List[dict],
         request: HybridSearchRequest,
         expanded_filters: Optional[Dict[str, List[str]]] = None,
+        drop_nulls: bool = True,
     ) -> List[dict]:
         """
         Post-filter on semantic results after Algolia enrichment.
@@ -1279,6 +1439,9 @@ class HybridSearchService:
            scoring boosts -- matching items rank higher, but non-matching items
            aren't dropped. This prevents 0-result scenarios when DB labels
            don't match the user's language.
+
+        When drop_nulls=False (progressive relaxation), exclusion filters keep
+        items with null/N/A attribute values instead of dropping them.
         """
         if expanded_filters is None:
             expanded_filters = {}
@@ -1320,6 +1483,12 @@ class HybridSearchService:
             vals = {v.lower() for v in request.exclude_brands}
             filtered = [r for r in filtered
                         if not r.get("brand") or r["brand"].lower() not in vals]
+
+        # --- Exclusion filters (always hard, regardless of planner mode) ---
+        # These remove products matching any excluded attribute value.
+        # When drop_nulls=False (progressive relaxation), keep items with
+        # null/N/A values instead of dropping them.
+        filtered = self._apply_exclusion_filters(filtered, request, drop_nulls=drop_nulls)
 
         # --- Category filters (broad) ---
         if request.categories:
@@ -1409,6 +1578,121 @@ class HybridSearchService:
                     vals = {v.lower() for v in req_vals}
                     filtered = [r for r in filtered
                                 if r.get(data_field) and any(v.lower() in vals for v in r[data_field])]
+
+        return filtered
+
+    # Map exclude_* request fields -> result dict field for post-filtering
+    _EXCLUDE_TO_RESULT_FIELD: Dict[str, Tuple[str, str]] = {
+        # (exclude_request_field, result_dict_field, type)
+        # "single" = scalar field, "multi" = list field
+    }
+
+    _EXCLUDE_SINGLE_FIELDS = [
+        ("exclude_neckline", "neckline"),
+        ("exclude_sleeve_type", "sleeve_type"),
+        ("exclude_length", "length"),
+        ("exclude_fit_type", "fit_type"),
+        ("exclude_silhouette", "silhouette"),
+        ("exclude_patterns", "pattern"),
+        ("exclude_colors", "primary_color"),
+        ("exclude_formality", "formality"),
+        ("exclude_rise", "rise"),
+    ]
+
+    _EXCLUDE_MULTI_FIELDS = [
+        ("exclude_materials", "materials"),
+        ("exclude_occasions", "occasions"),
+        ("exclude_seasons", "seasons"),
+        ("exclude_style_tags", "style_tags"),
+    ]
+
+    # Values treated as "missing data" — not a real attribute value
+    _NULL_VALUES = {"n/a", "none", "null", "unknown", "-", ""}
+
+    def _apply_exclusion_filters(
+        self,
+        results: List[dict],
+        request: HybridSearchRequest,
+        drop_nulls: bool = True,
+    ) -> List[dict]:
+        """
+        Apply exclusion filters as HARD drops on results.
+
+        Exclusion filters are always enforced regardless of planner mode.
+        Any product whose attribute matches an excluded value is removed.
+
+        For single-value fields (neckline, pattern, etc.): drop if value is
+        in the exclude set.  When drop_nulls=True (default), also drops items
+        where the value is N/A/null since we can't confirm they don't match
+        the excluded attribute.  When drop_nulls=False, items with null/N/A
+        values are kept (used during progressive relaxation).
+        For multi-value fields (occasions, materials, etc.): drop if ANY
+        value in the product's list matches the exclude set.
+        """
+        filtered = results
+
+        def _is_null(val) -> bool:
+            """Check if a value is missing/null-like."""
+            if not val:
+                return True
+            return str(val).strip().lower() in self._NULL_VALUES
+
+        # Single-value exclusions
+        for req_field, data_field in self._EXCLUDE_SINGLE_FIELDS:
+            exclude_vals = getattr(request, req_field, None)
+            if not exclude_vals:
+                continue
+            vals = {v.lower() for v in exclude_vals}
+            if drop_nulls:
+                filtered = [
+                    r for r in filtered
+                    if not _is_null(r.get(data_field))
+                    and r[data_field].lower() not in vals
+                ]
+            else:
+                # Lenient: keep items with null/missing values
+                filtered = [
+                    r for r in filtered
+                    if _is_null(r.get(data_field))
+                    or r[data_field].lower() not in vals
+                ]
+
+        # Multi-value exclusions
+        for req_field, data_field in self._EXCLUDE_MULTI_FIELDS:
+            exclude_vals = getattr(request, req_field, None)
+            if not exclude_vals:
+                continue
+            vals = {v.lower() for v in exclude_vals}
+            if drop_nulls:
+                filtered = [
+                    r for r in filtered
+                    if not _is_null(r.get(data_field))
+                    and not any(v.lower() in vals for v in r[data_field])
+                ]
+            else:
+                # Lenient: keep items with null/missing values
+                filtered = [
+                    r for r in filtered
+                    if _is_null(r.get(data_field))
+                    or not any(v.lower() in vals for v in r[data_field])
+                ]
+
+        # Also check exclude_colors against the "colors" array (multi-value)
+        if request.exclude_colors:
+            vals = {v.lower() for v in request.exclude_colors}
+            filtered = [
+                r for r in filtered
+                if not (r.get("colors") and any(c.lower() in vals for c in r["colors"]))
+            ]
+
+        if len(filtered) < len(results):
+            logger.info(
+                "Exclusion filters removed semantic results",
+                before=len(results),
+                after=len(filtered),
+                dropped=len(results) - len(filtered),
+                drop_nulls=drop_nulls,
+            )
 
         return filtered
 
@@ -1515,6 +1799,12 @@ class HybridSearchService:
             "sleeve_type", "length", "rise", "silhouette", "article_type",
             "style_tags", "materials", "min_price", "max_price",
             "on_sale_only",
+            # Exclusion filters
+            "exclude_neckline", "exclude_sleeve_type", "exclude_length",
+            "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
+            "exclude_colors", "exclude_materials", "exclude_occasions",
+            "exclude_seasons", "exclude_formality", "exclude_rise",
+            "exclude_style_tags",
         ]:
             val = getattr(request, field_name, None)
             if val is not None and val != [] and val is not False:

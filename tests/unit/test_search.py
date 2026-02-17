@@ -2495,3 +2495,169 @@ class TestReplicaConfig:
         for suffix, settings in REPLICA_SUFFIXES.items():
             assert "customRanking" in settings
             assert len(settings["customRanking"]) > 0
+
+
+# =============================================================================
+# Progressive Relaxation Tests
+# =============================================================================
+
+class TestProgressiveRelaxation:
+    """Tests for progressive relaxation in exclusion filters and post-filtering."""
+
+    def _make_result(self, product_id="p1", **overrides) -> dict:
+        """Create a semantic result with defaults."""
+        base = {
+            "product_id": product_id,
+            "name": "Test Product",
+            "brand": "TestBrand",
+            "price": 50,
+            "fit_type": "Slim",
+            "sleeve_type": "Long",
+            "length": "Midi",
+            "neckline": "V-Neck",
+            "formality": "Casual",
+            "rise": "High",
+            "silhouette": "Fitted",
+            "seasons": ["summer"],
+            "materials": ["cotton"],
+            "style_tags": ["boho"],
+            "article_type": "dress",
+            "category_l1": "Dresses",
+            "category_l2": "Midi Dress",
+            "color_family": "Dark",
+            "primary_color": "Black",
+            "colors": ["Black"],
+            "pattern": "Solid",
+            "broad_category": "dresses",
+            "occasions": ["Casual"],
+            "is_on_sale": False,
+            "source": "semantic",
+        }
+        base.update(overrides)
+        return base
+
+    def _get_service(self):
+        from search.hybrid_search import HybridSearchService
+        return HybridSearchService(algolia_client=MagicMock(), analytics=MagicMock())
+
+    def _make_request(self, **kwargs):
+        from search.models import HybridSearchRequest
+        return HybridSearchRequest(query="test", **kwargs)
+
+    # --- _apply_exclusion_filters with drop_nulls ---
+
+    def test_exclusion_drop_nulls_true_removes_na_items(self):
+        """Default drop_nulls=True should remove items with N/A values."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", neckline="N/A"),
+            self._make_result(product_id="p2", neckline="Crew"),
+        ]
+        request = self._make_request(exclude_neckline=["V-Neck"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=True)
+        # p1 dropped (N/A = can't confirm), p2 kept (Crew != V-Neck)
+        assert len(filtered) == 1
+        assert filtered[0]["product_id"] == "p2"
+
+    def test_exclusion_drop_nulls_false_keeps_na_items(self):
+        """drop_nulls=False should keep items with N/A values."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", neckline="N/A"),
+            self._make_result(product_id="p2", neckline="Crew"),
+            self._make_result(product_id="p3", neckline="V-Neck"),
+        ]
+        request = self._make_request(exclude_neckline=["V-Neck"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        # p1 kept (N/A, lenient), p2 kept (Crew != V-Neck), p3 dropped (V-Neck excluded)
+        assert len(filtered) == 2
+        ids = {r["product_id"] for r in filtered}
+        assert ids == {"p1", "p2"}
+
+    def test_exclusion_drop_nulls_false_keeps_none_items(self):
+        """drop_nulls=False should keep items with None values."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", sleeve_type=None),
+            self._make_result(product_id="p2", sleeve_type="Long"),
+            self._make_result(product_id="p3", sleeve_type="Sleeveless"),
+        ]
+        request = self._make_request(exclude_sleeve_type=["Sleeveless"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        # p1 kept (None, lenient), p2 kept (Long != Sleeveless), p3 dropped
+        assert len(filtered) == 2
+        ids = {r["product_id"] for r in filtered}
+        assert ids == {"p1", "p2"}
+
+    def test_exclusion_drop_nulls_true_drops_none_items(self):
+        """Default should drop items with None values."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", sleeve_type=None),
+            self._make_result(product_id="p2", sleeve_type="Long"),
+        ]
+        request = self._make_request(exclude_sleeve_type=["Sleeveless"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=True)
+        # p1 dropped (None = can't confirm), p2 kept
+        assert len(filtered) == 1
+        assert filtered[0]["product_id"] == "p2"
+
+    def test_exclusion_multi_field_drop_nulls_false(self):
+        """Multi-value exclusions should also respect drop_nulls=False."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", materials=None),
+            self._make_result(product_id="p2", materials=["cotton"]),
+            self._make_result(product_id="p3", materials=["polyester", "sheer"]),
+        ]
+        request = self._make_request(exclude_materials=["sheer"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        # p1 kept (None, lenient), p2 kept (cotton), p3 dropped (has sheer)
+        assert len(filtered) == 2
+        ids = {r["product_id"] for r in filtered}
+        assert ids == {"p1", "p2"}
+
+    def test_exclusion_still_drops_matching_values_when_lenient(self):
+        """Even with drop_nulls=False, actual matching values must still be excluded."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", neckline="V-Neck"),
+            self._make_result(product_id="p2", neckline="Strapless"),
+        ]
+        request = self._make_request(exclude_neckline=["V-Neck", "Strapless"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        # Both have actual matching excluded values — both dropped
+        assert len(filtered) == 0
+
+    # --- post_filter_semantic with drop_nulls passthrough ---
+
+    def test_post_filter_passes_drop_nulls_to_exclusions(self):
+        """_post_filter_semantic should pass drop_nulls to _apply_exclusion_filters."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", neckline="N/A"),
+            self._make_result(product_id="p2", neckline="Crew"),
+        ]
+        request = self._make_request(exclude_neckline=["V-Neck"])
+
+        # Strict: p1 dropped
+        strict = service._post_filter_semantic(results, request, drop_nulls=True)
+        assert len(strict) == 1
+
+        # Lenient: p1 kept
+        lenient = service._post_filter_semantic(
+            [self._make_result(product_id="p1", neckline="N/A"),
+             self._make_result(product_id="p2", neckline="Crew")],
+            request, drop_nulls=False,
+        )
+        assert len(lenient) == 2
+
+    def test_no_exclusions_no_relaxation_needed(self):
+        """Without exclusion filters, progressive relaxation should not trigger."""
+        service = self._get_service()
+        results = [self._make_result()]
+        request = self._make_request(fit_type=["Oversized"])
+        # Strict mode drops because fit_type doesn't match, but that's not
+        # an exclusion filter — progressive relaxation wouldn't help here.
+        filtered = service._post_filter_semantic(results, request)
+        assert len(filtered) == 0  # Dropped by strict attribute filter
