@@ -458,10 +458,6 @@ def process_batch(
             errors += 1
             continue
 
-        if not product.get("in_stock", True):
-            skipped += 1
-            continue
-
         img_emb = image_embeddings.get(pid)
         if img_emb is None:
             skipped += 1
