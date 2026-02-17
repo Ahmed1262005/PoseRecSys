@@ -1,53 +1,38 @@
 """
 Search Feed — clean Gradio UI with infinite scroll.
 
-A minimal search interface with a product grid feed and "Load More" button
-that keeps appending results. Designed for evaluating search quality visually.
+Calls HybridSearchService directly (no API server needed).
+Loads .env automatically so the LLM query planner works.
 
 Usage:
-    1. Start the API server:
-       PYTHONPATH=src uvicorn api.app:app --port 8000
+    PYTHONPATH=src python scripts/search_feed_gradio.py
 
-    2. Run this script:
-       PYTHONPATH=src python scripts/search_feed_gradio.py
-
-    3. Open http://localhost:7680 in your browser
+    Open http://localhost:7680 in your browser
 """
 
 import os
 import sys
 import time
-import json
-import uuid
-import requests
+
+# Setup path and env before any src imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
 import gradio as gr
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+from search.hybrid_search import HybridSearchService
+from search.models import HybridSearchRequest, SortBy
 
-API_URL = os.getenv("API_URL", "http://localhost:8000")
-SEARCH_URL = f"{API_URL}/api/search"
 PAGE_SIZE = 20
 
+# ---------------------------------------------------------------------------
+# Initialize search service (one-time, loads FashionCLIP etc.)
+# ---------------------------------------------------------------------------
 
-def _make_token(user_id: str = "test-feed-user") -> str:
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-    import jwt as pyjwt
-    secret = os.getenv("SUPABASE_JWT_SECRET")
-    now = int(time.time())
-    return pyjwt.encode({
-        "sub": user_id, "aud": "authenticated", "role": "authenticated",
-        "email": f"{user_id}@test.com", "aal": "aal1",
-        "exp": now + 86400, "iat": now, "is_anonymous": False,
-    }, secret, algorithm="HS256")
-
-
-TOKEN = _make_token()
-HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
-SESSION_ID = str(uuid.uuid4())
+print("Initializing HybridSearchService...")
+_service = HybridSearchService()
+print("Service ready.")
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -180,14 +165,20 @@ CUSTOM_CSS = """
 # Card builder
 # ---------------------------------------------------------------------------
 
-def _build_card(product: dict) -> str:
-    """Build a single product card HTML."""
-    img_url = product.get("image_url") or ""
-    name = product.get("name", "Unknown")
-    brand = product.get("brand", "")
-    price = product.get("price", 0)
-    original_price = product.get("original_price")
-    is_on_sale = product.get("is_on_sale", False)
+def _build_card(product) -> str:
+    """Build a single product card HTML. Accepts ProductResult or dict."""
+    # Support both Pydantic model and dict
+    def _get(key, default=None):
+        if isinstance(product, dict):
+            return product.get(key, default)
+        return getattr(product, key, default)
+
+    img_url = _get("image_url") or ""
+    name = _get("name", "Unknown")
+    brand = _get("brand", "")
+    price = _get("price", 0)
+    original_price = _get("original_price")
+    is_on_sale = _get("is_on_sale", False)
 
     # Image
     if img_url:
@@ -205,7 +196,7 @@ def _build_card(product: dict) -> str:
     # Key attribute tags
     tags = []
     for key in ["category_l2", "primary_color", "pattern", "apparent_fabric", "fit_type", "neckline"]:
-        val = product.get(key)
+        val = _get(key)
         if val and val not in ("N/A", "null", "None", "Other", "Solid"):
             tags.append(f'<span class="card-attr-tag">{val}</span>')
 
@@ -213,12 +204,12 @@ def _build_card(product: dict) -> str:
 
     # Source indicator
     source_parts = []
-    if product.get("algolia_rank"):
-        source_parts.append(f"A#{product['algolia_rank']}")
-    if product.get("semantic_rank"):
-        source_parts.append(f"S#{product['semantic_rank']}")
-    if product.get("rrf_score"):
-        source_parts.append(f"RRF:{product['rrf_score']:.4f}")
+    if _get("algolia_rank"):
+        source_parts.append(f"A#{_get('algolia_rank')}")
+    if _get("semantic_rank"):
+        source_parts.append(f"S#{_get('semantic_rank')}")
+    if _get("rrf_score"):
+        source_parts.append(f"RRF:{_get('rrf_score'):.4f}")
     source_html = f'<div class="card-source">{" ".join(source_parts)}</div>' if source_parts else ""
 
     return f"""<div class="product-card">
@@ -241,7 +232,7 @@ def _build_grid(products: list) -> str:
     return f'<div class="product-grid">{"".join(cards)}</div>'
 
 
-def _build_stats(query: str, total_loaded: int, timing: dict, intent: str, page: int) -> str:
+def _build_stats(total_loaded: int, timing: dict, intent: str, page: int) -> str:
     """Build the stats bar HTML."""
     total_ms = timing.get("total_ms", 0)
     planner_ms = timing.get("planner_ms", 0)
@@ -258,7 +249,7 @@ def _build_stats(query: str, total_loaded: int, timing: dict, intent: str, page:
 
 
 # ---------------------------------------------------------------------------
-# Search logic
+# Search logic — calls HybridSearchService directly
 # ---------------------------------------------------------------------------
 
 def do_search(query: str, state: dict) -> tuple:
@@ -285,32 +276,24 @@ def do_load_more(state: dict) -> tuple:
 
 
 def _fetch_page(state: dict) -> tuple:
-    """Fetch a page from the API and update state."""
+    """Run a search page via HybridSearchService directly."""
     query = state["query"]
     page = state["page"]
 
-    body = {
-        "query": query,
-        "page": page,
-        "page_size": PAGE_SIZE,
-        "session_id": SESSION_ID,
-    }
-
     try:
-        t = time.time()
-        r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=60)
-        elapsed = time.time() - t
+        request = HybridSearchRequest(
+            query=query,
+            page=page,
+            page_size=PAGE_SIZE,
+            sort_by=SortBy.RELEVANCE,
+        )
 
-        if r.status_code != 200:
-            error_html = f'<div style="padding:20px;color:#dc2626;">Error {r.status_code}: {r.text[:200]}</div>'
-            return "", error_html, gr.update(visible=False), state
+        response = _service.search(request)
 
-        data = r.json()
-        new_products = data.get("results", [])
-        timing = data.get("timing", {})
-        intent = data.get("intent", "")
-        pagination = data.get("pagination", {})
-        has_more = pagination.get("has_more", False)
+        new_products = response.results
+        timing = response.timing
+        intent = response.intent
+        has_more = response.pagination.has_more
 
         # Accumulate products
         state["products"].extend(new_products)
@@ -319,15 +302,12 @@ def _fetch_page(state: dict) -> tuple:
         state["intent"] = intent
 
         # Build outputs
-        stats_html = _build_stats(query, len(state["products"]), timing, intent, page)
+        stats_html = _build_stats(len(state["products"]), timing, intent, page)
         grid_html = _build_grid(state["products"])
         show_load_more = gr.update(visible=has_more)
 
         return stats_html, grid_html, show_load_more, state
 
-    except requests.ConnectionError:
-        error_html = f'<div style="padding:20px;color:#dc2626;">Connection error — is the API server running at {API_URL}?</div>'
-        return "", error_html, gr.update(visible=False), state
     except Exception as e:
         error_html = f'<div style="padding:20px;color:#dc2626;">Error: {e}</div>'
         return "", error_html, gr.update(visible=False), state
@@ -340,7 +320,6 @@ def _fetch_page(state: dict) -> tuple:
 with gr.Blocks(
     title="Search Feed",
     css=CUSTOM_CSS,
-    theme=gr.themes.Soft(),
 ) as app:
 
     # State to track accumulated results
@@ -407,6 +386,4 @@ with gr.Blocks(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"API: {API_URL}")
-    print(f"Session: {SESSION_ID}")
     app.launch(server_name="0.0.0.0", server_port=7680, share=False)
