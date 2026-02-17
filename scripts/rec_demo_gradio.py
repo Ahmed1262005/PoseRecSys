@@ -1572,6 +1572,7 @@ except Exception as e:
 
 # Derive dropdown values from real data
 DB_BRANDS = sorted(set(f["brand"] for f in ALL_FLATS if f.get("brand")))
+_BRAND_DISPLAY_TO_NAME: dict[str, str] = {b: b for b in DB_BRANDS}  # identity until full pool overrides
 DB_ARTICLE_TYPES = sorted(set(f["article_type"] for f in ALL_FLATS if f.get("article_type")))
 DB_STYLES_RAW = sorted(set(s for f in ALL_FLATS for s in (f.get("style_tags") or [])))
 DB_COLORS = sorted(set(c for f in ALL_FLATS for c in (f.get("colors") or [])))
@@ -2416,6 +2417,35 @@ def _get_full_filter_pool() -> List[dict]:
 print("[FilterPool] Starting full pool load (this runs before the UI opens)...")
 _load_full_filter_pool()
 
+# Re-derive all dropdown values from the full pool so every brand/value is included
+if _full_filter_pool:
+    _all = _full_filter_pool
+    from collections import Counter as _Counter
+    _brand_counts = _Counter(f["brand"] for f in _all if f.get("brand"))
+    DB_BRANDS = [f"{b} ({_brand_counts[b]:,})" for b in sorted(_brand_counts.keys())]
+    _BRAND_DISPLAY_TO_NAME = {f"{b} ({_brand_counts[b]:,})": b for b in _brand_counts}
+    DB_ARTICLE_TYPES = sorted(set(f["article_type"] for f in _all if f.get("article_type")))
+    DB_STYLES_RAW = sorted(set(s for f in _all for s in (f.get("style_tags") or [])))
+    DB_COLORS = sorted(set(c for f in _all for c in (f.get("colors") or [])))
+    DB_PATTERNS = sorted(set(f["pattern"] for f in _all if f.get("pattern")))
+    DB_OCCASIONS_RAW = sorted(set(o for f in _all for o in (f.get("occasions") or [])))
+    DB_FORMALITY = sorted(set(f.get("formality") for f in _all if f.get("formality")))
+    DB_FIT_TYPES = sorted(set(f.get("fit") or f.get("fit_type") for f in _all if f.get("fit") or f.get("fit_type")))
+    DB_NECKLINES = sorted(set(f.get("neckline") for f in _all if f.get("neckline")))
+    DB_SLEEVE_TYPES = sorted(set(f.get("sleeve") or f.get("sleeve_type") for f in _all if f.get("sleeve") or f.get("sleeve_type")))
+    DB_LENGTHS = sorted(set(f.get("length") for f in _all if f.get("length")))
+    DB_SILHOUETTES = sorted(set(f.get("silhouette") for f in _all if f.get("silhouette")))
+    DB_RISES = sorted(set(f.get("rise") for f in _all if f.get("rise") and f.get("rise") not in ("", "N/A")))
+    DB_COLOR_FAMILIES = sorted(set(f.get("color_family") for f in _all if f.get("color_family")))
+    DB_MATERIALS = sorted(set(m for f in _all for m in (f.get("materials") or []) if m))
+    DB_SEASONS = sorted(set(s for f in _all for s in (f.get("seasons") or []) if s))
+    DB_CATEGORIES = sorted(set(f.get("broad_category") for f in _all if f.get("broad_category") and f.get("broad_category").lower() != "accessories"))
+    DB_COVERAGE_LEVELS = sorted(set(f.get("coverage_level") for f in _all if f.get("coverage_level")))
+    DB_SKIN_EXPOSURE = sorted(set(f.get("skin_exposure") for f in _all if f.get("skin_exposure")))
+    DB_MODEL_BODY_TYPES = sorted(set(f.get("model_body_type") for f in _all if f.get("model_body_type")))
+    DB_MODEL_SIZE_ESTIMATES = sorted(set(f.get("model_size_estimate") for f in _all if f.get("model_size_estimate")))
+    print(f"[FilterPool] Dropdown values derived from full pool ({len(DB_BRANDS)} brands)")
+
 
 def _flat_matches_filters(f: dict, filters: dict) -> bool:
     """Check if a flat product dict passes ALL filter groups.
@@ -2711,8 +2741,8 @@ def tab6_apply_filters(
         "sleeve_types": sleeve_types or [],
         "lengths": lengths or [],
         "silhouettes": silhouettes or [],
-        "brands": brands or [],
-        "exclude_brands": exclude_brands or [],
+        "brands": [_BRAND_DISPLAY_TO_NAME.get(b, b) for b in (brands or [])],
+        "exclude_brands": [_BRAND_DISPLAY_TO_NAME.get(b, b) for b in (exclude_brands or [])],
         "min_price": float(min_price) if min_price else 0,
         "max_price": float(max_price) if max_price else 0,
         "on_sale": bool(on_sale),
