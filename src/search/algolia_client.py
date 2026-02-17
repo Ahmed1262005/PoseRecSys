@@ -212,6 +212,7 @@ class AlgoliaClient:
         self,
         query: str,
         filters: Optional[str] = None,
+        optional_filters: Optional[List[str]] = None,
         facet_filters: Optional[List] = None,
         hits_per_page: int = 50,
         page: int = 0,
@@ -225,6 +226,13 @@ class AlgoliaClient:
         Args:
             query: Search query text.
             filters: Algolia filter string (e.g. 'brand:"Boohoo" AND price < 100').
+                     Hard constraint -- non-matching results are excluded.
+            optional_filters: Algolia optional filter strings. Each string
+                     boosts matching results' ranking but does NOT exclude
+                     non-matching results. Format: ['color:"Red"', 'neckline:"Turtleneck"'].
+                     Use for soft attribute preferences when the LLM planner
+                     is active, so descriptive keywords (like "ribbed") in the
+                     query still have room to match via keyword search.
             facet_filters: Facet filter list.
             hits_per_page: Number of results per page.
             page: Page number (0-indexed).
@@ -244,6 +252,8 @@ class AlgoliaClient:
         }
         if filters:
             params["filters"] = filters
+        if optional_filters:
+            params["optionalFilters"] = optional_filters
         if facet_filters:
             params["facetFilters"] = facet_filters
         if attributes_to_retrieve:

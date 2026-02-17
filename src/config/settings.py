@@ -225,6 +225,36 @@ class Settings(BaseSettings):
     algolia_index_name: str = Field(default="products", description="Algolia index name")
 
     # ==========================================================================
+    # OpenAI (LLM Query Planner)
+    # ==========================================================================
+    openai_api_key: str = Field(default="", description="OpenAI API key for LLM query planner")
+    query_planner_model: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model for query planning (gpt-4o-mini recommended)"
+    )
+    query_planner_enabled: bool = Field(
+        default=True,
+        description="Enable LLM query planner (falls back to regex if disabled or fails)"
+    )
+    query_planner_timeout_seconds: float = Field(
+        default=10.0,
+        description="Timeout for LLM query planner call (seconds)"
+    )
+
+    # ==========================================================================
+    # Multimodal Embeddings
+    # ==========================================================================
+    multimodal_search_enabled: bool = Field(
+        default=True,
+        description="Use multimodal embeddings (image+text) for semantic search. "
+        "Falls back to image-only if disabled or multimodal table is empty."
+    )
+    multimodal_embedding_version: int = Field(
+        default=1,
+        description="Multimodal embedding version: 1=attributes only, 2=attributes+description"
+    )
+
+    # ==========================================================================
     # Weather / Context Scoring
     # ==========================================================================
     openweather_api_key: str = Field(

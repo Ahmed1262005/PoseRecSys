@@ -19,8 +19,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from core.logging import get_logger
 from core.utils import filter_gallery_images
+from config.settings import get_settings
 from search.algolia_client import AlgoliaClient, get_algolia_client
 from search.query_classifier import QueryClassifier, QueryIntent
+from search.query_planner import QueryPlanner, SearchPlan, get_query_planner
 from search.reranker import SessionReranker
 from search.analytics import SearchAnalytics, get_search_analytics
 from search.algolia_config import get_replica_index_name
@@ -58,6 +60,7 @@ class HybridSearchService:
         self._analytics = analytics
         self._reranker = SessionReranker()
         self._classifier = QueryClassifier()
+        self._planner = get_query_planner()
 
         # Lazy-load FashionCLIP search engine
         self._semantic_engine = None
@@ -126,58 +129,113 @@ class HybridSearchService:
         if request.sort_by != SortBy.RELEVANCE:
             return self._search_sorted(request, user_id)
 
-        # Step 1: Classify query intent
-        intent = self._classifier.classify(request.query)
-        algolia_weight = self._classifier.get_algolia_weight(intent)
-        semantic_weight = self._classifier.get_semantic_weight(intent)
+        # =====================================================================
+        # STEP 1: Query Understanding (LLM Planner with regex fallback)
+        # =====================================================================
+        # The LLM planner decomposes the query into:
+        # - Structured filters (hard Algolia facets)
+        # - Optimized Algolia keyword query
+        # - Rich semantic query for FashionCLIP
+        # - Expanded filter values for lenient post-filtering
+        # Falls back to regex-based extraction if planner is disabled/fails.
+        # =====================================================================
 
-        # Allow request-level override of semantic weight.
-        # Use field info to detect if user explicitly set semantic_boost
-        # (avoids fragile float equality comparison with default 0.4).
-        _SEMANTIC_BOOST_DEFAULT = 0.4
-        if abs(request.semantic_boost - _SEMANTIC_BOOST_DEFAULT) > 1e-9:
-            semantic_weight = request.semantic_boost
-            algolia_weight = 1.0 - semantic_weight
+        search_plan: Optional[SearchPlan] = None
+        expanded_filters: Dict[str, List[str]] = {}
+        semantic_query_override: Optional[str] = None
 
-        # Step 2: For exact brand matches, inject a brand filter so Algolia
-        # doesn't misinterpret special chars (e.g. "Ba&sh" splitting on &)
-        matched_brand = None
-        if intent == QueryIntent.EXACT:
-            matched_brand = self._classifier.extract_brand(request.query)
-            if matched_brand and not request.brands:
-                request = request.model_copy(update={"brands": [matched_brand]})
+        t_plan = time.time()
+        search_plan = self._planner.plan(request.query)
+        timing["planner_ms"] = int((time.time() - t_plan) * 1000)
 
-        # Step 2a: Extract structured attribute filters from the query.
-        # Maps natural language terms to Algolia facet values so "formal"
-        # becomes formality:"Formal", "floral midi dress" becomes
-        # pattern:"Floral" + length:"Midi", etc.
-        # Only inject filters the user hasn't already set explicitly.
-        # Also returns the matched terms so we can strip them from the
-        # Algolia text query (they're now handled by facet filters).
-        extracted, matched_terms = self._classifier.extract_attributes(request.query)
-        if extracted:
+        if search_plan is not None:
+            # --- LLM planner succeeded ---
+            (
+                plan_updates,
+                expanded_filters,
+                matched_terms,
+                algolia_query,
+                semantic_query_override,
+                intent_str,
+            ) = self._planner.plan_to_request_updates(search_plan)
+
+            # Map intent string to enum
+            _INTENT_MAP = {"exact": QueryIntent.EXACT, "specific": QueryIntent.SPECIFIC, "vague": QueryIntent.VAGUE}
+            intent = _INTENT_MAP.get(intent_str, QueryIntent.SPECIFIC)
+
+            # Get RRF weights for the intent
+            algolia_weight = self._classifier.get_algolia_weight(intent)
+            semantic_weight = self._classifier.get_semantic_weight(intent)
+
+            # Apply planner filters (only fields the user hasn't set explicitly)
             updates = {}
-            for field, values in extracted.items():
+            for field, values in plan_updates.items():
                 if not getattr(request, field, None):
                     updates[field] = values
             if updates:
                 request = request.model_copy(update=updates)
                 logger.info(
-                    "Auto-extracted attribute filters from query",
+                    "LLM planner applied filters",
                     query=request.query,
-                    extracted=updates,
+                    filters=updates,
+                    expanded=expanded_filters,
+                    algolia_query=algolia_query,
+                    semantic_query=semantic_query_override,
                 )
+        else:
+            # --- Fallback: regex-based extraction ---
+            logger.info("Using regex fallback for query understanding", query=request.query)
 
-        # Step 2b: Clean query for Algolia — strip:
-        # 1. Meta-terms ("outfit", "look", "clothes") that describe intent
-        # 2. Attribute terms that were converted to facet filters ("formal",
-        #    "floral", "silk") — keeping them as text AND filters causes
-        #    Algolia to over-restrict (e.g. "formal shirt" returns 1 hit
-        #    because few products have "formal" in name + formality:Formal).
-        algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
+            intent = self._classifier.classify(request.query)
+            algolia_weight = self._classifier.get_algolia_weight(intent)
+            semantic_weight = self._classifier.get_semantic_weight(intent)
 
-        # Step 2c: Build Algolia filter string
-        algolia_filters = self._build_algolia_filters(request)
+            # Brand injection for exact matches
+            if intent == QueryIntent.EXACT:
+                matched_brand = self._classifier.extract_brand(request.query)
+                if matched_brand and not request.brands:
+                    request = request.model_copy(update={"brands": [matched_brand]})
+
+            # Regex attribute extraction
+            extracted, matched_terms = self._classifier.extract_attributes(request.query)
+            if extracted:
+                updates = {}
+                for field, values in extracted.items():
+                    if not getattr(request, field, None):
+                        updates[field] = values
+                if updates:
+                    request = request.model_copy(update=updates)
+                    logger.info(
+                        "Regex-extracted attribute filters from query",
+                        query=request.query,
+                        extracted=updates,
+                    )
+
+            # Clean query for Algolia (strip meta-terms + extracted terms)
+            algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
+
+        # Allow request-level override of semantic weight.
+        _SEMANTIC_BOOST_DEFAULT = 0.4
+        if abs(request.semantic_boost - _SEMANTIC_BOOST_DEFAULT) > 1e-9:
+            semantic_weight = request.semantic_boost
+            algolia_weight = 1.0 - semantic_weight
+
+        # Step 2c: Build Algolia filter strings.
+        # When the planner is active, split into hard filters (brand, price,
+        # stock, category) and optional filters (neckline, color, fit, etc.)
+        # so Algolia returns a wider candidate pool where keyword terms like
+        # "ribbed" can match, while still boosting attribute-matching results.
+        algolia_optional_filters: Optional[List[str]] = None
+        if search_plan is not None:
+            algolia_filters, algolia_optional_filters = self._build_algolia_filters_split(request)
+            if algolia_optional_filters:
+                logger.info(
+                    "Using optionalFilters for Algolia (planner active)",
+                    hard_filters=algolia_filters,
+                    optional_count=len(algolia_optional_filters),
+                )
+        else:
+            algolia_filters = self._build_algolia_filters(request)
 
         # Step 3: Run Algolia search
         # Auto-detect active filters from the request model.
@@ -198,20 +256,49 @@ class HybridSearchService:
             filters=algolia_filters,
             hits_per_page=fetch_size,
             facets=_FACET_FIELDS,
+            optional_filters=algolia_optional_filters,
         )
         timing["algolia_ms"] = int((time.time() - t_algolia) * 1000)
 
         # Step 4: Run semantic search
         # - Skip for EXACT brand matches (Algolia is authoritative)
         # - Force semantic if Algolia returned nothing (graceful fallback)
+        # - Use the planner's semantic_query if available (richer description)
+        # - When LLM planner is active, use RELAXED filters for semantic search
+        #   so pgvector returns more candidates (post-filter handles the rest)
         semantic_results = []
         algolia_failed = len(algolia_results) == 0
         run_semantic = (intent != QueryIntent.EXACT) or algolia_failed
         if run_semantic:
+            # Use planner's enriched semantic query if available, else original
+            clip_query = semantic_query_override if semantic_query_override else request.query
+
+            # Build a relaxed request for semantic search when planner is active.
+            # Only keep hard constraints that are safe at the SQL level:
+            # - price range (objective, never wrong)
+            # - brand exclusions (user explicitly doesn't want these)
+            # - brand inclusions (only for exact brand queries)
+            # Everything else (colors, patterns, occasions, categories) is handled
+            # by the post-filter with soft scoring for better recall.
+            if search_plan is not None:
+                semantic_request = request.model_copy(update={
+                    "categories": None,
+                    "colors": None,
+                    "patterns": None,
+                    "occasions": None,
+                })
+                logger.info(
+                    "Using relaxed filters for semantic search (planner active)",
+                    kept=["price", "brands", "exclude_brands"],
+                    removed=["categories", "colors", "patterns", "occasions"],
+                )
+            else:
+                semantic_request = request
+
             t_semantic = time.time()
             semantic_results = self._search_semantic(
-                query=request.query,
-                request=request,
+                query=clip_query,
+                request=semantic_request,
                 limit=fetch_size,
             )
             timing["semantic_ms"] = int((time.time() - t_semantic) * 1000)
@@ -226,9 +313,14 @@ class HybridSearchService:
         if semantic_results:
             semantic_results = self._enrich_semantic_results(semantic_results)
 
-        # Step 4c: Post-filter semantic results to enforce filters Algolia handles
+        # Step 4c: Post-filter semantic results to enforce filters Algolia handles.
+        # When the LLM planner provided expanded_filters, use lenient matching
+        # so visually-correct results aren't dropped due to label mismatches
+        # (e.g. "Tropical" pattern on a leaf-print jacket when filter is "Floral").
         if semantic_results:
-            semantic_results = self._post_filter_semantic(semantic_results, request)
+            semantic_results = self._post_filter_semantic(
+                semantic_results, request, expanded_filters=expanded_filters,
+            )
 
         # Step 5: Merge with RRF
         merged = self._reciprocal_rank_fusion(
@@ -469,6 +561,7 @@ class HybridSearchService:
         filters: Optional[str] = None,
         hits_per_page: int = 100,
         facets: Optional[List[str]] = None,
+        optional_filters: Optional[List[str]] = None,
     ) -> Tuple[List[dict], Optional[Dict[str, List[FacetValue]]]]:
         """Search Algolia and return normalized results + facet counts.
 
@@ -479,6 +572,7 @@ class HybridSearchService:
             resp = self.algolia.search(
                 query=query,
                 filters=filters,
+                optional_filters=optional_filters,
                 hits_per_page=hits_per_page,
                 page=0,
                 facets=facets,
@@ -551,7 +645,113 @@ class HybridSearchService:
         request: HybridSearchRequest,
         limit: int = 100,
     ) -> List[dict]:
-        """Search using FashionCLIP + pgvector and return normalized results."""
+        """
+        Search using FashionCLIP + pgvector and return normalized results.
+
+        Tries multimodal embeddings first (combined image + text vectors),
+        which can match descriptive terms like "ribbed" or "quilted" that
+        exist in product text but not in images. Falls back to image-only
+        embeddings if multimodal search returns no results or is disabled.
+        """
+        settings = get_settings()
+
+        # Try multimodal search first
+        if settings.multimodal_search_enabled:
+            multimodal_results = self._search_multimodal(
+                query=query, request=request, limit=limit,
+                version=settings.multimodal_embedding_version,
+            )
+            if multimodal_results:
+                return multimodal_results
+            # Fall through to image-only if multimodal returned nothing
+            logger.info(
+                "Multimodal search returned 0 results, falling back to image-only",
+                query=query,
+            )
+
+        # Image-only fallback (original path)
+        return self._search_image_only(query=query, request=request, limit=limit)
+
+    def _search_multimodal(
+        self,
+        query: str,
+        request: HybridSearchRequest,
+        limit: int = 100,
+        version: int = 1,
+    ) -> List[dict]:
+        """Search using multimodal embeddings (combined image + text vectors)."""
+        try:
+            resp = self.semantic_engine.search_multimodal(
+                query=query,
+                limit=limit,
+                embedding_version=version,
+                categories=request.categories,
+                exclude_brands=request.exclude_brands,
+                include_brands=request.brands,
+                min_price=request.min_price,
+                max_price=request.max_price,
+            )
+
+            results = []
+            for item in resp.get("results", []):
+                colors = item.get("colors") or []
+                results.append({
+                    "product_id": item.get("product_id"),
+                    "name": item.get("name", ""),
+                    "brand": item.get("brand", ""),
+                    "image_url": item.get("image_url"),
+                    "gallery_images": filter_gallery_images(item.get("gallery_images") or []),
+                    "price": float(item.get("price", 0) or 0),
+                    "original_price": item.get("original_price"),
+                    "is_on_sale": item.get("is_on_sale", False),
+                    "category_l1": None,  # enriched from Algolia
+                    "category_l2": None,  # enriched from Algolia
+                    "broad_category": item.get("broad_category") or item.get("category"),
+                    "article_type": item.get("article_type"),
+                    "primary_color": colors[0] if colors else None,
+                    "color_family": None,  # enriched from Algolia
+                    "pattern": item.get("pattern"),
+                    "apparent_fabric": None,  # enriched from Algolia
+                    "fit_type": item.get("fit") or item.get("fit_type"),
+                    "formality": None,  # enriched from Algolia
+                    "silhouette": None,  # enriched from Algolia
+                    "length": item.get("length"),
+                    "neckline": None,  # enriched from Algolia
+                    "sleeve_type": item.get("sleeve") or item.get("sleeve_type"),
+                    "rise": None,  # enriched from Algolia
+                    "style_tags": item.get("style_tags") or [],
+                    "occasions": item.get("occasions") or [],
+                    "seasons": [],  # enriched from Algolia
+                    "colors": colors,
+                    "materials": item.get("materials") or [],
+                    "semantic_score": item.get("similarity", 0),
+                    "source": "semantic",
+                })
+
+            if results:
+                logger.info(
+                    "Multimodal semantic search returned results",
+                    query=query,
+                    count=len(results),
+                    version=version,
+                )
+            return results
+
+        except Exception as e:
+            logger.warning(
+                "Multimodal search failed, will fall back to image-only",
+                error=str(e),
+                query=query,
+            )
+            return []
+
+    def _search_image_only(
+        self,
+        query: str,
+        request: HybridSearchRequest,
+        limit: int = 100,
+    ) -> List[dict]:
+        """Search using FashionCLIP image-only embeddings (original path)."""
         try:
             resp = self.semantic_engine.search_with_filters(
                 query=query,
@@ -605,7 +805,7 @@ class HybridSearchService:
                 })
             return results
         except Exception as e:
-            logger.error("Semantic search failed", error=str(e))
+            logger.error("Image-only semantic search failed", error=str(e))
             return []
 
     # =========================================================================
@@ -797,6 +997,103 @@ class HybridSearchService:
     # Filter Building
     # =========================================================================
 
+    # Attribute fields that become optionalFilters when the planner is active.
+    # These are subjective attributes where the user's description may not
+    # exactly match DB labels. Making them optional in Algolia preserves
+    # keyword matching (e.g. "ribbed" in product names) while still boosting
+    # results that match the extracted attributes.
+    _OPTIONAL_WHEN_PLANNED = {
+        "colors", "color_family", "patterns", "occasions", "seasons",
+        "formality", "fit_type", "neckline", "sleeve_type", "length",
+        "rise", "silhouette", "article_type", "style_tags", "materials",
+    }
+
+    # Map request field -> Algolia facet attribute name
+    _FIELD_TO_ALGOLIA_FACET = {
+        "colors": "primary_color",
+        "color_family": "color_family",
+        "patterns": "pattern",
+        "occasions": "occasions",
+        "seasons": "seasons",
+        "formality": "formality",
+        "fit_type": "fit_type",
+        "neckline": "neckline",
+        "sleeve_type": "sleeve_type",
+        "length": "length",
+        "rise": "rise",
+        "silhouette": "silhouette",
+        "article_type": "article_type",
+        "style_tags": "style_tags",
+        "materials": "apparent_fabric",
+    }
+
+    def _build_algolia_filters_split(
+        self, request: HybridSearchRequest,
+    ) -> Tuple[Optional[str], Optional[List[str]]]:
+        """
+        Build Algolia filters split into hard and optional.
+
+        When the LLM planner is active, attribute filters (neckline, color,
+        fit, etc.) become optionalFilters -- they boost matching results'
+        ranking but don't exclude non-matching ones. This preserves keyword
+        matching for descriptive terms like "ribbed" that don't map to any
+        filter.
+
+        Hard filters (always enforced): in_stock, brand, price, category,
+        exclude_brands, on_sale_only.
+
+        Returns:
+            Tuple of (hard_filter_string, optional_filter_list).
+        """
+        hard_parts = []
+        optional_parts = []
+
+        # --- Always hard ---
+        hard_parts.append("in_stock:true")
+
+        if request.on_sale_only:
+            hard_parts.append("is_on_sale:true")
+
+        if request.categories:
+            f = " OR ".join(f'broad_category:"{c}"' for c in request.categories)
+            hard_parts.append(f"({f})")
+
+        if request.category_l1:
+            f = " OR ".join(f'category_l1:"{c}"' for c in request.category_l1)
+            hard_parts.append(f"({f})")
+
+        if request.category_l2:
+            f = " OR ".join(f'category_l2:"{c}"' for c in request.category_l2)
+            hard_parts.append(f"({f})")
+
+        if request.brands:
+            f = " OR ".join(f'brand:"{b}"' for b in request.brands)
+            hard_parts.append(f"({f})")
+
+        if request.exclude_brands:
+            for b in request.exclude_brands:
+                hard_parts.append(f'NOT brand:"{b}"')
+
+        if request.min_price is not None:
+            hard_parts.append(f"price >= {request.min_price}")
+
+        if request.max_price is not None:
+            hard_parts.append(f"price <= {request.max_price}")
+
+        # --- Attribute filters become optional ---
+        for req_field in self._OPTIONAL_WHEN_PLANNED:
+            req_vals = getattr(request, req_field, None)
+            if not req_vals:
+                continue
+            algolia_facet = self._FIELD_TO_ALGOLIA_FACET.get(req_field, req_field)
+            for val in req_vals:
+                optional_parts.append(f'{algolia_facet}:"{val}"')
+
+        hard_str = " AND ".join(hard_parts) if hard_parts else None
+        opt_list = optional_parts if optional_parts else None
+
+        return hard_str, opt_list
+
     def _build_algolia_filters(self, request: HybridSearchRequest) -> Optional[str]:
         """Build Algolia filter string from request parameters."""
         parts = []
@@ -940,24 +1237,67 @@ class HybridSearchService:
     # Semantic Post-Filter
     # =========================================================================
 
+    # Filters that are ALWAYS hard (drop non-matching) regardless of planner.
+    # These represent objective constraints the user explicitly specified.
+    _HARD_FILTER_FIELDS = {
+        "brands", "exclude_brands", "categories",
+        "category_l1", "category_l2",
+        "min_price", "max_price", "on_sale_only",
+    }
+
+    # Filters that become SOFT (score boost/penalty) when the LLM planner is
+    # active. These are subjective attributes where DB labels may not match
+    # the user's language (e.g. "Sheer" isn't a valid material, "Y2K" isn't
+    # a valid style_tag, occasion labels are sparse).
+    _SOFT_WHEN_PLANNED = {
+        "formality", "fit_type", "neckline", "sleeve_type", "length",
+        "rise", "silhouette", "article_type", "color_family",
+        "occasions", "seasons", "materials", "style_tags",
+        "patterns", "colors",
+    }
+
+    # Score adjustments for soft filtering
+    _SOFT_MATCH_BOOST = 0.05    # Boost for matching a soft filter
+    _SOFT_MISMATCH_PENALTY = 0.0  # No penalty -- just don't boost
+
     def _post_filter_semantic(
         self,
         results: List[dict],
         request: HybridSearchRequest,
+        expanded_filters: Optional[Dict[str, List[str]]] = None,
     ) -> List[dict]:
         """
-        Hard post-filter on semantic results after Algolia enrichment.
+        Post-filter on semantic results after Algolia enrichment.
 
-        This runs AFTER _enrich_semantic_results, so most products now have
-        Gemini attributes. We use strict filtering: if a filter is active and
-        the product lacks that attribute, it is excluded. This prevents
-        un-enriched products from leaking through as false positives.
-
-        Filters already applied natively by the pgvector RPC (categories,
-        brands, colors, price, occasions, patterns) are re-checked here to
-        catch any that slipped through or were only partially applied.
+        Two modes:
+        1. **Strict mode** (no expanded_filters / regex fallback): All filters
+           are hard -- non-matching results are dropped. This is the original
+           behavior.
+        2. **Relaxed mode** (expanded_filters from LLM planner): Only hard
+           filters (brand, category, price) drop results. Attribute filters
+           (occasions, materials, style_tags, formality, etc.) become soft
+           scoring boosts -- matching items rank higher, but non-matching items
+           aren't dropped. This prevents 0-result scenarios when DB labels
+           don't match the user's language.
         """
+        if expanded_filters is None:
+            expanded_filters = {}
+
+        use_soft_scoring = bool(expanded_filters)
         filtered = results
+
+        def _get_allowed_vals(field_name: str, strict_vals: List[str]) -> set:
+            """Get allowed values: use expanded set if available, else strict."""
+            expanded = expanded_filters.get(field_name)
+            if expanded:
+                all_vals = set(v.lower() for v in strict_vals)
+                all_vals.update(v.lower() for v in expanded)
+                return all_vals
+            return {v.lower() for v in strict_vals}
+
+        # =====================================================================
+        # HARD FILTERS (always enforced)
+        # =====================================================================
 
         # --- Sale filter ---
         if request.on_sale_only:
@@ -973,7 +1313,7 @@ class HybridSearchService:
 
         # --- Brand filters ---
         if request.brands:
-            vals = {v.lower() for v in request.brands}
+            vals = _get_allowed_vals("brands", request.brands)
             filtered = [r for r in filtered
                         if r.get("brand") and r["brand"].lower() in vals]
         if request.exclude_brands:
@@ -983,35 +1323,128 @@ class HybridSearchService:
 
         # --- Category filters (broad) ---
         if request.categories:
-            vals = {v.lower() for v in request.categories}
+            vals = _get_allowed_vals("categories", request.categories)
             filtered = [r for r in filtered
                         if r.get("broad_category") and r["broad_category"].lower() in vals]
 
-        # --- Color filters ---
-        if request.colors:
-            vals = {v.lower() for v in request.colors}
+        # --- Category L1 (hard -- structural) ---
+        if request.category_l1:
+            vals = _get_allowed_vals("category_l1", request.category_l1)
             filtered = [r for r in filtered
-                        if (r.get("primary_color") and r["primary_color"].lower() in vals)
-                        or (r.get("colors") and any(c.lower() in vals for c in r["colors"]))]
+                        if r.get("category_l1") and r["category_l1"].lower() in vals]
 
-        # --- Pattern filter ---
-        if request.patterns:
-            vals = {v.lower() for v in request.patterns}
-            filtered = [r for r in filtered
-                        if r.get("pattern") and r["pattern"].lower() in vals]
+        # --- Category L2 (hard -- structural, with substring match for expanded) ---
+        if request.category_l2:
+            vals = _get_allowed_vals("category_l2", request.category_l2)
+            if expanded_filters.get("category_l2"):
+                filtered = [r for r in filtered
+                            if r.get("category_l2") and (
+                                r["category_l2"].lower() in vals
+                                or any(v in r["category_l2"].lower() for v in vals)
+                            )]
+            else:
+                filtered = [r for r in filtered
+                            if r.get("category_l2") and r["category_l2"].lower() in vals]
 
-        # --- Occasion filter ---
-        if request.occasions:
-            vals = {v.lower() for v in request.occasions}
-            filtered = [r for r in filtered
-                        if r.get("occasions") and any(o.lower() in vals for o in r["occasions"])]
+        # =====================================================================
+        # SOFT vs HARD ATTRIBUTE FILTERS
+        # =====================================================================
+        if use_soft_scoring:
+            # --- SOFT MODE (LLM planner active) ---
+            # Attribute filters boost matching items' scores instead of dropping
+            # non-matching ones. This prevents 0-result failures when DB labels
+            # don't match the user's language.
+            filtered = self._apply_soft_attribute_scoring(filtered, request, expanded_filters)
+        else:
+            # --- STRICT MODE (regex fallback) ---
+            # All attribute filters are hard drops (original behavior).
 
-        # --- Strict Gemini attribute filters ---
-        # After enrichment, products should have these fields. If they don't
-        # (not in Algolia), they are excluded when that filter is active.
-        _STRICT_SINGLE = [
-            ("category_l1", "category_l1"),
-            ("category_l2", "category_l2"),
+            # Colors
+            if request.colors:
+                vals = _get_allowed_vals("colors", request.colors)
+                filtered = [r for r in filtered
+                            if (r.get("primary_color") and r["primary_color"].lower() in vals)
+                            or (r.get("colors") and any(c.lower() in vals for c in r["colors"]))]
+
+            # Patterns
+            if request.patterns:
+                vals = _get_allowed_vals("patterns", request.patterns)
+                filtered = [r for r in filtered
+                            if r.get("pattern") and r["pattern"].lower() in vals]
+
+            # Occasions
+            if request.occasions:
+                vals = _get_allowed_vals("occasions", request.occasions)
+                filtered = [r for r in filtered
+                            if r.get("occasions") and any(o.lower() in vals for o in r["occasions"])]
+
+            # Single-value Gemini attribute filters
+            _STRICT_SINGLE = [
+                ("formality", "formality"),
+                ("fit_type", "fit_type"),
+                ("neckline", "neckline"),
+                ("sleeve_type", "sleeve_type"),
+                ("length", "length"),
+                ("rise", "rise"),
+                ("silhouette", "silhouette"),
+                ("article_type", "article_type"),
+                ("color_family", "color_family"),
+            ]
+            for req_field, data_field in _STRICT_SINGLE:
+                req_vals = getattr(request, req_field, None)
+                if req_vals:
+                    vals = {v.lower() for v in req_vals}
+                    filtered = [r for r in filtered
+                                if r.get(data_field) and r[data_field].lower() in vals]
+
+            # Multi-value Gemini attribute filters
+            _STRICT_MULTI = [
+                ("seasons", "seasons"),
+                ("materials", "materials"),
+                ("style_tags", "style_tags"),
+            ]
+            for req_field, data_field in _STRICT_MULTI:
+                req_vals = getattr(request, req_field, None)
+                if req_vals:
+                    vals = {v.lower() for v in req_vals}
+                    filtered = [r for r in filtered
+                                if r.get(data_field) and any(v.lower() in vals for v in r[data_field])]
+
+        return filtered
+
+    def _apply_soft_attribute_scoring(
+        self,
+        results: List[dict],
+        request: HybridSearchRequest,
+        expanded_filters: Dict[str, List[str]],
+    ) -> List[dict]:
+        """
+        Apply soft scoring boosts for attribute filter matches.
+
+        Instead of dropping items that don't match attribute filters, boost
+        matching items' RRF scores so they rank higher. This is used when
+        the LLM planner is active to prevent 0-result failures.
+
+        Boost per matching filter: +0.05 to rrf_score (or semantic_score).
+        """
+        if not results:
+            return results
+
+        def _get_expanded_vals(field_name: str, strict_vals: List[str]) -> set:
+            expanded = expanded_filters.get(field_name)
+            if expanded:
+                all_vals = set(v.lower() for v in strict_vals)
+                all_vals.update(v.lower() for v in expanded)
+                return all_vals
+            return {v.lower() for v in strict_vals}
+
+        # Build all active soft filters
+        soft_checks = []
+
+        # Single-value fields
+        _SINGLE_FIELDS = [
+            ("colors", "primary_color"),
+            ("patterns", "pattern"),
             ("formality", "formality"),
             ("fit_type", "fit_type"),
             ("neckline", "neckline"),
@@ -1022,26 +1455,55 @@ class HybridSearchService:
             ("article_type", "article_type"),
             ("color_family", "color_family"),
         ]
-        for req_field, data_field in _STRICT_SINGLE:
+        for req_field, data_field in _SINGLE_FIELDS:
             req_vals = getattr(request, req_field, None)
             if req_vals:
-                vals = {v.lower() for v in req_vals}
-                filtered = [r for r in filtered
-                            if r.get(data_field) and r[data_field].lower() in vals]
+                vals = _get_expanded_vals(req_field, req_vals)
+                soft_checks.append(("single", data_field, vals))
 
-        _STRICT_MULTI = [
+        # Multi-value fields
+        _MULTI_FIELDS = [
+            ("occasions", "occasions"),
             ("seasons", "seasons"),
             ("materials", "materials"),
             ("style_tags", "style_tags"),
         ]
-        for req_field, data_field in _STRICT_MULTI:
+        for req_field, data_field in _MULTI_FIELDS:
             req_vals = getattr(request, req_field, None)
             if req_vals:
-                vals = {v.lower() for v in req_vals}
-                filtered = [r for r in filtered
-                            if r.get(data_field) and any(v.lower() in vals for v in r[data_field])]
+                vals = _get_expanded_vals(req_field, req_vals)
+                soft_checks.append(("multi", data_field, vals))
 
-        return filtered
+        # Also check colors in the colors array (multi-value)
+        if request.colors:
+            vals = _get_expanded_vals("colors", request.colors)
+            soft_checks.append(("multi", "colors", vals))
+
+        if not soft_checks:
+            return results
+
+        # Score each result
+        for item in results:
+            soft_boost = 0.0
+            matches = 0
+            for check_type, data_field, vals in soft_checks:
+                if check_type == "single":
+                    val = item.get(data_field)
+                    if val and val.lower() in vals:
+                        matches += 1
+                elif check_type == "multi":
+                    arr = item.get(data_field)
+                    if arr and any(v.lower() in vals for v in arr):
+                        matches += 1
+
+            if matches > 0:
+                soft_boost = matches * self._SOFT_MATCH_BOOST
+                item["rrf_score"] = item.get("rrf_score", 0) + soft_boost
+                item["_soft_matches"] = matches
+
+        # Re-sort by boosted rrf_score
+        results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+        return results
 
     def _extract_filter_summary(self, request: HybridSearchRequest) -> dict:
         """Extract a summary of applied filters for analytics."""

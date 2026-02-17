@@ -31,6 +31,9 @@ httpx
 # Search
 algoliasearch>=4.0.0
 
+# LLM (query planner)
+openai>=1.0.0
+
 # Session storage
 redis>=5.0.0
 

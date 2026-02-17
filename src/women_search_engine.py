@@ -917,6 +917,114 @@ class WomenSearchEngine:
                 }
             }
 
+    def search_multimodal(
+        self,
+        query: str,
+        limit: int = 100,
+        embedding_version: int = 1,
+        categories: Optional[List[str]] = None,
+        exclude_brands: Optional[List[str]] = None,
+        include_brands: Optional[List[str]] = None,
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        exclude_product_ids: Optional[List[str]] = None,
+    ) -> Dict:
+        """
+        Search using multimodal embeddings (combined image + text vectors).
+
+        Calls the search_multimodal RPC which searches against pre-computed
+        combined embeddings that encode BOTH visual appearance and product
+        text attributes (name, fabric, texture, color, etc.).
+
+        This enables matching on descriptive terms like "ribbed", "quilted",
+        or "pleated" that exist in product text but not in images.
+
+        Args:
+            query: Search query text (encoded with FashionCLIP text encoder).
+            limit: Max results to return.
+            embedding_version: 1 = attributes only, 2 = attributes + description.
+            categories: Filter by broad_category.
+            exclude_brands: Brands to exclude.
+            include_brands: Brands to include.
+            min_price: Minimum price filter.
+            max_price: Maximum price filter.
+            exclude_product_ids: Product IDs to exclude.
+
+        Returns:
+            Dict with "results" list and metadata.
+        """
+        text_embedding = self.encode_text(query)
+        text_embedding = text_embedding.astype('float32').tolist()
+        vector_str = f"[{','.join(map(str, text_embedding))}]"
+
+        rpc_params: Dict[str, Any] = {
+            'query_embedding': vector_str,
+            'match_count': limit,
+            'match_offset': 0,
+            'embedding_version': embedding_version,
+        }
+
+        # Add optional filters (only non-None values)
+        if categories:
+            rpc_params['filter_categories'] = categories
+        if exclude_brands:
+            rpc_params['exclude_brands'] = exclude_brands
+        if include_brands:
+            rpc_params['include_brands'] = include_brands
+        if min_price is not None:
+            rpc_params['min_price'] = min_price
+        if max_price is not None:
+            rpc_params['max_price'] = max_price
+        if exclude_product_ids:
+            rpc_params['exclude_product_ids'] = exclude_product_ids
+
+        try:
+            result = self.supabase.rpc('search_multimodal', rpc_params).execute()
+
+            if not result.data:
+                return {"query": query, "results": [], "count": 0}
+
+            results = []
+            for row in result.data:
+                results.append({
+                    "product_id": row.get('product_id'),
+                    "similarity": float(row.get('similarity') or 0),
+                    "name": row.get('name', ''),
+                    "brand": row.get('brand', ''),
+                    "category": row.get('category', ''),
+                    "broad_category": row.get('broad_category', ''),
+                    "article_type": row.get('article_type', ''),
+                    "price": float(row.get('price', 0) or 0),
+                    "original_price": float(row.get('original_price', 0) or 0) or None,
+                    "is_on_sale": bool(
+                        row.get('original_price')
+                        and float(row.get('original_price') or 0) > float(row.get('price') or 0)
+                    ),
+                    "image_url": row.get('primary_image_url', ''),
+                    "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
+                    "colors": row.get('colors', []) or [],
+                    "materials": row.get('materials', []) or [],
+                    "fit": row.get('fit'),
+                    "length": row.get('length'),
+                    "sleeve": row.get('sleeve'),
+                })
+
+            return {
+                "query": query,
+                "results": results,
+                "count": len(results),
+                "embedding_version": embedding_version,
+            }
+
+        except Exception as e:
+            logger.error(
+                "Multimodal search failed, falling back to image-only",
+                error=str(e),
+                query=query,
+            )
+            # Return empty -- caller can fall back to image-only search
+            return {"query": query, "results": [], "count": 0, "error": str(e)}
+
     def get_similar(
         self,
         product_id: str,
