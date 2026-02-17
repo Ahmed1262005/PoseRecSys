@@ -32,6 +32,8 @@ PAGE_SIZE = 20
 
 print("Initializing HybridSearchService...")
 _service = HybridSearchService()
+print("Preloading FashionCLIP model...")
+_service.semantic_engine._load_model()
 print("Service ready.")
 
 # ---------------------------------------------------------------------------
