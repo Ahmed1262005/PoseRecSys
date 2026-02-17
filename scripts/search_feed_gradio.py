@@ -11,7 +11,7 @@ Usage:
     2. Run this script:
        PYTHONPATH=src python scripts/search_feed_gradio.py
 
-    3. Open http://localhost:7861 in your browser
+    3. Open http://localhost:7680 in your browser
 """
 
 import os
@@ -409,4 +409,4 @@ with gr.Blocks(
 if __name__ == "__main__":
     print(f"API: {API_URL}")
     print(f"Session: {SESSION_ID}")
-    app.launch(server_name="0.0.0.0", server_port=7861, share=False)
+    app.launch(server_name="0.0.0.0", server_port=7680, share=False)
