@@ -18,54 +18,54 @@ from search.hybrid_search import HybridSearchService
 from search.models import HybridSearchRequest, SortBy
 
 QUERIES = [
-    # Composite descriptors
-    "a jacket with floral leaves",
-    "dress with butterfly sleeves",
-    "top with watercolor splashes",
-    "pants with paint drip effect",
-    # Mood / aesthetic descriptions
-    "something to wear to a rooftop bar",
-    "cozy stay at home vibes",
-    "outfit for walking around paris",
-    "mysterious dark feminine energy",
-    # Visual descriptions
-    "pastel colors with ruffles",
-    "sheer fabric with embroidery",
-    "something flowy and romantic for golden hour photos",
-    "earth tones with chunky texture",
-    # Compound / multi-attribute
-    "high waisted wide leg linen pants in olive green",
-    "off shoulder satin midi dress for a wedding",
-    "oversized cropped denim jacket with distressing",
+    # Texture + category + color
     "fitted ribbed turtleneck in burgundy",
-    # Abstract / conceptual
-    "clean girl aesthetic summer",
-    "old money country club look",
-    "Y2K going out top",
-    "coastal grandmother vacation outfit",
+    "chunky cable knit cardigan in cream",
+    "pleated satin midi skirt in emerald green",
+    "quilted puffer vest in black",
+    # Fabric + construction + fit
+    "sheer lace bodysuit with long sleeves",
+    "silk wrap dress with ruching",
+    "linen wide leg palazzo pants",
+    "velvet blazer with satin lapels",
+    # Pattern + category + detail
+    "floral maxi dress with smocked bodice",
+    "striped knit polo shirt cropped",
+    "plaid wool mini skirt with pleats",
+    "polka dot chiffon blouse with bow tie neck",
+    # Material + fit + color
+    "high waisted wide leg linen pants in olive green",
+    "oversized cropped denim jacket with distressing",
+    "leather mini skirt with front slit",
+    "cashmere v-neck sweater in camel",
+    # Construction + texture + style
+    "ribbed knit tank top with square neckline",
+    "corduroy straight leg trousers in brown",
+    "mesh long sleeve top with ruffle trim",
+    "off shoulder satin midi dress for a wedding",
 ]
 
 CATEGORIES = [
-    "Composite Descriptors",
-    "Composite Descriptors",
-    "Composite Descriptors",
-    "Composite Descriptors",
-    "Mood / Aesthetic",
-    "Mood / Aesthetic",
-    "Mood / Aesthetic",
-    "Mood / Aesthetic",
-    "Visual Descriptions",
-    "Visual Descriptions",
-    "Visual Descriptions",
-    "Visual Descriptions",
-    "Multi-Attribute",
-    "Multi-Attribute",
-    "Multi-Attribute",
-    "Multi-Attribute",
-    "Abstract / Conceptual",
-    "Abstract / Conceptual",
-    "Abstract / Conceptual",
-    "Abstract / Conceptual",
+    "Texture + Category + Color",
+    "Texture + Category + Color",
+    "Texture + Category + Color",
+    "Texture + Category + Color",
+    "Fabric + Construction + Fit",
+    "Fabric + Construction + Fit",
+    "Fabric + Construction + Fit",
+    "Fabric + Construction + Fit",
+    "Pattern + Category + Detail",
+    "Pattern + Category + Detail",
+    "Pattern + Category + Detail",
+    "Pattern + Category + Detail",
+    "Material + Fit + Color",
+    "Material + Fit + Color",
+    "Material + Fit + Color",
+    "Material + Fit + Color",
+    "Construction + Texture + Style",
+    "Construction + Texture + Style",
+    "Construction + Texture + Style",
+    "Construction + Texture + Style",
 ]
 
 TOP_N = 8
