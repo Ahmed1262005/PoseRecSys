@@ -1,5 +1,5 @@
 """
-Test 20 semantic queries and generate an HTML results page.
+Test ~230 real-world user queries and generate an HTML results page.
 
 Usage:
     PYTHONPATH=src python scripts/test_20_queries_html.py
@@ -17,65 +17,286 @@ load_dotenv()
 from search.hybrid_search import HybridSearchService
 from search.models import HybridSearchRequest, SortBy
 
-QUERIES = [
-    # Coverage / body concerns
-    "Help me find a top that hides my arms",
-    "Top that doesn't show bra straps",
-    # Occasion
-    "Outfit for a wedding guest",
-    "Business casual outfits for work",
-    # Aesthetic / vibe
-    "Quiet luxury outfit",
-    "French girl outfit",
-    # Concrete attributes — outerwear & tops
-    "Wool coat with belt",
-    "Ribbed knit top with square neckline",
-    # Concrete attributes — bottoms & dresses
-    "High rise wide leg jeans",
-    "Midi dress with sleeves",
-    # Fit / body type
-    "Jeans for short legs",
-    # Modesty
-    "Hijab-friendly dress",
-    # Color
-    "Cherry red mini dress",
-    # Season / weather
-    "Transitional spring jacket",
-    "Something warm but not bulky",
-    # Brand / similarity
-    "Reformation dupe",
-    # Price
-    "Under $50 date night dress",
-    # Fabric
-    "Cashmere sweater",
-    # Stress test — fragment
-    "black mini going out",
-    # Dialogue — long natural language
-    "I'm going to a wedding and want something elegant not too revealing and not super expensive",
+_QUERY_DATA = [
+    # (query, category)
+    # --- Coverage / body concerns ---
+    ("Help me find a top that hides my arms", "Coverage"),
+    ("Help me find a dress that doesn't show my stomach", "Coverage"),
+    ("Help me find something that looks expensive", "Coverage / Vibe"),
+    ("Help me find an outfit for a first date", "Coverage / Occasion"),
+    ("Help me find something cute but not too try-hard", "Coverage / Vibe"),
+    ("Help me find something modest but not frumpy", "Coverage / Modesty"),
+    ("Help me find something sexy but classy", "Coverage / Vibe"),
+    ("Help me find something I can wear 3 different ways", "Utility"),
+    ("Help me find something breathable for hot weather", "Weather"),
+    ("Help me find something warm but not bulky", "Weather"),
+    ("Help me find something that won't wrinkle", "Care"),
+    ("Help me find something that travels well", "Travel"),
+    ("Help me find something that won't show sweat", "Performance"),
+    ("Help me find something that doesn't show underwear lines", "Fit / Coverage"),
+    # --- Occasion ---
+    ("Outfit for a wedding guest", "Occasion"),
+    ("Dress for a black tie wedding", "Occasion"),
+    ("Semi formal wedding outfit", "Occasion"),
+    ("Business casual outfits for work", "Occasion / Work"),
+    ("Interview outfit for a creative job", "Occasion / Work"),
+    ("Outfit for a work dinner", "Occasion / Work"),
+    ("What to wear to a conference", "Occasion / Work"),
+    ("Vacation outfits for Europe", "Occasion / Travel"),
+    ("Beach dinner outfit", "Occasion"),
+    ("Brunch outfit", "Occasion"),
+    ("Night out outfit in winter", "Occasion / Weather"),
+    ("Outfit for clubbing but not too revealing", "Occasion"),
+    ("Date night outfit", "Occasion"),
+    ("Casual Friday outfit", "Occasion / Work"),
+    ("Outfit for family gathering", "Occasion"),
+    ("Funeral outfit (simple and respectful)", "Occasion"),
+    ("Eid outfit", "Occasion"),
+    ("Ramadan iftar dinner outfit", "Occasion"),
+    ("Graduation dress", "Occasion"),
+    ("Birthday outfit", "Occasion"),
+    ("Engagement party outfit", "Occasion"),
+    # --- Aesthetic / vibe ---
+    ("Quiet luxury outfit", "Aesthetic"),
+    ("Old money style dress", "Aesthetic"),
+    ("Clean girl outfit", "Aesthetic"),
+    ("Model off duty look", "Aesthetic"),
+    ("French girl outfit", "Aesthetic"),
+    ("Scandi minimalist outfit", "Aesthetic"),
+    ("Coastal grandmother outfit", "Aesthetic"),
+    ("Y2K top", "Aesthetic"),
+    ("Soft girl dress", "Aesthetic"),
+    ("Mob wife coat", "Aesthetic"),
+    ("Balletcore skirt", "Aesthetic"),
+    ("Office siren outfit", "Aesthetic"),
+    ("Dark academia outfit", "Aesthetic"),
+    ("Coquette top with bows", "Aesthetic"),
+    ("Edgy streetwear jacket", "Aesthetic"),
+    ("Boho maxi dress like Anthropologie", "Brand Vibe"),
+    ("Like Zara but better quality", "Brand Vibe"),
+    ("Like Aritzia vibe basics", "Brand Vibe"),
+    ("Reformation-style dress but cheaper", "Brand Vibe"),
+    # --- Concrete attributes: outerwear ---
+    ("Jacket with zippered pockets", "Outerwear"),
+    ("Waterproof rain jacket with hood", "Outerwear"),
+    ("Windbreaker with adjustable waist", "Outerwear"),
+    ("Puffer jacket that's not too puffy", "Outerwear"),
+    ("Wool coat with belt", "Outerwear"),
+    ("Trench coat with storm flap", "Outerwear"),
+    ("Leather jacket oversized", "Outerwear"),
+    ("Bomber jacket cropped", "Outerwear"),
+    ("Denim jacket lined", "Outerwear"),
+    ("Coat with hidden buttons", "Outerwear"),
+    ("Jacket with two-way zipper", "Outerwear"),
+    ("Long coat that covers my butt", "Outerwear"),
+    # --- Concrete attributes: tops ---
+    ("Ribbed knit top with square neckline", "Tops"),
+    ("Button down that doesn't gape at the chest", "Tops"),
+    ("Wrap top that stays closed", "Tops"),
+    ("T-shirt that's thick not see-through", "Tops"),
+    ("Blouse with covered buttons", "Tops"),
+    ("Top with longer sleeves", "Tops"),
+    ("Cropped top but not too cropped", "Tops"),
+    ("Longline tank", "Tops"),
+    ("Bodysuit with snap closure", "Tops"),
+    ("Top that isn't clingy", "Tops"),
+    # --- Concrete attributes: bottoms ---
+    ("High rise wide leg jeans", "Bottoms"),
+    ("Mid rise straight jeans no rips", "Bottoms"),
+    ("Low rise baggy jeans", "Bottoms"),
+    ("Pants with elastic waistband but look tailored", "Bottoms"),
+    ("Trousers with pleats and belt loops", "Bottoms"),
+    ("Skirt with shorts underneath", "Bottoms"),
+    ("Maxi skirt with slit", "Bottoms"),
+    ("Pockets that don't flare out", "Bottoms"),
+    ("Leggings squat proof", "Bottoms"),
+    ("Shorts with 5 inch inseam", "Bottoms"),
+    # --- Concrete attributes: dresses ---
+    ("Midi dress with sleeves", "Dresses"),
+    ("Maxi dress with open back", "Dresses"),
+    ("Wrap dress but not too low cut", "Dresses"),
+    ("Dress with corset bodice", "Dresses"),
+    ("Slip dress satin", "Dresses"),
+    ("Bodycon dress thick material", "Dresses"),
+    ("Dress with pockets", "Dresses"),
+    ("Dress with adjustable straps", "Dresses"),
+    ("Dress with higher neckline", "Dresses"),
+    ("Dress that covers shoulders", "Dresses"),
+    # --- Fit / body type ---
+    ("Jeans for short legs", "Fit / Body"),
+    ("Pants for tall girls 5'10", "Fit / Body"),
+    ("Petite blazer", "Fit / Body"),
+    ("Long torso bodysuit", "Fit / Body"),
+    ("Wide calf boots", "Fit / Body"),
+    ("Skirt for big hips small waist", "Fit / Body"),
+    ("Dresses for apple shape", "Fit / Body"),
+    ("Outfit to hide belly", "Fit / Body"),
+    ("Jeans that don't gap at waist", "Fit / Body"),
+    ("Dress that doesn't cling to thighs", "Fit / Body"),
+    ("Plus size wedding guest dress", "Fit / Size"),
+    ("Maternity dress for wedding", "Fit / Size"),
+    ("Postpartum friendly outfits", "Fit / Body"),
+    ("Outfits that hide upper arms", "Fit / Coverage"),
+    ("Outfits that cover my back", "Fit / Coverage"),
+    # --- Coverage / modesty ---
+    ("Long sleeves but lightweight", "Modesty"),
+    ("Not see through", "Modesty"),
+    ("No cleavage", "Modesty"),
+    ("High neck top", "Modesty"),
+    ("Full length maxi dress no slit", "Modesty"),
+    ("Midi skirt that's not tight", "Modesty"),
+    ("Loose fit pants modest", "Modesty"),
+    ("Longline blazer for coverage", "Modesty"),
+    ("No backless", "Modesty"),
+    ("Not cropped", "Modesty"),
+    ("Covers shoulders", "Modesty"),
+    ("Hijab-friendly dress", "Modesty"),
+    ("Modest wedding guest dress", "Modesty / Occasion"),
+    # --- Color / print ---
+    ("Chocolate brown dress", "Color"),
+    ("Butter yellow top", "Color"),
+    ("Cherry red mini dress", "Color"),
+    ("Navy blazer", "Color"),
+    ("Black dress not boring", "Color"),
+    ("White top that isn't see-through", "Color"),
+    ("Leopard print skirt", "Print"),
+    ("Floral dress not grandma", "Print"),
+    ("Striped knit top", "Print"),
+    ("Polka dot midi dress", "Print"),
+    ("Solid color basics", "Color"),
+    ("Neutral capsule wardrobe pieces", "Color"),
+    ("Monochrome beige outfit", "Color"),
+    ("Colorful summer set", "Color"),
+    # --- Season / weather ---
+    ("Winter work outfits", "Season"),
+    ("Summer dresses breathable", "Season"),
+    ("Hot weather pants", "Weather"),
+    ("Layering tops for cold office", "Weather"),
+    ("Rainy day outfit", "Weather"),
+    ("Vacation outfits for humid weather", "Weather / Travel"),
+    ("Coat for 10 degrees", "Weather"),
+    ("Outfit for windy weather", "Weather"),
+    ("Transitional spring jacket", "Season"),
+    ("Fall capsule wardrobe", "Season"),
+    ("Ski trip outfits", "Season / Travel"),
+    # --- Styling / outfit building ---
+    ("Outfit ideas with a black blazer", "Styling"),
+    ("What goes with wide leg jeans", "Styling"),
+    ("Top to wear with a satin skirt", "Styling"),
+    ("Shoes that go with this dress", "Styling"),
+    ("Layering piece for this top", "Styling"),
+    ("Find matching set", "Styling"),
+    ("Find pants to match this blazer", "Styling"),
+    ("Find a top that matches these pants", "Styling"),
+    ("Find an outfit for this skirt", "Styling"),
+    ("Find similar items to this", "Similarity"),
+    ("Complete the look", "Styling"),
+    # --- Similarity ---
+    ("Similar to this jacket but cheaper", "Similarity"),
+    ("Similar to this dress but longer", "Similarity"),
+    ("Similar but with sleeves", "Similarity"),
+    ("Same style but in black", "Similarity"),
+    ("Same but more modest", "Similarity"),
+    ("Same but less bodycon", "Similarity"),
+    ("Dupes for this", "Similarity"),
+    ("Something like this from Zara", "Similarity / Brand"),
+    ("Something like Aritzia effortless pants", "Similarity / Brand"),
+    ("Reformation-style floral midi", "Similarity / Brand"),
+    ("Skims-like bodysuit but thicker", "Similarity / Brand"),
+    ("Lululemon dupe leggings", "Similarity / Brand"),
+    # --- Brand ---
+    ("Aritzia-style basics", "Brand"),
+    ("Anthropologie boho dress", "Brand"),
+    ("COS minimalist dress", "Brand"),
+    ("Zara blazer", "Brand"),
+    ("H&M satin skirt", "Brand"),
+    ("Abercrombie jeans curve love", "Brand"),
+    ("Levi's 501 style jeans", "Brand"),
+    ("Sézane cardigan style", "Brand"),
+    ("Sandro-style tweed jacket", "Brand"),
+    ("Like The Row vibes", "Brand"),
+    ("Skims dupe", "Brand"),
+    ("Reformation dupe", "Brand"),
+    # --- Price / deals ---
+    ("Under $50 date night dress", "Price"),
+    ("Affordable work pants", "Price"),
+    ("On sale coats", "Deals"),
+    ("Best value basics", "Price"),
+    ("Cheap but doesn't look cheap", "Price"),
+    ("Designer-looking baggy jeans under $80", "Price"),
+    ("Wedding guest dresses under $100", "Price"),
+    ("Only show items on sale", "Deals"),
+    ("Discounted matching sets", "Deals"),
+    ("Clearance party dresses", "Deals"),
+    # --- Fabric / feel ---
+    ("100% cotton t-shirt", "Fabric"),
+    ("Linen pants not see-through", "Fabric"),
+    ("Wool coat", "Fabric"),
+    ("Cashmere sweater", "Fabric"),
+    ("Silk blouse", "Fabric"),
+    ("Non-itchy sweater", "Fabric / Comfort"),
+    ("Soft loungewear", "Fabric / Comfort"),
+    ("Breathable fabrics", "Fabric"),
+    ("Sweat-wicking top", "Fabric / Performance"),
+    ("Quick dry shorts", "Fabric / Performance"),
+    ("Stretchy but structured pants", "Fabric / Fit"),
+    ("No pilling knit", "Fabric / Care"),
+    ("Machine washable blazer", "Fabric / Care"),
+    ("Wrinkle resistant dress", "Fabric / Care"),
+    # --- Constraints / features ---
+    ("With pockets", "Constraints"),
+    ("With belt loops", "Constraints"),
+    ("With adjustable straps", "Constraints"),
+    ("With built in shorts", "Constraints"),
+    ("With lining", "Constraints"),
+    ("Double lined", "Constraints"),
+    ("No polyester", "Constraints"),
+    ("No itchy material", "Constraints"),
+    ("No dry clean", "Constraints"),
+    ("No rips / no distressing", "Constraints"),
+    ("No logos", "Constraints"),
+    ("No shoulder pads", "Constraints"),
+    ("No slit", "Constraints"),
+    ("No low back", "Constraints"),
+    # --- Sizing ---
+    ("Runs small?", "Sizing"),
+    ("True to size?", "Sizing"),
+    ("I'm between sizes", "Sizing"),
+    ("I'm 5'3 which length should I get", "Sizing"),
+    ("Petite friendly", "Sizing"),
+    ("Tall friendly", "Sizing"),
+    ("Plus size options", "Sizing"),
+    ("What size should I buy", "Sizing"),
+    ("This brand sizing is weird", "Sizing"),
+    ("Something that fits a 34DD", "Sizing"),
+    # --- Stress test ---
+    ("black mini going out", "Stress Test"),
+    ("top for jeans cute", "Stress Test"),
+    ("wedding guest dress not ugly", "Stress Test"),
+    ("coat warm cute", "Stress Test"),
+    ("jeans no gap waist", "Stress Test"),
+    ("not itchy sweater pls", "Stress Test"),
+    ("need something last minute", "Stress Test"),
+    ("something like this but long sleeve", "Stress Test"),
+    ("tight but not too tight", "Stress Test"),
+    ("formal but chill", "Stress Test"),
+    ("office but hot", "Stress Test"),
+    ("zip pockets jacket", "Stress Test"),
+    # --- Dialogue / natural language ---
+    ("Help me find a top that will be good for a work dinner but still cute", "Dialogue"),
+    ("I need a jacket that has zippered pockets and looks minimal and modern", "Dialogue"),
+    ("I need a dress that's flattering but I don't want to show my arms", "Dialogue"),
+    ("I want pants that look tailored but feel like sweatpants", "Dialogue"),
+    ("I'm going to a wedding and want something elegant not too revealing and not super expensive", "Dialogue"),
+    ("I want a cardigan that looks expensive and isn't itchy", "Dialogue"),
+    ("I need a going-out top that isn't cropped and doesn't show cleavage", "Dialogue"),
+    ("Find me a travel outfit that's comfortable and still looks put together", "Dialogue"),
+    ("I need a blazer that doesn't look boxy on me", "Dialogue"),
+    ("I want an outfit for cold weather that still looks cute for a night out", "Dialogue"),
 ]
 
-CATEGORIES = [
-    "Coverage",
-    "Coverage",
-    "Occasion",
-    "Occasion / Work",
-    "Aesthetic / Vibe",
-    "Aesthetic / Vibe",
-    "Concrete Attribute",
-    "Concrete Attribute",
-    "Concrete Attribute",
-    "Concrete Attribute",
-    "Fit / Body Type",
-    "Modesty",
-    "Color",
-    "Season / Weather",
-    "Season / Weather",
-    "Brand / Similarity",
-    "Price",
-    "Fabric",
-    "Stress Test",
-    "Dialogue",
-]
+QUERIES = [q for q, _ in _QUERY_DATA]
+CATEGORIES = [c for _, c in _QUERY_DATA]
 
 TOP_N = 8
 
@@ -90,7 +311,7 @@ def run_tests():
 
     for idx, query in enumerate(QUERIES):
         i = idx + 1
-        print(f"[{i:2d}/20] Searching: \"{query}\"...", end=" ", flush=True)
+        print(f"[{i:3d}/{len(QUERIES)}] Searching: \"{query}\"...", end=" ", flush=True)
 
         request = HybridSearchRequest(
             query=query,
@@ -567,7 +788,7 @@ body {{
 <div class="container">
     <div class="header">
         <h1>LLM Query Planner - Search Results</h1>
-        <p>20 semantic queries tested through the full hybrid pipeline (Algolia + FashionCLIP + RRF) with gpt-4o-mini query planner</p>
+        <p>{len(results)} real-world user queries tested through the full hybrid pipeline with gpt-4o-mini query planner</p>
         <p style="margin-top:4px;color:var(--text2);font-size:12px;">{datetime.now().strftime("%B %d, %Y at %H:%M")}</p>
     </div>
 
