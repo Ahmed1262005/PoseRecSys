@@ -2781,6 +2781,25 @@ def tab6_apply_filters(
 
     # Filter directly on flat dicts (no RealCandidate needed)
     matched_flats = [f for f in pool if _flat_matches_filters(f, filters)]
+
+    # Deduplicate: remove items with same name or same image URL
+    _seen_names: set[str] = set()
+    _seen_images: set[str] = set()
+    deduped: list[dict] = []
+    for f in matched_flats:
+        name_key = (f.get("name") or "").strip().lower()
+        img_key = (f.get("image_url") or "").strip()
+        if name_key and name_key in _seen_names:
+            continue
+        if img_key and img_key in _seen_images:
+            continue
+        if name_key:
+            _seen_names.add(name_key)
+        if img_key:
+            _seen_images.add(img_key)
+        deduped.append(f)
+    matched_flats = deduped
+
     n = len(matched_flats)
     elapsed = time.time() - t0
 
