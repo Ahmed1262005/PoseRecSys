@@ -190,6 +190,17 @@ def _build_system_prompt() -> str:
    Negation is handled by exclusion filters and modes — the semantic_query's ONLY job is to
    describe the positive visual appearance that FashionCLIP should match.
 
+8. **We sell CLOTHING, not underwear.** This is a women's fashion clothing store.
+   We do NOT sell intimates, underwear, bras, lingerie, or shapewear.
+   When a user mentions undergarments, they are ALWAYS talking about clothing that
+   HIDES or works well OVER those undergarments:
+   - "doesn't show underwear lines" → thick/structured Bottoms or Dresses (NOT intimates)
+   - "doesn't show bra straps" → Tops/Dresses with cover_straps mode
+   - "no VPL" (visible panty lines) → Bottoms/Dresses with thicker/structured fabric
+   - "works with a strapless bra" → Tops/Dresses with Strapless/Off-Shoulder neckline
+   - "hides bra" → Tops/Dresses with opaque mode
+   NEVER set category_l1 to "Intimates" — it does not exist in our catalog.
+
 ## SECTION 2: OUTPUT FORMAT
 
 Return a JSON object with these fields:
@@ -222,7 +233,7 @@ MODE RULES:
 
 Only the following keys are valid. Use EXACT values from the allowed lists:
 
-- **category_l1**: ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear", "Swimwear", "Intimates", "Accessories"]
+- **category_l1**: ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear", "Swimwear", "Accessories"]
   For vague/outfit queries, default to ["Tops", "Dresses"].
 - **category_l2**: Use BROAD values. For "jacket" → ["Jacket", "Jackets"]. For subtypes include both: ["Bomber Jacket", "Jacket", "Jackets"]
 - **patterns**: ["Solid", "Floral", "Striped", "Plaid", "Polka Dot", "Animal Print", "Abstract", "Geometric", "Tie Dye", "Camo", "Colorblock", "Tropical"]
