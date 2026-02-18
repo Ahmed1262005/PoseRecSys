@@ -237,7 +237,7 @@ class Settings(BaseSettings):
         description="Enable LLM query planner (falls back to regex if disabled or fails)"
     )
     query_planner_timeout_seconds: float = Field(
-        default=10.0,
+        default=15.0,
         description="Timeout for LLM query planner call (seconds)"
     )
 
