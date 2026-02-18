@@ -147,11 +147,15 @@ FASHION REASONING PRINCIPLES:
    - formality: ["Smart Casual", "Business Casual"]
    - Materials that read expensive in expanded_filters: ["Silk", "Satin", "Wool", "Linen"]
 
-4. **"Outfit" queries are about the hero piece, not bottoms.** When someone asks for "an outfit
-   for X" or "something for X", they're looking for tops, dresses, or outerwear — the pieces
-   that define a look. Bottoms (pants, jeans, skirts) are supporting pieces. Only include
-   "Bottoms" in category_l1 when the user explicitly mentions pants, jeans, shorts, skirts,
-   trousers, or bottoms.
+4. **Infer the garment type from context.** Every query has clues about what the user is looking for:
+   - "Outfit" / "something for X" queries → hero pieces: ["Tops", "Dresses"]. Only include
+     "Bottoms" when the user explicitly mentions pants, jeans, shorts, skirts, or trousers.
+   - Garment features imply garment types — use fashion knowledge to set category_l1:
+     Slit, hemline, train, bodice → Dresses. Rise, inseam, leg → Bottoms.
+     Collar, cuff, button-up → Tops. Hood, zipper, layering → Outerwear.
+   - When the user says "no [feature]" without naming a garment, infer the garment type
+     that feature belongs to. "No slit" → the user wants dresses without slits.
+     "No pleats" → they're likely looking at pants or skirts.
 
 You must return a JSON object with these fields:
 
@@ -347,10 +351,14 @@ class QueryPlanner:
     def enabled(self) -> bool:
         return self._enabled
 
+    _MAX_RETRIES = 2
+    _RETRY_BACKOFF_SECONDS = [6, 12]  # Wait times for retry 1, 2
+
     def plan(self, query: str) -> Optional[SearchPlan]:
         """
         Generate a search plan for the given query.
 
+        Retries on rate-limit (429) errors with exponential backoff.
         Returns None if the planner is disabled, times out, or fails.
         The caller should fall back to regex-based extraction.
         """
@@ -359,71 +367,90 @@ class QueryPlanner:
             return None
 
         t_start = time.time()
-        try:
-            response = self.client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": query},
-                ],
-                temperature=0.0,
-                max_tokens=800,
-                response_format={"type": "json_object"},
-            )
+        last_error = None
 
-            raw = response.choices[0].message.content
-            if not raw:
-                logger.warning("Query planner returned empty response")
-                return None
-
-            data = json.loads(raw)
-
-            # Fix common LLM mistake: nesting exclude_filters inside filters
-            filters = data.get("filters", {})
-            if isinstance(filters, dict) and "exclude_filters" in filters:
-                nested_excl = filters.pop("exclude_filters")
-                # Merge into top-level exclude_filters (don't overwrite)
-                if isinstance(nested_excl, dict):
-                    existing = data.get("exclude_filters", {})
-                    if not isinstance(existing, dict):
-                        existing = {}
-                    for k, v in nested_excl.items():
-                        if k not in existing and isinstance(v, list):
-                            existing[k] = v
-                    data["exclude_filters"] = existing
-                logger.debug(
-                    "Extracted misplaced exclude_filters from filters dict",
-                    extracted=data.get("exclude_filters"),
+        for attempt in range(1 + self._MAX_RETRIES):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": query},
+                    ],
+                    temperature=0.0,
+                    max_tokens=800,
+                    response_format={"type": "json_object"},
                 )
 
-            plan = SearchPlan(**data)
+                raw = response.choices[0].message.content
+                if not raw:
+                    logger.warning("Query planner returned empty response")
+                    return None
 
-            latency_ms = int((time.time() - t_start) * 1000)
-            logger.info(
-                "Query planner generated search plan",
-                query=query,
-                intent=plan.intent,
-                algolia_query=plan.algolia_query,
-                semantic_query=plan.semantic_query,
-                filters=plan.filters,
-                exclude_filters=plan.exclude_filters,
-                expanded_filters=plan.expanded_filters,
-                confidence=plan.confidence,
-                latency_ms=latency_ms,
-            )
-            return plan
+                data = json.loads(raw)
 
-        except json.JSONDecodeError as e:
-            logger.warning("Query planner returned invalid JSON", error=str(e))
-            return None
-        except Exception as e:
-            latency_ms = int((time.time() - t_start) * 1000)
-            logger.warning(
-                "Query planner failed, falling back to regex",
-                error=str(e),
-                latency_ms=latency_ms,
-            )
-            return None
+                # Fix common LLM mistake: nesting exclude_filters inside filters
+                filters = data.get("filters", {})
+                if isinstance(filters, dict) and "exclude_filters" in filters:
+                    nested_excl = filters.pop("exclude_filters")
+                    # Merge into top-level exclude_filters (don't overwrite)
+                    if isinstance(nested_excl, dict):
+                        existing = data.get("exclude_filters", {})
+                        if not isinstance(existing, dict):
+                            existing = {}
+                        for k, v in nested_excl.items():
+                            if k not in existing and isinstance(v, list):
+                                existing[k] = v
+                        data["exclude_filters"] = existing
+                    logger.debug(
+                        "Extracted misplaced exclude_filters from filters dict",
+                        extracted=data.get("exclude_filters"),
+                    )
+
+                plan = SearchPlan(**data)
+
+                latency_ms = int((time.time() - t_start) * 1000)
+                logger.info(
+                    "Query planner generated search plan",
+                    query=query,
+                    intent=plan.intent,
+                    algolia_query=plan.algolia_query,
+                    semantic_query=plan.semantic_query,
+                    filters=plan.filters,
+                    exclude_filters=plan.exclude_filters,
+                    expanded_filters=plan.expanded_filters,
+                    confidence=plan.confidence,
+                    latency_ms=latency_ms,
+                )
+                return plan
+
+            except json.JSONDecodeError as e:
+                logger.warning("Query planner returned invalid JSON", error=str(e))
+                return None
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                # Retry on rate-limit (429) errors
+                if "429" in error_str and attempt < self._MAX_RETRIES:
+                    wait = self._RETRY_BACKOFF_SECONDS[attempt]
+                    logger.info(
+                        "Query planner rate-limited, retrying",
+                        attempt=attempt + 1,
+                        wait_seconds=wait,
+                        query=query,
+                    )
+                    time.sleep(wait)
+                    continue
+                # Non-retryable error or out of retries
+                break
+
+        latency_ms = int((time.time() - t_start) * 1000)
+        logger.warning(
+            "Query planner failed, falling back to regex",
+            error=str(last_error),
+            latency_ms=latency_ms,
+        )
+        return None
 
     def plan_to_request_updates(
         self, plan: SearchPlan
