@@ -2606,16 +2606,34 @@ class TestProgressiveRelaxation:
         """Multi-value exclusions should also respect drop_nulls=False."""
         service = self._get_service()
         results = [
-            self._make_result(product_id="p1", materials=None),
-            self._make_result(product_id="p2", materials=["cotton"]),
-            self._make_result(product_id="p3", materials=["polyester", "sheer"]),
+            self._make_result(product_id="p1", style_tags=None),
+            self._make_result(product_id="p2", style_tags=["Classic"]),
+            self._make_result(product_id="p3", style_tags=["Backless", "Trendy"]),
         ]
-        request = self._make_request(exclude_materials=["sheer"])
+        request = self._make_request(exclude_style_tags=["Backless"])
         filtered = service._apply_exclusion_filters(results, request, drop_nulls=False)
-        # p1 kept (None, lenient), p2 kept (cotton), p3 dropped (has sheer)
+        # p1 kept (None, lenient), p2 kept (Classic), p3 dropped (has Backless)
         assert len(filtered) == 2
         ids = {r["product_id"] for r in filtered}
         assert ids == {"p1", "p2"}
+
+    def test_exclusion_materials_checks_apparent_fabric(self):
+        """exclude_materials should check the apparent_fabric field (single-value)."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", apparent_fabric="Mesh"),
+            self._make_result(product_id="p2", apparent_fabric="Cotton"),
+            self._make_result(product_id="p3", apparent_fabric=None),
+        ]
+        request = self._make_request(exclude_materials=["Mesh", "Lace"])
+        # Strict: p1 dropped (Mesh), p2 kept, p3 dropped (None)
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=True)
+        assert len(filtered) == 1
+        assert filtered[0]["product_id"] == "p2"
+        # Lenient: p1 dropped (Mesh), p2 kept, p3 kept (None lenient)
+        filtered_lenient = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        ids = {r["product_id"] for r in filtered_lenient}
+        assert ids == {"p2", "p3"}
 
     def test_exclusion_still_drops_matching_values_when_lenient(self):
         """Even with drop_nulls=False, actual matching values must still be excluded."""
@@ -2651,6 +2669,46 @@ class TestProgressiveRelaxation:
             request, drop_nulls=False,
         )
         assert len(lenient) == 2
+
+    def test_exclusion_multi_field_empty_list_passes(self):
+        """An empty list [] for a multi-value field should PASS exclusion filters.
+
+        Empty style_tags=[] means 'no tags', NOT 'unknown'. A product with no
+        style_tags does NOT contain 'Backless', so it should not be dropped.
+        This is critical for queries like 'cover my back' where cover_back mode
+        excludes style_tags: [Backless, Open Back, Low Back].
+        """
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", style_tags=[]),           # empty list — should PASS
+            self._make_result(product_id="p2", style_tags=None),         # None — should be dropped (strict)
+            self._make_result(product_id="p3", style_tags=["Classic"]),  # no match — should PASS
+            self._make_result(product_id="p4", style_tags=["Backless"]), # match — should be DROPPED
+        ]
+        request = self._make_request(exclude_style_tags=["Backless", "Open Back"])
+
+        # Strict mode (drop_nulls=True): empty list passes, None dropped, match dropped
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=True)
+        ids = {r["product_id"] for r in filtered}
+        assert ids == {"p1", "p3"}, f"Expected p1,p3 but got {ids}"
+
+        # Lenient mode (drop_nulls=False): None kept, empty list passes, match dropped
+        filtered_lenient = service._apply_exclusion_filters(results, request, drop_nulls=False)
+        ids_lenient = {r["product_id"] for r in filtered_lenient}
+        assert ids_lenient == {"p1", "p2", "p3"}, f"Expected p1,p2,p3 but got {ids_lenient}"
+
+    def test_exclusion_multi_field_empty_occasions_passes(self):
+        """Empty occasions list should pass exclusion filter too."""
+        service = self._get_service()
+        results = [
+            self._make_result(product_id="p1", occasions=[]),
+            self._make_result(product_id="p2", occasions=["Party"]),
+            self._make_result(product_id="p3", occasions=["Work", "Office"]),
+        ]
+        request = self._make_request(exclude_occasions=["Party"])
+        filtered = service._apply_exclusion_filters(results, request, drop_nulls=True)
+        ids = {r["product_id"] for r in filtered}
+        assert ids == {"p1", "p3"}, f"Expected p1,p3 but got {ids}"
 
     def test_no_exclusions_no_relaxation_needed(self):
         """Without exclusion filters, progressive relaxation should not trigger."""

@@ -229,7 +229,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     openai_api_key: str = Field(default="", description="OpenAI API key for LLM query planner")
     query_planner_model: str = Field(
-        default="gpt-4o",
+        default="gpt-5",
         description="OpenAI model for query planning"
     )
     query_planner_enabled: bool = Field(
@@ -237,7 +237,7 @@ class Settings(BaseSettings):
         description="Enable LLM query planner (falls back to regex if disabled or fails)"
     )
     query_planner_timeout_seconds: float = Field(
-        default=15.0,
+        default=90.0,
         description="Timeout for LLM query planner call (seconds)"
     )
 

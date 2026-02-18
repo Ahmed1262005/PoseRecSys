@@ -61,15 +61,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup: Initialize resources here if needed
     # Engines are lazy-loaded on first request
     
-    # Load brand names for search query classification
-    try:
-        from config.database import get_supabase_client
-        from search.query_classifier import load_brands
-        supabase = get_supabase_client()
-        brands = load_brands(supabase)
-        logger.info(f"Loaded {len(brands)} brand names for search classifier")
-    except Exception as e:
-        logger.warning(f"Could not load brands for search classifier: {e}")
+    # Brand loading no longer needed — LLM planner handles brand detection
+    # (query_classifier regex pipeline has been replaced by mode-based planner)
     
     yield  # Application is running
     

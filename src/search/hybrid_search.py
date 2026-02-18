@@ -21,7 +21,7 @@ from core.logging import get_logger
 from core.utils import filter_gallery_images
 from config.settings import get_settings
 from search.algolia_client import AlgoliaClient, get_algolia_client
-from search.query_classifier import QueryClassifier, QueryIntent
+from search.mode_config import get_rrf_weights
 from search.query_planner import QueryPlanner, SearchPlan, get_query_planner
 from search.reranker import SessionReranker
 from search.analytics import SearchAnalytics, get_search_analytics
@@ -32,6 +32,7 @@ from search.models import (
     HybridSearchResponse,
     ProductResult,
     PaginationInfo,
+    QueryIntent,
     SortBy,
 )
 
@@ -59,7 +60,6 @@ class HybridSearchService:
         self._algolia = algolia_client
         self._analytics = analytics
         self._reranker = SessionReranker()
-        self._classifier = QueryClassifier()
         self._planner = get_query_planner()
 
         # Lazy-load FashionCLIP search engine
@@ -143,6 +143,7 @@ class HybridSearchService:
         search_plan: Optional[SearchPlan] = None
         expanded_filters: Dict[str, List[str]] = {}
         semantic_query_override: Optional[str] = None
+        name_exclusions: List[str] = []
 
         t_plan = time.time()
         search_plan = self._planner.plan(request.query)
@@ -165,8 +166,11 @@ class HybridSearchService:
             intent = _INTENT_MAP.get(intent_str, QueryIntent.SPECIFIC)
 
             # Get RRF weights for the intent
-            algolia_weight = self._classifier.get_algolia_weight(intent)
-            semantic_weight = self._classifier.get_semantic_weight(intent)
+            algolia_weight, semantic_weight = get_rrf_weights(intent_str)
+
+            # Extract name exclusions before applying to request
+            # (not a real request field — internal to the pipeline)
+            name_exclusions = plan_updates.pop("_name_exclusions", [])
 
             # Apply planner filters (only fields the user hasn't set explicitly)
             updates = {}
@@ -184,37 +188,26 @@ class HybridSearchService:
                     algolia_query=algolia_query,
                     semantic_query=semantic_query_override,
                 )
+
+            # Stash plan details in timing for debugging/HTML reports
+            timing["plan_modes"] = search_plan.modes
+            timing["plan_attributes"] = search_plan.attributes
+            timing["plan_avoid"] = search_plan.avoid
+            timing["plan_algolia_query"] = algolia_query
+            timing["plan_semantic_query"] = semantic_query_override
+            timing["plan_applied_filters"] = updates
+            timing["plan_exclusions"] = exclude_filters_from_plan
+            if name_exclusions:
+                timing["plan_name_exclusions"] = name_exclusions
         else:
-            # --- Fallback: regex-based extraction ---
-            logger.info("Using regex fallback for query understanding", query=request.query)
+            # --- Fallback: basic search (no regex, no filter extraction) ---
+            logger.info("Planner unavailable, using basic search", query=request.query)
 
-            intent = self._classifier.classify(request.query)
-            algolia_weight = self._classifier.get_algolia_weight(intent)
-            semantic_weight = self._classifier.get_semantic_weight(intent)
+            intent = QueryIntent.SPECIFIC
+            algolia_weight, semantic_weight = get_rrf_weights("specific")
 
-            # Brand injection for exact matches
-            if intent == QueryIntent.EXACT:
-                matched_brand = self._classifier.extract_brand(request.query)
-                if matched_brand and not request.brands:
-                    request = request.model_copy(update={"brands": [matched_brand]})
-
-            # Regex attribute extraction
-            extracted, matched_terms = self._classifier.extract_attributes(request.query)
-            if extracted:
-                updates = {}
-                for field, values in extracted.items():
-                    if not getattr(request, field, None):
-                        updates[field] = values
-                if updates:
-                    request = request.model_copy(update=updates)
-                    logger.info(
-                        "Regex-extracted attribute filters from query",
-                        query=request.query,
-                        extracted=updates,
-                    )
-
-            # Clean query for Algolia (strip meta-terms + extracted terms)
-            algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
+            # Use raw query for Algolia (clean meta-terms only, no extracted terms)
+            algolia_query = self._clean_query_for_algolia(request.query)
 
         # Allow request-level override of semantic weight.
         _SEMANTIC_BOOST_DEFAULT = 0.4
@@ -456,6 +449,28 @@ class HybridSearchService:
                         before=pre_count,
                     )
 
+        # Step 5c: Name-based exclusion filter.
+        # Catches products where the product name says "backless" or "open back"
+        # but the style_tags attribute is empty/null (data quality gap).
+        # Applied AFTER attribute-based exclusion, so it's a safety net.
+        if name_exclusions and merged:
+            pre_name_count = len(merged)
+            merged = [
+                r for r in merged
+                if not any(
+                    excl in (r.get("name") or "").lower()
+                    for excl in name_exclusions
+                )
+            ]
+            if len(merged) < pre_name_count:
+                logger.info(
+                    "Name-based exclusion filter caught items",
+                    before=pre_name_count,
+                    after=len(merged),
+                    dropped=pre_name_count - len(merged),
+                    patterns=name_exclusions,
+                )
+
         # Step 6: Rerank with session/profile + context scoring
         # For EXACT brand queries, disable brand diversity cap — the user
         # explicitly searched for that brand and expects all results from it.
@@ -544,28 +559,43 @@ class HybridSearchService:
             logger.warning("No replica for sort_by=%s, falling back to relevance", request.sort_by)
             replica_index = self.algolia.index_name
 
-        # Classify intent (still useful for brand injection + query cleaning)
-        intent = self._classifier.classify(request.query)
+        # Use LLM planner for query understanding (brand, filters, query optimization)
+        intent = QueryIntent.SPECIFIC  # default
+        algolia_query = request.query
 
-        # Brand injection for exact brand queries
-        matched_brand = None
-        if intent == QueryIntent.EXACT:
-            matched_brand = self._classifier.extract_brand(request.query)
-            if matched_brand and not request.brands:
-                request = request.model_copy(update={"brands": [matched_brand]})
+        t_plan = time.time()
+        search_plan = self._planner.plan(request.query)
+        timing["planner_ms"] = int((time.time() - t_plan) * 1000)
 
-        # Extract attribute filters from query text
-        extracted, matched_terms = self._classifier.extract_attributes(request.query)
-        if extracted:
+        if search_plan is not None:
+            (
+                plan_updates, _, _, _,
+                algolia_query_from_plan, _, intent_str,
+            ) = self._planner.plan_to_request_updates(search_plan)
+
+            _INTENT_MAP = {"exact": QueryIntent.EXACT, "specific": QueryIntent.SPECIFIC, "vague": QueryIntent.VAGUE}
+            intent = _INTENT_MAP.get(intent_str, QueryIntent.SPECIFIC)
+
+            # Apply planner filters (only fields the user hasn't set explicitly)
             updates = {}
-            for field, values in extracted.items():
+            for field, values in plan_updates.items():
                 if not getattr(request, field, None):
                     updates[field] = values
             if updates:
                 request = request.model_copy(update=updates)
+                logger.info(
+                    "LLM planner applied filters for sorted search",
+                    query=request.query,
+                    filters=updates,
+                    sort_by=request.sort_by.value,
+                )
 
-        # Clean query + build filters (same as the relevance path)
-        algolia_query = self._clean_query_for_algolia(request.query, matched_terms)
+            if algolia_query_from_plan:
+                algolia_query = algolia_query_from_plan
+        else:
+            # Planner failed — use raw query with meta-term cleaning only
+            algolia_query = self._clean_query_for_algolia(request.query)
+
         algolia_filters = self._build_algolia_filters(request)
 
         # Search the replica with Algolia-native pagination
@@ -1597,10 +1627,10 @@ class HybridSearchService:
         ("exclude_colors", "primary_color"),
         ("exclude_formality", "formality"),
         ("exclude_rise", "rise"),
+        ("exclude_materials", "apparent_fabric"),  # single-value Gemini attribute
     ]
 
     _EXCLUDE_MULTI_FIELDS = [
-        ("exclude_materials", "materials"),
         ("exclude_occasions", "occasions"),
         ("exclude_seasons", "seasons"),
         ("exclude_style_tags", "style_tags"),
@@ -1658,6 +1688,10 @@ class HybridSearchService:
                 ]
 
         # Multi-value exclusions
+        # For multi-value fields (style_tags, occasions, materials, seasons),
+        # an empty list [] means "no values" — NOT "unknown". A product with
+        # style_tags=[] does NOT contain "Backless", so it should PASS the
+        # exclusion filter. Only treat None as truly unknown/null.
         for req_field, data_field in self._EXCLUDE_MULTI_FIELDS:
             exclude_vals = getattr(request, req_field, None)
             if not exclude_vals:
@@ -1666,14 +1700,18 @@ class HybridSearchService:
             if drop_nulls:
                 filtered = [
                     r for r in filtered
-                    if not _is_null(r.get(data_field))
-                    and not any(v.lower() in vals for v in r[data_field])
+                    if (
+                        # None means truly unknown — drop when drop_nulls=True
+                        r.get(data_field) is not None
+                        # Empty list [] means no tags — passes exclusion
+                        and not any(v.lower() in vals for v in r[data_field])
+                    )
                 ]
             else:
                 # Lenient: keep items with null/missing values
                 filtered = [
                     r for r in filtered
-                    if _is_null(r.get(data_field))
+                    if r.get(data_field) is None
                     or not any(v.lower() in vals for v in r[data_field])
                 ]
 
