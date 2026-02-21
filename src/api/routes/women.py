@@ -19,6 +19,7 @@ from engines import (
     get_search_engine,
     PredictivePreferences,
 )
+from services.outfit_engine import get_outfit_engine
 from services.session_manager import get_women_session_manager
 
 
@@ -412,20 +413,20 @@ class CompleteFitRequest(BaseModel):
     for that category only (use `offset`/`limit` for infinite scroll).
     """
 )
-async def complete_fit(
+def complete_fit(
     request: CompleteFitRequest,
     user: SupabaseUser = Depends(require_auth),
 ) -> Dict[str, Any]:
-    """Find complementary items using FashionCLIP semantic search."""
+    """Find complementary items using TATTOO 9-dimension scoring."""
     try:
-        search_engine = get_search_engine()
+        engine = get_outfit_engine()
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Search engine not available: {str(e)}"
+            detail=f"Outfit engine not available: {str(e)}"
         )
 
-    result = search_engine.complete_the_fit(
+    result = engine.build_outfit(
         product_id=request.product_id,
         items_per_category=request.items_per_category,
         target_category=request.category,
@@ -438,7 +439,7 @@ async def complete_fit(
             raise HTTPException(status_code=404, detail=result["error"])
         raise HTTPException(status_code=500, detail=result["error"])
 
-    return convert_numpy(result)
+    return result
 
 
 # =============================================================================

@@ -331,65 +331,39 @@ async def get_feed(
     - Continue until `has_more=false`
     """
 )
-async def get_similar(
+def get_similar(
     product_id: str,
-    gender: str = Query("female", description="Gender filter"),
-    category: Optional[str] = Query(None, description="Category filter"),
+    gender: str = Query("female", description="Gender filter (kept for backwards compatibility)"),
+    category: Optional[str] = Query(None, description="Category filter (kept for backwards compatibility)"),
     limit: int = Query(20, ge=1, le=100, description="Number of results"),
     offset: int = Query(0, ge=0, description="Number of results to skip (for pagination)"),
     user: SupabaseUser = Depends(require_auth),
 ):
-    """Get similar products with pagination support."""
+    """Get similar products with TATTOO 9-dimension scoring and pagination."""
+    from services.outfit_engine import get_outfit_engine
 
-    service = get_service()
+    try:
+        engine = get_outfit_engine()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Outfit engine not available: {str(e)}"
+        )
 
-    results = service.get_similar_products(
+    result = engine.get_similar_scored(
         product_id=product_id,
-        gender=gender,
-        category=category,
         limit=limit,
-        offset=offset
+        offset=offset,
     )
 
-    if not results and offset == 0:
-        # Check if product exists (only on first page)
-        product = service.get_product(product_id)
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {product_id}")
-        # Product exists but no embedding
-        return {
-            "product_id": product_id,
-            "results": [],
-            "pagination": {
-                "offset": offset,
-                "limit": limit,
-                "returned": 0,
-                "has_more": False
-            },
-            "message": "Product has no embedding for similarity search"
-        }
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Product not found: {product_id}")
 
-    # Add rank to each result (1-indexed, continuous across pages)
-    ranked_results = []
-    for i, item in enumerate(results):
-        ranked_results.append(sanitize_product_images({
-            **item,
-            "rank": offset + i + 1
-        }))
+    # Sanitize image URLs in results
+    for item in result.get("results", []):
+        sanitize_product_images(item)
 
-    # Check if there are more results
-    has_more = len(results) == limit
-
-    return {
-        "product_id": product_id,
-        "results": ranked_results,
-        "pagination": {
-            "offset": offset,
-            "limit": limit,
-            "returned": len(ranked_results),
-            "has_more": has_more
-        }
-    }
+    return result
 
 
 @router.get(
