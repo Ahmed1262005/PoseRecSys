@@ -799,6 +799,14 @@ _ACTIVEWEAR_L2_TO_BROAD: Dict[str, str] = {
 _ACTIVEWEAR_OCCASIONS = {"workout", "gym", "exercise", "training"}
 _ACTIVEWEAR_STYLE_TAGS = {"activewear", "athletic"}
 
+# Tops L2 types that already function as an outer layer — skip outerwear recs
+_OUTER_LAYER_TOP_L2 = {
+    "hoodie", "sweatshirt", "sweater", "cardigan", "vest",
+}
+
+# Outerwear L2 types that are really waistcoats/vests — exclude from outerwear results
+_OUTERWEAR_WAISTCOAT_L2 = {"vest", "hoodie"}
+
 _NON_OUTFIT_L1 = {"intimates", "swimwear", "accessories", "shoes", "other"}
 _NON_OUTFIT_L2 = {
     "pajama", "sleepwear", "nightgown", "robe", "underwear", "lingerie",
@@ -871,6 +879,16 @@ def _is_activewear_compatible(profile: AestheticProfile) -> bool:
     return bool(occ & _ACTIVEWEAR_OCCASIONS or sty & _ACTIVEWEAR_STYLE_TAGS)
 
 
+def _is_outer_layer_top(profile: AestheticProfile) -> bool:
+    """True if this top already functions as an outer layer (hoodie, sweater, etc.)."""
+    l2 = (profile.gemini_category_l2 or "").lower().strip()
+    if l2 in _OUTER_LAYER_TOP_L2:
+        return True
+    # Fallback: check product name for hoodie/sweatshirt/sweater/cardigan
+    name = (profile.name or "").lower()
+    return bool(re.search(r'\b(hoodie|sweatshirt|sweater|cardigan)\b', name))
+
+
 def get_complementary_targets(
     source_broad: str, source_profile: AestheticProfile,
 ) -> Tuple[List[str], str]:
@@ -887,9 +905,13 @@ def get_complementary_targets(
             equiv, ["tops", "bottoms", "outerwear"]
         ) if equiv else ["tops", "bottoms", "outerwear"]
         return targets, "activewear"
-    return COMPLEMENTARY_CATEGORIES.get(
+    targets = list(COMPLEMENTARY_CATEGORIES.get(
         source_broad, ["tops", "bottoms", "outerwear"]
-    ), "ok"
+    ))
+    # Tops that already function as outer layers don't need outerwear recs
+    if source_broad == "tops" and _is_outer_layer_top(source_profile):
+        targets = [t for t in targets if t != "outerwear"]
+    return targets, "ok"
 
 
 # =============================================================================
@@ -936,6 +958,11 @@ def _filter_by_gemini_category(
         cand_broad = _gemini_broad(cand.gemini_category_l1)
         if cand_broad and cand_broad != target_broad:
             continue
+        # Exclude waistcoats/vests/hoodies from outerwear results
+        if target_broad == "outerwear":
+            cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
+            if cand_l2 in _OUTERWEAR_WAISTCOAT_L2:
+                continue
         filtered.append(cand)
     return filtered
 
