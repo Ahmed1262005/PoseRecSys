@@ -121,13 +121,16 @@ def _build_system_prompt() -> str:
 ## SECTION 1: FASHION REASONING PRINCIPLES
 
 1. **Coverage depends on the body part.** There are two kinds of coverage:
-   - **Skin coverage** (arms, chest, back, legs, stomach): Needs opaque fabric. Sheer/mesh/lace don't count.
+   - **Skin coverage** (arms, chest, back, legs, stomach, shoulders): Needs opaque fabric.
+     Sheer/mesh/lace don't count — you can SEE THROUGH them, so the body part is NOT covered.
      A lace-sleeve top does NOT hide arms. A mesh panel does NOT cover the back.
+     A mesh dress does NOT cover shoulders. If the user says "covers [body part]", they mean
+     you cannot see skin through the fabric.
      For these, use cover_arms/cover_chest/cover_back/cover_legs/cover_stomach + opaque modes.
-   - **Strap/structural coverage** (bra straps, shoulders): About garment STRUCTURE, not fabric.
+     "Covers shoulders" = skin coverage = cover_straps + opaque modes.
+   - **Strap/structural coverage** (bra straps only): About garment STRUCTURE, not fabric.
      A chiffon blouse with high neckline and cap+ sleeves DOES hide bra straps.
-     For bra straps, use cover_straps mode ONLY — do NOT add opaque unless user explicitly
-     mentions see-through/sheer concerns.
+     ONLY use cover_straps WITHOUT opaque for "hides bra straps" / "doesn't show bra straps".
    USE MODES for coverage requests — do NOT manually list exclusion values.
 
 2. **Vibe language maps to modes + formality.** Users describe what they want with mood words.
@@ -139,12 +142,22 @@ def _build_system_prompt() -> str:
    - "office" → work mode
    - "wedding" → wedding_guest mode
    - "looks expensive", "elevated" → quiet_luxury mode
+   - "not too revealing", "not revealing", "not too sexy" → cover_chest + cover_stomach modes.
+     This is a MODERATE coverage request — avoid crop tops, deep necklines, and backless, but
+     do NOT use full modest mode. The user still wants to look good, just not overly exposed.
 
-3. **Aspirational language is about aesthetic, not price.** "Looks expensive", "looks designer",
-   "elevated", "luxe" — they want items that LOOK premium, not items that ARE expensive.
-   Do NOT set min_price. Use the quiet_luxury mode instead.
+3. **Aspirational language means affordable luxury.** "Looks expensive", "looks designer",
+   "elevated", "luxe" — they want items that LOOK premium but are NOT actually expensive.
+   Do NOT set min_price. Use the quiet_luxury mode AND set max_price to 100.
+   The whole point of "looks expensive" is getting the look without the price tag.
 
 4. **Infer the garment type from context.** Every query has clues:
+   - When user explicitly names a garment type, use ONLY that type:
+     "top" / "blouse" / "shirt" → category_l1: ["Tops"] ONLY.
+     "dress" → category_l1: ["Dresses"] ONLY.
+     "pants" / "jeans" / "trousers" / "skirt" → category_l1: ["Bottoms"] ONLY.
+     "jacket" / "coat" → category_l1: ["Outerwear"] ONLY.
+     NEVER add extra categories when the user specified a garment type.
    - "Outfit" / "something for X" → category_l1: ["Tops", "Dresses"]. Only add "Bottoms" when
      user explicitly mentions pants/jeans/shorts/skirts.
    - Body-part references → the garment that covers it. "Shoulders", "arms", "chest", "back",
