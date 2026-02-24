@@ -8,7 +8,7 @@ Usage:
     PYTHONPATH=src python scripts/generate_outfit_report.py
 """
 
-import os, sys, json, time, html
+import os, sys, json, time, html, random
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -146,10 +146,10 @@ def find_source_product(supabase, query: dict) -> dict | None:
     )
 
     if products.data:
-        # Pick one with a reasonable image
-        for p in products.data:
-            if p.get("primary_image_url") and p.get("name"):
-                return p
+        # Shuffle so each run picks a different product
+        valid = [p for p in products.data if p.get("primary_image_url") and p.get("name")]
+        if valid:
+            return random.choice(valid)
 
     return None
 

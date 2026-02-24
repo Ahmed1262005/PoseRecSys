@@ -1426,7 +1426,7 @@ def _sig_overlap(a: Dict[str, Optional[str]], b: Dict[str, Optional[str]]) -> fl
 
 def _diverse_select(
     scored: List[Dict],
-    diversity_lambda: float = 0.25,
+    diversity_lambda: float = 0.15,
 ) -> List[Dict]:
     """Greedy MMR-style reranking for intra-result diversity.
 
@@ -1437,9 +1437,11 @@ def _diverse_select(
     already in the result list.  This pushes each next pick to be
     different in color, fabric, pattern, silhouette, and brand.
 
-    With λ=0.40, a candidate with 0.65 tattoo but 0.0 overlap beats
-    a candidate with 0.70 tattoo but 0.60 overlap:
-      0.60*0.65 - 0.40*0.0 = 0.39  vs  0.60*0.70 - 0.40*0.60 = 0.18
+    With λ=0.15, diversity is a light tiebreaker — accuracy dominates.
+    A candidate with 0.70 tattoo and 0.60 overlap still beats one with
+    0.65 tattoo and 0.0 overlap:
+      0.85*0.70 - 0.15*0.60 = 0.505  vs  0.85*0.65 - 0.15*0.0 = 0.5525
+    Close enough that the best-scoring items win unless they're near-clones.
     """
     if len(scored) <= 1:
         return scored
@@ -1946,7 +1948,7 @@ class OutfitEngine:
         self,
         prompts: List[str],
         target_category: str,
-        per_prompt: int = 15,
+        per_prompt: int = 8,
     ) -> List[Dict]:
         """
         Run each prompt through FashionCLIP → text_search_products and
@@ -2074,7 +2076,7 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.70*compat + 0.08*novelty + 0.22*cosine",
+                "fusion": "0.65*compat + 0.35*cosine",
                 "engine": "tattoo_v2.1",
             },
             "complete_outfit": {
@@ -2254,7 +2256,7 @@ class OutfitEngine:
         try:
             prompts = self._generate_complement_prompts(source, source_broad, target_broad)
             text_raw = self._retrieve_text_candidates(
-                prompts, target_category=target_db_cats[0], per_prompt=15,
+                prompts, target_category=target_db_cats[0], per_prompt=8,
             )
             # Merge: deduplicate by product_id
             existing_ids = {
@@ -2285,21 +2287,14 @@ class OutfitEngine:
             profiles = _filter_activewear(profiles)
 
         # --- Complement fusion ---
-        # For outfit building the scoring favors TATTOO rules + novelty over
-        # raw cosine similarity.  Cosine rewards items that *look like* the
-        # source — the opposite of what we want for complementary outfits.
+        # Formula:  tattoo = 0.65 * compat + 0.35 * cosine
         #
-        # Formula:  tattoo = 0.70 * compat + 0.15 * novelty + 0.15 * cosine
-        #
-        # The TATTOO dimensions already encode contrast rules (fabric contrast
-        # principle, color harmony, silhouette balance) so giving them 70%
-        # weight lets the fashion rules decide.  The novelty bonus (15%)
-        # explicitly rewards items that bring something visually different
-        # (different color, fabric, texture, pattern).  Cosine (15%) is kept
-        # as a light tie-breaker for visual coherence.
-        W_COMPAT = 0.70
-        W_NOVELTY = 0.08
-        W_COSINE = 0.22
+        # TATTOO rules at 65% encode contrast/complement logic (fabric contrast,
+        # silhouette balance, color harmony).  Cosine at 35% ensures items
+        # visually belong together and the outfit feels coherent.
+        # Novelty is computed for display/debugging but not part of the fusion.
+        W_COMPAT = 0.65
+        W_COSINE = 0.35
 
         scored = []
         for cand in profiles:
@@ -2307,7 +2302,7 @@ class OutfitEngine:
             compat, dims = compute_compatibility_score(source, cand)
             novelty = compute_novelty_score(source, cand)
             cosine = cand.similarity
-            tattoo = W_COMPAT * compat + W_NOVELTY * novelty + W_COSINE * cosine
+            tattoo = W_COMPAT * compat + W_COSINE * cosine
             scored.append({
                 "profile": cand, "compat": compat, "tattoo": tattoo,
                 "cosine": cosine, "novelty": novelty, "dims": dims,
