@@ -63,9 +63,9 @@ FIT_LIMIT = 4
 MAX_WORKERS = 6
 
 DIM_LABELS = {
-    "formality": "FRM", "occasion": "OCC", "color": "CLR",
-    "style": "STY", "season": "SEA", "price": "PRC",
-    "pattern": "PAT", "material": "MAT", "balance": "BAL",
+    "occasion_formality": "OCC", "style": "STY", "fabric": "FAB",
+    "silhouette": "SIL", "color": "CLR", "seasonality": "SEA",
+    "pattern": "PAT", "price": "PRC",
 }
 
 
@@ -226,13 +226,24 @@ def search_products(query, categories, brands, color_families, patterns,
 
 def random_products(count=8):
     sb = get_supabase_client()
-    offset = random.randint(0, 80000)
+    # Fetch products that have Gemini attributes (guarantees embeddings exist
+    # and category classification is available for scoring).
+    # Over-fetch to allow for shuffle, then trim.
+    fetch = int(count) * 3
+    offset = random.randint(0, 70000)
+    attr_r = sb.table("product_attributes").select("sku_id").range(offset, offset + fetch - 1).execute()
+    if not attr_r.data:
+        offset = 0
+        attr_r = sb.table("product_attributes").select("sku_id").range(0, fetch - 1).execute()
+    attr_ids = [row["sku_id"] for row in (attr_r.data or [])]
+    if not attr_ids:
+        return []
     r = sb.table("products").select(PRODUCT_SELECT).eq(
         "in_stock", True
-    ).range(offset, offset + int(count) - 1).execute()
+    ).in_("id", attr_ids).limit(fetch).execute()
     products = r.data or []
     random.shuffle(products)
-    return products
+    return products[:int(count)]
 
 
 def fetch_attrs(product_id):

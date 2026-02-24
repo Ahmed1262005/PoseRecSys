@@ -2173,30 +2173,24 @@ class OutfitEngine:
     def _retrieve_candidates(
         self, source_id: str, target_categories: List[str], limit: int = 60,
     ) -> List[Dict]:
-        """Retrieve candidates via pgvector RPC with fallback."""
-        try:
-            result = self.supabase.rpc("get_complementary_products", {
-                "source_product_id": source_id,
-                "target_categories": target_categories,
-                "match_count": limit,
-            }).execute()
-            return result.data or []
-        except Exception:
-            # Fallback to per-category retrieval
-            all_results = []
-            per_cat = max(10, limit // len(target_categories)) if target_categories else limit
-            for cat in target_categories:
-                try:
-                    result = self.supabase.rpc("get_similar_products_v2", {
-                        "source_product_id": source_id,
-                        "match_count": per_cat,
-                        "match_offset": 0,
-                        "filter_category": cat,
-                    }).execute()
-                    all_results.extend(result.data or [])
-                except Exception as e2:
-                    logger.warning("pgvector fallback failed for %s: %s", cat, e2)
-            return all_results
+        """Retrieve candidates via pgvector similarity search.
+
+        Uses get_similar_products_v2 RPC per target category.
+        """
+        all_results: List[Dict] = []
+        per_cat = max(10, limit // len(target_categories)) if target_categories else limit
+        for cat in target_categories:
+            try:
+                result = self.supabase.rpc("get_similar_products_v2", {
+                    "source_product_id": source_id,
+                    "match_count": per_cat,
+                    "match_offset": 0,
+                    "filter_category": cat,
+                }).execute()
+                all_results.extend(result.data or [])
+            except Exception as e:
+                logger.warning("pgvector retrieval failed for %s: %s", cat, e)
+        return all_results
 
     def _enrich_candidates(self, candidates: List[Dict]) -> List[AestheticProfile]:
         """Batch-fetch Gemini attributes and build AestheticProfiles."""
