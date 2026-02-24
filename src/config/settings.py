@@ -229,7 +229,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     openai_api_key: str = Field(default="", description="OpenAI API key for LLM query planner")
     query_planner_model: str = Field(
-        default="gpt-5-mini",
+        default="gpt-4.1-mini",
         description="OpenAI model for query planning"
     )
     query_planner_enabled: bool = Field(

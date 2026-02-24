@@ -17,6 +17,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
+
 from core.logging import get_logger
 from core.utils import filter_gallery_images
 from config.settings import get_settings
@@ -270,10 +272,13 @@ class HybridSearchService:
         else:
             algolia_filters = self._build_algolia_filters(request)
 
-        # Step 3: Run Algolia search
+        # Step 3+4: Run Algolia + Semantic search
+        # For SPECIFIC/VAGUE intent, both searches are independent so we run
+        # them in parallel.  For EXACT intent, semantic only runs if Algolia
+        # returns 0, so we keep those sequential.
+        #
         # Auto-detect active filters from the request model.
-        # Checks all Optional fields that are not pagination/query/session/boost.
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by", "planner_context"}
         has_filters = any(
             getattr(request, field_name) not in (None, False, [])
             for field_name in HybridSearchRequest.model_fields
@@ -283,79 +288,106 @@ class HybridSearchService:
         # since strict post-filtering will drop non-matching results
         fetch_multiplier = 5 if has_filters else 3
         fetch_size = request.page_size * fetch_multiplier
-        t_algolia = time.time()
-        algolia_results, facets = self._search_algolia(
-            query=algolia_query,
-            filters=algolia_filters,
-            hits_per_page=fetch_size,
-            facets=_FACET_FIELDS,
-            optional_filters=algolia_optional_filters,
-        )
-        timing["algolia_ms"] = int((time.time() - t_algolia) * 1000)
 
-        # Step 4: Run semantic search
-        # - Skip for EXACT brand matches (Algolia is authoritative)
-        # - Force semantic if Algolia returned nothing (graceful fallback)
-        # - Use the planner's semantic_query if available (richer description)
-        # - When LLM planner is active, use RELAXED filters for semantic search
-        #   so pgvector returns more candidates (post-filter handles the rest)
+        # Pre-build the semantic search parameters (needed for both paths)
         semantic_results = []
-        algolia_failed = len(algolia_results) == 0
-        run_semantic = (intent != QueryIntent.EXACT) or algolia_failed
-        if run_semantic:
-            # Use planner's enriched semantic query if available, else original
-            clip_query = semantic_query_override if semantic_query_override else request.query
+        clip_query = semantic_query_override if semantic_query_override else request.query
+        _queries_to_run = (
+            semantic_queries
+            if semantic_queries and len(semantic_queries) > 1
+            else [clip_query]
+        )
 
-            # Build a relaxed request for semantic search when planner is active.
-            # Only keep hard constraints that are safe at the SQL level:
-            # - price range (objective, never wrong)
-            # - brand exclusions (user explicitly doesn't want these)
-            # - brand inclusions (only for exact brand queries)
-            # Everything else (colors, patterns, occasions, categories) is handled
-            # by the post-filter with soft scoring for better recall.
-            if search_plan is not None:
-                # Relax attribute filters but KEEP category_l1 as hard filter.
-                # This prevents category pollution (bottoms appearing for top queries).
-                semantic_request = request.model_copy(update={
-                    "categories": None,
-                    "colors": None,
-                    "patterns": None,
-                    "occasions": None,
-                    # category_l1 and category_l2 are KEPT — they're structural
-                })
-                kept_fields = ["price", "brands", "exclude_brands", "category_l1", "category_l2"]
-                logger.info(
-                    "Using relaxed filters for semantic search (planner active)",
-                    kept=kept_fields,
-                    removed=["categories", "colors", "patterns", "occasions"],
-                )
-            else:
-                semantic_request = request
-
-            t_semantic = time.time()
-            # Multi-query semantic search: run diverse queries in parallel
-            # for wider result variety, then merge + dedup.
-            _queries_to_run = (
-                semantic_queries
-                if semantic_queries and len(semantic_queries) > 1
-                else [clip_query]
+        # Build a relaxed request for semantic search when planner is active.
+        if search_plan is not None:
+            semantic_request = request.model_copy(update={
+                "categories": None,
+                "colors": None,
+                "patterns": None,
+                "occasions": None,
+            })
+            logger.info(
+                "Using relaxed filters for semantic search (planner active)",
+                kept=["price", "brands", "exclude_brands", "category_l1", "category_l2"],
+                removed=["categories", "colors", "patterns", "occasions"],
             )
+        else:
+            semantic_request = request
+
+        def _run_algolia() -> tuple:
+            """Run Algolia search, return (results, facets, elapsed_ms)."""
+            t0 = time.time()
+            results, fcts = self._search_algolia(
+                query=algolia_query,
+                filters=algolia_filters,
+                hits_per_page=fetch_size,
+                facets=_FACET_FIELDS,
+                optional_filters=algolia_optional_filters,
+            )
+            return results, fcts, int((time.time() - t0) * 1000)
+
+        def _run_semantic() -> tuple:
+            """Run semantic search, return (results, query_count, elapsed_ms)."""
+            t0 = time.time()
             if len(_queries_to_run) > 1:
-                semantic_results = self._search_semantic_multi(
+                results = self._search_semantic_multi(
                     queries=_queries_to_run,
                     request=semantic_request,
                     limit_per_query=max(fetch_size // len(_queries_to_run), 30),
                 )
-                timing["semantic_query_count"] = len(_queries_to_run)
+                qcount = len(_queries_to_run)
             else:
-                semantic_results = self._search_semantic(
+                results = self._search_semantic(
                     query=_queries_to_run[0],
                     request=semantic_request,
                     limit=fetch_size,
                 )
-                timing["semantic_query_count"] = 1
-            timing["semantic_ms"] = int((time.time() - t_semantic) * 1000)
-            if algolia_failed and semantic_results:
+                qcount = 1
+            return results, qcount, int((time.time() - t0) * 1000)
+
+        if intent == QueryIntent.EXACT:
+            # EXACT: run Algolia first; only run semantic if Algolia returns 0
+            algolia_results, facets, algolia_ms = _run_algolia()
+            timing["algolia_ms"] = algolia_ms
+
+            if len(algolia_results) == 0:
+                semantic_results, sq_count, semantic_ms = _run_semantic()
+                timing["semantic_ms"] = semantic_ms
+                timing["semantic_query_count"] = sq_count
+                if semantic_results:
+                    logger.info(
+                        "Algolia returned 0 results for EXACT query, fell back to semantic",
+                        query=request.query,
+                        semantic_count=len(semantic_results),
+                    )
+        else:
+            # SPECIFIC / VAGUE: run Algolia + Semantic in parallel
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            algolia_results, facets = [], {}
+            algolia_ms = 0
+            semantic_ms = 0
+            sq_count = 1
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_algolia = executor.submit(_run_algolia)
+                future_semantic = executor.submit(_run_semantic)
+
+                try:
+                    algolia_results, facets, algolia_ms = future_algolia.result()
+                except Exception as e:
+                    logger.warning("Algolia search failed in parallel", error=str(e))
+
+                try:
+                    semantic_results, sq_count, semantic_ms = future_semantic.result()
+                except Exception as e:
+                    logger.warning("Semantic search failed in parallel", error=str(e))
+
+            timing["algolia_ms"] = algolia_ms
+            timing["semantic_ms"] = semantic_ms
+            timing["semantic_query_count"] = sq_count
+
+            if len(algolia_results) == 0 and semantic_results:
                 logger.info(
                     "Algolia returned 0 results, falling back to semantic-only",
                     query=request.query,
@@ -888,6 +920,7 @@ class HybridSearchService:
         query: str,
         request: HybridSearchRequest,
         limit: int = 100,
+        query_embedding: Optional[np.ndarray] = None,
     ) -> List[dict]:
         """
         Search using FashionCLIP + pgvector and return normalized results.
@@ -896,6 +929,12 @@ class HybridSearchService:
         which can match descriptive terms like "ribbed" or "quilted" that
         exist in product text but not in images. Falls back to image-only
         embeddings if multimodal search returns no results or is disabled.
+
+        Args:
+            query: Text query string.
+            request: Full search request with filters.
+            limit: Max results.
+            query_embedding: Pre-computed FashionCLIP embedding (skips encode_text).
         """
         settings = get_settings()
 
@@ -904,6 +943,7 @@ class HybridSearchService:
             multimodal_results = self._search_multimodal(
                 query=query, request=request, limit=limit,
                 version=settings.multimodal_embedding_version,
+                query_embedding=query_embedding,
             )
             if multimodal_results:
                 return multimodal_results
@@ -914,7 +954,10 @@ class HybridSearchService:
             )
 
         # Image-only fallback (original path)
-        return self._search_image_only(query=query, request=request, limit=limit)
+        return self._search_image_only(
+            query=query, request=request, limit=limit,
+            query_embedding=query_embedding,
+        )
 
     def _search_semantic_multi(
         self,
@@ -929,6 +972,10 @@ class HybridSearchService:
         silhouette, etc.) to produce wider variety than a single query which
         tends to return visually-clustered results.
 
+        Batch-encodes all query embeddings upfront in a single forward pass,
+        then runs only the pgvector RPC calls in parallel (skipping redundant
+        per-thread FashionCLIP encode_text calls).
+
         Dedup by product_id: if the same product appears in multiple query
         results, keep the one with the highest semantic_score.
 
@@ -936,16 +983,29 @@ class HybridSearchService:
         ensure diversity in the top results, then sorted by score.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+
+        # Batch-encode ALL query embeddings in a single forward pass.
+        # This replaces N separate encode_text() calls with one batch call.
+        t0 = _time.perf_counter()
+        embeddings = self.semantic_engine.encode_text_batch(queries)
+        encode_ms = (_time.perf_counter() - t0) * 1000
+        logger.info(
+            "Batch-encoded semantic queries",
+            query_count=len(queries),
+            encode_ms=round(encode_ms, 1),
+        )
 
         results_per_query: List[List[dict]] = [[] for _ in queries]
 
         def _run_query(idx: int, query: str) -> tuple:
             results = self._search_semantic(
                 query=query, request=request, limit=limit_per_query,
+                query_embedding=embeddings[idx],
             )
             return idx, results
 
-        # Run all queries in parallel
+        # Run all pgvector RPC queries in parallel (embeddings already computed)
         with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
             futures = {
                 executor.submit(_run_query, i, q): i
@@ -1030,6 +1090,7 @@ class HybridSearchService:
         request: HybridSearchRequest,
         limit: int = 100,
         version: int = 1,
+        query_embedding: Optional[np.ndarray] = None,
     ) -> List[dict]:
         """Search using multimodal embeddings (combined image + text vectors)."""
         try:
@@ -1047,6 +1108,7 @@ class HybridSearchService:
                 include_brands=request.brands,
                 min_price=request.min_price,
                 max_price=request.max_price,
+                query_embedding=query_embedding,
             )
 
             results = []
@@ -1107,6 +1169,7 @@ class HybridSearchService:
         query: str,
         request: HybridSearchRequest,
         limit: int = 100,
+        query_embedding: Optional[np.ndarray] = None,
     ) -> List[dict]:
         """Search using FashionCLIP image-only embeddings (original path)."""
         try:
@@ -1124,6 +1187,7 @@ class HybridSearchService:
                 occasions=request.occasions,
                 patterns=request.patterns,
                 use_hybrid_search=False,  # Pure semantic - Algolia handles keyword
+                query_embedding=query_embedding,
             )
             results = []
             for item in resp.get("results", []):

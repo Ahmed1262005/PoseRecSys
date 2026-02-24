@@ -816,7 +816,7 @@ class TestSearchPipeline:
         service._semantic_engine.search_with_filters.assert_called_once()
 
     def test_search_semantic_called_for_vague(self, hybrid_service):
-        """VAGUE intent should trigger semantic search."""
+        """VAGUE intent should trigger semantic search (multi-query)."""
         from search.models import HybridSearchRequest
 
         service = self._setup_service(hybrid_service)
@@ -826,7 +826,8 @@ class TestSearchPipeline:
         result = service.search(request)
 
         assert "semantic_ms" in result.timing
-        service._semantic_engine.search_with_filters.assert_called_once()
+        # Multi-query semantic calls search_with_filters once per semantic query
+        assert service._semantic_engine.search_with_filters.call_count >= 1
 
     def test_search_semantic_boost_override(self, hybrid_service):
         """Custom semantic_boost should override default weights."""
@@ -2207,7 +2208,8 @@ class TestAlgoliaFallbackToSemantic:
         })
 
         result = hybrid_service.search(HybridSearchRequest(query="blue midi dress"))
-        mock_semantic.search_with_filters.assert_called_once()
+        # Multi-query semantic calls search_with_filters once per semantic query
+        assert mock_semantic.search_with_filters.call_count >= 1
 
 
 # =============================================================================
@@ -2291,8 +2293,8 @@ class TestSortedSearchPath:
         result = hybrid_service.search(
             HybridSearchRequest(query="dress", sort_by=SortBy.RELEVANCE),
         )
-        # Semantic search should be called for the full pipeline
-        mock_semantic.search_with_filters.assert_called_once()
+        # Semantic search should be called for the full pipeline (multi-query)
+        assert mock_semantic.search_with_filters.call_count >= 1
         assert result.sort_by == "relevance"
 
     def test_price_asc_skips_semantic(self, hybrid_service):

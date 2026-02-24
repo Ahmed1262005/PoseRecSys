@@ -44,6 +44,11 @@ class WomenSearchEngine:
     using pgvector similarity search.
     """
 
+    # Max cached text embeddings (keyed by query string).
+    # FashionCLIP encode_text costs ~50-200ms on CPU per call.
+    # 512 entries × 512 dims × 4 bytes = ~1MB — negligible memory.
+    _EMBEDDING_CACHE_SIZE = 512
+
     def __init__(self):
         """Initialize with Supabase client."""
         url = os.getenv("SUPABASE_URL")
@@ -58,6 +63,13 @@ class WomenSearchEngine:
         self._model = None
         self._processor = None
         self._model_lock = threading.Lock()
+        self._device = None  # Set during model load ("cuda" or "cpu")
+
+        # Thread-safe LRU cache for text embeddings.
+        # Avoids re-computing the same query embedding within a TTL window.
+        from collections import OrderedDict
+        self._embedding_cache: OrderedDict = OrderedDict()
+        self._embedding_cache_lock = threading.Lock()
 
         # Lazy-load session service
         self._session_service = None
@@ -392,44 +404,140 @@ class WomenSearchEngine:
                     # Move to GPU if available
                     if torch.cuda.is_available():
                         model = model.cuda()
+                        self._device = "cuda"
+                        logger.info(
+                            "FashionCLIP using GPU",
+                            device=torch.cuda.get_device_name(0),
+                        )
+                    else:
+                        self._device = "cpu"
 
                     model.eval()
                     # Assign last to avoid partial initialization visible to other threads
                     self._processor = processor
                     self._model = model
-                    logger.info("FashionCLIP model loaded")
+                    logger.info("FashionCLIP model loaded", device=self._device)
+
+    def _extract_embedding(self, emb) -> "torch.Tensor":
+        """Extract the embedding tensor from model output (handles transformers v4 and v5+)."""
+        import torch
+        # transformers >=5.x: get_text_features returns BaseModelOutputWithPooling
+        # instead of a raw tensor. The correct embedding is in pooler_output
+        # (which is the EOS token projected through text_projection).
+        # NOTE: last_hidden_state[:, 0, :] (CLS token) is NOT the right embedding
+        # -- it produces identical vectors for all queries.
+        if isinstance(emb, torch.Tensor):
+            return emb
+        elif hasattr(emb, 'pooler_output') and emb.pooler_output is not None:
+            return emb.pooler_output
+        elif hasattr(emb, 'text_embeds') and emb.text_embeds is not None:
+            return emb.text_embeds
+        else:
+            raise ValueError(
+                f"Unexpected return type from get_text_features: {type(emb)}. "
+                f"Available attrs: {[a for a in dir(emb) if not a.startswith('_')]}"
+            )
 
     def encode_text(self, query: str) -> np.ndarray:
-        """Encode text query to embedding vector."""
+        """Encode text query to embedding vector (cached).
+
+        Uses an in-memory LRU cache to avoid re-computing embeddings for
+        repeated queries.  Cache is thread-safe and bounded to
+        _EMBEDDING_CACHE_SIZE entries (~1MB for 512-dim float32 vectors).
+        """
+        # Check cache first (fast path, no model load needed)
+        with self._embedding_cache_lock:
+            if query in self._embedding_cache:
+                # Move to end (most recently used)
+                self._embedding_cache.move_to_end(query)
+                return self._embedding_cache[query]
+
+        # Cache miss — compute embedding
         import torch
         self._load_model()
 
         with torch.no_grad():
-            inputs = self._processor(text=[query], return_tensors='pt', padding=True, truncation=True, max_length=77)
-            if torch.cuda.is_available():
+            inputs = self._processor(
+                text=[query], return_tensors='pt',
+                padding=True, truncation=True, max_length=77,
+            )
+            if self._device == "cuda":
                 inputs = {k: v.cuda() for k, v in inputs.items()}
             emb = self._model.get_text_features(**inputs)
-            # transformers >=5.x: get_text_features returns BaseModelOutputWithPooling
-            # instead of a raw tensor. The correct embedding is in pooler_output
-            # (which is the EOS token projected through text_projection).
-            # NOTE: last_hidden_state[:, 0, :] (CLS token) is NOT the right embedding
-            # -- it produces identical vectors for all queries.
-            if isinstance(emb, torch.Tensor):
-                # transformers <5.x: direct tensor (already projected)
-                pass
-            elif hasattr(emb, 'pooler_output') and emb.pooler_output is not None:
-                # transformers >=5.x: use the pooled + projected output
-                emb = emb.pooler_output
-            elif hasattr(emb, 'text_embeds') and emb.text_embeds is not None:
-                emb = emb.text_embeds
-            else:
-                raise ValueError(
-                    f"Unexpected return type from get_text_features: {type(emb)}. "
-                    f"Available attrs: {[a for a in dir(emb) if not a.startswith('_')]}"
-                )
-            # Normalize
+            emb = self._extract_embedding(emb)
             emb = emb / emb.norm(dim=-1, keepdim=True)
-            return emb.cpu().numpy().flatten()
+            result = emb.cpu().numpy().flatten()
+
+        # Store in cache
+        with self._embedding_cache_lock:
+            self._embedding_cache[query] = result
+            # Evict oldest if over capacity
+            while len(self._embedding_cache) > self._EMBEDDING_CACHE_SIZE:
+                self._embedding_cache.popitem(last=False)
+
+        return result
+
+    def encode_text_batch(self, queries: List[str]) -> List[np.ndarray]:
+        """Encode multiple text queries in a single forward pass.
+
+        Much faster than calling encode_text() N times because:
+        - Single tokenization pass (batched)
+        - Single model forward pass (GPU/CPU parallelism within the batch)
+        - Especially beneficial on GPU where batch parallelism is free
+
+        Returns a list of normalized 512-dim numpy arrays, one per query.
+        Results are also stored in the embedding cache.
+        """
+        if not queries:
+            return []
+        if len(queries) == 1:
+            return [self.encode_text(queries[0])]
+
+        # Check which queries are already cached
+        results: List[Optional[np.ndarray]] = [None] * len(queries)
+        uncached_indices: List[int] = []
+
+        with self._embedding_cache_lock:
+            for i, q in enumerate(queries):
+                if q in self._embedding_cache:
+                    self._embedding_cache.move_to_end(q)
+                    results[i] = self._embedding_cache[q]
+                else:
+                    uncached_indices.append(i)
+
+        if not uncached_indices:
+            return results  # All cached
+
+        # Batch-encode uncached queries
+        import torch
+        self._load_model()
+
+        uncached_queries = [queries[i] for i in uncached_indices]
+
+        with torch.no_grad():
+            inputs = self._processor(
+                text=uncached_queries, return_tensors='pt',
+                padding=True, truncation=True, max_length=77,
+            )
+            if self._device == "cuda":
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            emb = self._model.get_text_features(**inputs)
+            emb = self._extract_embedding(emb)
+            # emb shape: (batch_size, 512)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            embeddings_np = emb.cpu().numpy()
+
+        # Store results and update cache
+        with self._embedding_cache_lock:
+            for j, idx in enumerate(uncached_indices):
+                vec = embeddings_np[j].flatten()
+                results[idx] = vec
+                self._embedding_cache[queries[idx]] = vec
+            # Evict oldest if over capacity
+            while len(self._embedding_cache) > self._EMBEDDING_CACHE_SIZE:
+                self._embedding_cache.popitem(last=False)
+
+        return results
 
     def search_all(
         self,
@@ -657,6 +765,7 @@ class WomenSearchEngine:
         use_hybrid_search: bool = True,
         semantic_weight: float = 0.90,  # UPDATED: was 0.7, reduced keyword influence
         keyword_weight: float = 0.10,   # UPDATED: was 0.3, prevents override of semantic
+        query_embedding: Optional[np.ndarray] = None,
     ) -> Dict:
         """
         Search with comprehensive filters, user preferences, and hybrid search.
@@ -757,7 +866,7 @@ class WomenSearchEngine:
         fetch_multiplier = 3
         fetch_count = (page * page_size + len(seen_ids)) * fetch_multiplier
 
-        text_embedding = self.encode_text(query)
+        text_embedding = query_embedding if query_embedding is not None else self.encode_text(query)
         text_embedding = text_embedding.astype('float32').tolist()
         vector_str = f"[{','.join(map(str, text_embedding))}]"
 
@@ -928,6 +1037,7 @@ class WomenSearchEngine:
         min_price: Optional[float] = None,
         max_price: Optional[float] = None,
         exclude_product_ids: Optional[List[str]] = None,
+        query_embedding: Optional[np.ndarray] = None,
     ) -> Dict:
         """
         Search using multimodal embeddings (combined image + text vectors).
@@ -949,11 +1059,12 @@ class WomenSearchEngine:
             min_price: Minimum price filter.
             max_price: Maximum price filter.
             exclude_product_ids: Product IDs to exclude.
+            query_embedding: Pre-computed embedding (skips encode_text if provided).
 
         Returns:
             Dict with "results" list and metadata.
         """
-        text_embedding = self.encode_text(query)
+        text_embedding = query_embedding if query_embedding is not None else self.encode_text(query)
         text_embedding = text_embedding.astype('float32').tolist()
         vector_str = f"[{','.join(map(str, text_embedding))}]"
 

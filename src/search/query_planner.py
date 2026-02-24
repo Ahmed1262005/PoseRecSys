@@ -684,12 +684,28 @@ class QueryPlanner:
                 }
 
                 if is_reasoning_model:
-                    api_params["max_completion_tokens"] = 16384
+                    # Budget: ~560 output tokens + ~7,000 reasoning tokens.
+                    # Reasoning models use hidden chain-of-thought that counts
+                    # against this limit.  8192 is generous enough to avoid
+                    # truncation while preventing the model from spending 16k
+                    # tokens thinking (which was causing 40-66s latencies).
+                    api_params["max_completion_tokens"] = 8192
                 else:
                     api_params["temperature"] = 0.0
-                    api_params["max_tokens"] = 800
+                    api_params["max_tokens"] = 1600
 
                 response = self.client.chat.completions.create(**api_params)
+
+                # Check for truncation — if finish_reason is "length", the
+                # model hit max_completion_tokens and the JSON may be incomplete.
+                finish_reason = response.choices[0].finish_reason
+                if finish_reason == "length":
+                    logger.warning(
+                        "Query planner output truncated (hit max_completion_tokens)",
+                        model=self._model,
+                        query=query,
+                        max_tokens=api_params.get("max_completion_tokens") or api_params.get("max_tokens"),
+                    )
 
                 raw = response.choices[0].message.content
                 if not raw:
