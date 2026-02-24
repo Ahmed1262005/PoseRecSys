@@ -104,7 +104,7 @@ def main():
     print("=" * 65)
     print(f"  Device:    {'CUDA — ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     if torch.cuda.is_available():
-        mem = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         print(f"  GPU Mem:   {mem:.1f} GB")
     print(f"  Rounds:    {args.rounds} per product")
     print(f"  Products:  {args.products} per category")
