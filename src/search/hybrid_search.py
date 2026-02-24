@@ -28,6 +28,7 @@ from search.analytics import SearchAnalytics, get_search_analytics
 from search.algolia_config import get_replica_index_name
 from search.models import (
     FacetValue,
+    FollowUpQuestion,
     HybridSearchRequest,
     HybridSearchResponse,
     ProductResult,
@@ -97,6 +98,8 @@ class HybridSearchService:
         seen_ids: Optional[Set[str]] = None,
         user_context: Optional[Any] = None,
         session_scores: Optional[Any] = None,
+        skip_planner: bool = False,
+        planner_context: Optional[Dict[str, Any]] = None,
     ) -> HybridSearchResponse:
         """
         Execute hybrid search.
@@ -108,6 +111,9 @@ class HybridSearchService:
             seen_ids: Already-shown product IDs (for session dedup).
             user_context: UserContext for age-affinity + weather scoring.
             session_scores: Live SessionScores for session-aware reranking.
+            skip_planner: If True, skip the LLM planner (filters pre-resolved).
+            planner_context: Optional compact dict with user profile info for
+                personalized follow-ups (passed through to QueryPlanner.plan()).
 
         Returns:
             HybridSearchResponse with results and metadata.
@@ -143,10 +149,16 @@ class HybridSearchService:
         search_plan: Optional[SearchPlan] = None
         expanded_filters: Dict[str, List[str]] = {}
         semantic_query_override: Optional[str] = None
+        semantic_queries: Optional[List[str]] = None
         name_exclusions: List[str] = []
+        follow_ups: Optional[List[FollowUpQuestion]] = None
 
         t_plan = time.time()
-        search_plan = self._planner.plan(request.query)
+        if not skip_planner:
+            search_plan = self._planner.plan(
+                request.query,
+                user_context=planner_context,
+            )
         timing["planner_ms"] = int((time.time() - t_plan) * 1000)
 
         if search_plan is not None:
@@ -159,6 +171,7 @@ class HybridSearchService:
                 algolia_query,
                 semantic_query_override,
                 intent_str,
+                semantic_queries,
             ) = self._planner.plan_to_request_updates(search_plan)
 
             # Map intent string to enum
@@ -172,22 +185,46 @@ class HybridSearchService:
             # (not a real request field — internal to the pipeline)
             name_exclusions = plan_updates.pop("_name_exclusions", [])
 
-            # Apply planner filters (only fields the user hasn't set explicitly)
-            updates = {}
-            for field, values in plan_updates.items():
-                if not getattr(request, field, None):
-                    updates[field] = values
-            if updates:
-                request = request.model_copy(update=updates)
+            # ---------------------------------------------------------
+            # VAGUE queries: do NOT apply planner attribute filters.
+            # The semantic queries already target the right visual
+            # space, and hard filters on a vague query (e.g. adding
+            # category_l1, occasions, style_tags) make the result set
+            # too narrow or empty.  Follow-up answers via /refine are
+            # the mechanism to add hard filters.
+            #
+            # SPECIFIC / EXACT: apply filters normally — the user
+            # stated concrete requirements.
+            # ---------------------------------------------------------
+            if intent_str == "vague":
+                updates = {}
                 logger.info(
-                    "LLM planner applied filters",
+                    "Vague query — skipping planner attribute filters (follow-ups will narrow)",
                     query=request.query,
-                    filters=updates,
-                    exclude_filters=exclude_filters_from_plan,
-                    expanded=expanded_filters,
-                    algolia_query=algolia_query,
-                    semantic_query=semantic_query_override,
+                    skipped_filters=plan_updates,
+                    semantic_queries=semantic_queries,
                 )
+            else:
+                # Apply planner filters (only fields the user hasn't set explicitly)
+                updates = {}
+                for field, values in plan_updates.items():
+                    if not getattr(request, field, None):
+                        updates[field] = values
+                if updates:
+                    request = request.model_copy(update=updates)
+                    logger.info(
+                        "LLM planner applied filters",
+                        query=request.query,
+                        filters=updates,
+                        exclude_filters=exclude_filters_from_plan,
+                        expanded=expanded_filters,
+                        algolia_query=algolia_query,
+                        semantic_query=semantic_query_override,
+                    )
+
+            # Extract follow-up questions from the plan (if any)
+            if search_plan.parsed_follow_ups:
+                follow_ups = search_plan.parsed_follow_ups
 
             # Stash plan details in timing for debugging/HTML reports
             timing["plan_modes"] = search_plan.modes
@@ -195,6 +232,7 @@ class HybridSearchService:
             timing["plan_avoid"] = search_plan.avoid
             timing["plan_algolia_query"] = algolia_query
             timing["plan_semantic_query"] = semantic_query_override
+            timing["plan_semantic_queries"] = semantic_queries
             timing["plan_applied_filters"] = updates
             timing["plan_exclusions"] = exclude_filters_from_plan
             if name_exclusions:
@@ -295,11 +333,27 @@ class HybridSearchService:
                 semantic_request = request
 
             t_semantic = time.time()
-            semantic_results = self._search_semantic(
-                query=clip_query,
-                request=semantic_request,
-                limit=fetch_size,
+            # Multi-query semantic search: run diverse queries in parallel
+            # for wider result variety, then merge + dedup.
+            _queries_to_run = (
+                semantic_queries
+                if semantic_queries and len(semantic_queries) > 1
+                else [clip_query]
             )
+            if len(_queries_to_run) > 1:
+                semantic_results = self._search_semantic_multi(
+                    queries=_queries_to_run,
+                    request=semantic_request,
+                    limit_per_query=max(fetch_size // len(_queries_to_run), 30),
+                )
+                timing["semantic_query_count"] = len(_queries_to_run)
+            else:
+                semantic_results = self._search_semantic(
+                    query=_queries_to_run[0],
+                    request=semantic_request,
+                    limit=fetch_size,
+                )
+                timing["semantic_query_count"] = 1
             timing["semantic_ms"] = int((time.time() - t_semantic) * 1000)
             if algolia_failed and semantic_results:
                 logger.info(
@@ -486,6 +540,39 @@ class HybridSearchService:
             rerank_kwargs["max_per_brand"] = brand_cap
         merged = self._reranker.rerank(**rerank_kwargs)
 
+        # Step 6b: Category diversity for VAGUE queries (post-reranker).
+        # Semantic search tends to cluster results in one category (e.g. all
+        # pants) because FashionCLIP matches visual features, not garment type.
+        # For vague queries where no hard category filter was set, interleave
+        # results round-robin by category_l1 so the top results show a mix
+        # of garment types (dresses, tops, bottoms, etc.) rather than a wall
+        # of one category.  Within each category, items keep their reranked
+        # order.  Applied AFTER the reranker so scoring doesn't undo diversity.
+        if intent == QueryIntent.VAGUE and not request.category_l1 and merged:
+            cat_buckets: Dict[str, List[dict]] = {}
+            for item in merged:
+                cat = item.get("category_l1") or item.get("broad_category") or "Other"
+                cat_buckets.setdefault(cat, []).append(item)
+
+            if len(cat_buckets) > 1:
+                # Sort buckets: largest first so round-robin starts with
+                # the most populated category (feels natural).
+                sorted_cats = sorted(cat_buckets.keys(), key=lambda c: -len(cat_buckets[c]))
+                interleaved: List[dict] = []
+                max_bucket = max(len(b) for b in cat_buckets.values())
+                for pos in range(max_bucket):
+                    for cat in sorted_cats:
+                        if pos < len(cat_buckets[cat]):
+                            interleaved.append(cat_buckets[cat][pos])
+
+                before_cats = {c: len(b) for c, b in cat_buckets.items()}
+                logger.info(
+                    "Category diversity interleave applied (vague query)",
+                    categories=before_cats,
+                    total=len(interleaved),
+                )
+                merged = interleaved
+
         # Step 7: Paginate
         start_idx = (request.page - 1) * request.page_size
         page_results = merged[start_idx : start_idx + request.page_size]
@@ -527,6 +614,7 @@ class HybridSearchService:
             ),
             timing=timing,
             facets=facets,
+            follow_ups=follow_ups,
         )
 
     # =========================================================================
@@ -570,7 +658,7 @@ class HybridSearchService:
         if search_plan is not None:
             (
                 plan_updates, _, _, _,
-                algolia_query_from_plan, _, intent_str,
+                algolia_query_from_plan, _, intent_str, _,
             ) = self._planner.plan_to_request_updates(search_plan)
 
             _INTENT_MAP = {"exact": QueryIntent.EXACT, "specific": QueryIntent.SPECIFIC, "vague": QueryIntent.VAGUE}
@@ -828,6 +916,114 @@ class HybridSearchService:
         # Image-only fallback (original path)
         return self._search_image_only(query=query, request=request, limit=limit)
 
+    def _search_semantic_multi(
+        self,
+        queries: List[str],
+        request: HybridSearchRequest,
+        limit_per_query: int = 50,
+    ) -> List[dict]:
+        """
+        Run multiple diverse semantic queries in parallel and merge results.
+
+        Each query targets a different visual angle (garment type, style,
+        silhouette, etc.) to produce wider variety than a single query which
+        tends to return visually-clustered results.
+
+        Dedup by product_id: if the same product appears in multiple query
+        results, keep the one with the highest semantic_score.
+
+        Returns a single merged list, interleaved round-robin by query to
+        ensure diversity in the top results, then sorted by score.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results_per_query: List[List[dict]] = [[] for _ in queries]
+
+        def _run_query(idx: int, query: str) -> tuple:
+            results = self._search_semantic(
+                query=query, request=request, limit=limit_per_query,
+            )
+            return idx, results
+
+        # Run all queries in parallel
+        with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
+            futures = {
+                executor.submit(_run_query, i, q): i
+                for i, q in enumerate(queries)
+            }
+            for future in as_completed(futures):
+                try:
+                    idx, results = future.result()
+                    results_per_query[idx] = results
+                except Exception as e:
+                    logger.warning(
+                        "Multi-query semantic search failed for one query",
+                        error=str(e),
+                    )
+
+        # Log per-query counts
+        counts = [len(r) for r in results_per_query]
+        logger.info(
+            "Multi-query semantic search completed",
+            query_count=len(queries),
+            per_query_counts=counts,
+            total_before_dedup=sum(counts),
+        )
+
+        # Merge + dedup: keep highest semantic_score per product_id.
+        # Track which query each product came from for interleaving.
+        seen: Dict[str, dict] = {}  # product_id -> best result dict
+        query_assignments: Dict[str, int] = {}  # product_id -> query index
+
+        for q_idx, results in enumerate(results_per_query):
+            for item in results:
+                pid = item.get("product_id")
+                if not pid:
+                    continue
+                existing = seen.get(pid)
+                if existing is None:
+                    seen[pid] = item
+                    query_assignments[pid] = q_idx
+                else:
+                    # Keep the one with the higher semantic score
+                    if (item.get("semantic_score", 0) or 0) > (existing.get("semantic_score", 0) or 0):
+                        seen[pid] = item
+                        query_assignments[pid] = q_idx
+
+        if not seen:
+            return []
+
+        # Interleave round-robin from each query's results to ensure
+        # the top results show diversity rather than all coming from
+        # one query's cluster.
+        per_query_ordered: List[List[str]] = [[] for _ in queries]
+        for q_idx, results in enumerate(results_per_query):
+            for item in results:
+                pid = item.get("product_id")
+                if pid and pid in seen and query_assignments.get(pid) == q_idx:
+                    per_query_ordered[q_idx].append(pid)
+
+        merged_ids: List[str] = []
+        merged_set: set = set()
+        max_len = max(len(q) for q in per_query_ordered) if per_query_ordered else 0
+        for pos in range(max_len):
+            for q_idx in range(len(queries)):
+                if pos < len(per_query_ordered[q_idx]):
+                    pid = per_query_ordered[q_idx][pos]
+                    if pid not in merged_set:
+                        merged_ids.append(pid)
+                        merged_set.add(pid)
+
+        merged = [seen[pid] for pid in merged_ids if pid in seen]
+
+        logger.info(
+            "Multi-query semantic dedup",
+            before=sum(counts),
+            after=len(merged),
+            duplicates_removed=sum(counts) - len(merged),
+        )
+        return merged
+
     def _search_multimodal(
         self,
         query: str,
@@ -837,11 +1033,16 @@ class HybridSearchService:
     ) -> List[dict]:
         """Search using multimodal embeddings (combined image + text vectors)."""
         try:
+            # Use category_l1 as the categories filter for pgvector if the
+            # old-style categories field is empty. category_l1 is the primary
+            # structural filter set by the planner / refine endpoint.
+            categories = request.categories or request.category_l1
+
             resp = self.semantic_engine.search_multimodal(
                 query=query,
                 limit=limit,
                 embedding_version=version,
-                categories=request.categories,
+                categories=categories,
                 exclude_brands=request.exclude_brands,
                 include_brands=request.brands,
                 min_price=request.min_price,
@@ -909,11 +1110,12 @@ class HybridSearchService:
     ) -> List[dict]:
         """Search using FashionCLIP image-only embeddings (original path)."""
         try:
+            categories = request.categories or request.category_l1
             resp = self.semantic_engine.search_with_filters(
                 query=query,
                 page=1,
                 page_size=limit,
-                categories=request.categories,
+                categories=categories,
                 exclude_brands=request.exclude_brands,
                 include_brands=request.brands,
                 include_colors=request.colors,

@@ -507,7 +507,7 @@ def do_search(
 
     try:
         t = time.time()
-        r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=30)
+        r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=120)
         elapsed = time.time() - t
 
         if r.status_code != 200:
@@ -530,6 +530,22 @@ def do_search(
         algolia_ms = timing.get("algolia_ms", 0)
         semantic_ms = timing.get("semantic_ms", 0)
 
+        # Semantic query info (single vs multi-query)
+        semantic_query_count = timing.get("semantic_query_count", 1)
+        plan_semantic_queries = timing.get("plan_semantic_queries")
+        semantic_info = ""
+        if plan_semantic_queries and len(plan_semantic_queries) > 1:
+            queries_md = " | ".join(
+                f'`{sq[:60]}{"..." if len(sq) > 60 else ""}`'
+                for sq in plan_semantic_queries
+            )
+            semantic_info = (
+                f'\n\n**Semantic queries ({semantic_query_count}):** {queries_md}'
+            )
+        elif timing.get("plan_semantic_query"):
+            sq = timing["plan_semantic_query"]
+            semantic_info = f'\n\n**Semantic query:** `{sq[:80]}{"..." if len(sq) > 80 else ""}`'
+
         meta_lines = [
             filter_html,
             f'**Intent:** <span class="{intent_cls}">{intent}</span> '
@@ -538,10 +554,13 @@ def do_search(
             f'| **Has more:** {pagination["has_more"]}',
             f'**Timing:** total={_format_timing(total_ms)}, '
             f'algolia={_format_timing(algolia_ms)}, '
-            f'semantic={_format_timing(semantic_ms)}',
+            f'semantic={_format_timing(semantic_ms)}'
+            + (f', **{semantic_query_count} semantic queries**' if semantic_query_count > 1 else ''),
             f'**Round-trip:** {elapsed*1000:.0f}ms'
             + (f' | **Session:** `{_session_id[:8]}...`' if use_session else ''),
         ]
+        if semantic_info:
+            meta_lines.append(semantic_info)
         meta = "\n\n".join(meta_lines)
 
         if not results:
@@ -586,7 +605,7 @@ def do_compare(
         }
         try:
             t = time.time()
-            r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=30)
+            r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=120)
             elapsed = time.time() - t
 
             if r.status_code != 200:
@@ -624,8 +643,8 @@ def do_compare(
     overlap_info = ""
     if len(raw_parts) == 2:
         try:
-            r_a = requests.post(f"{SEARCH_URL}/hybrid", json={"query": query_a.strip(), "page_size": int(page_size_cmp)}, headers=HEADERS, timeout=30).json()
-            r_b = requests.post(f"{SEARCH_URL}/hybrid", json={"query": query_b.strip(), "page_size": int(page_size_cmp)}, headers=HEADERS, timeout=30).json()
+            r_a = requests.post(f"{SEARCH_URL}/hybrid", json={"query": query_a.strip(), "page_size": int(page_size_cmp)}, headers=HEADERS, timeout=120).json()
+            r_b = requests.post(f"{SEARCH_URL}/hybrid", json={"query": query_b.strip(), "page_size": int(page_size_cmp)}, headers=HEADERS, timeout=120).json()
             ids_a = {p["product_id"] for p in r_a["results"]}
             ids_b = {p["product_id"] for p in r_b["results"]}
             overlap = ids_a & ids_b
@@ -757,7 +776,7 @@ def run_quick_tests():
     for name, body, expected_status, expected_intent, desc in tests:
         try:
             t = time.time()
-            r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=30)
+            r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=120)
             elapsed = (time.time() - t) * 1000
 
             status_ok = r.status_code == expected_status

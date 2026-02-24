@@ -191,7 +191,7 @@ class TestPlanToRequestUpdates:
     def test_attributes_only_plan(self, sample_plan_floral_jacket):
         """Plan with only attributes (no modes) should pass through as filters."""
         planner = self._make_planner()
-        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str, _ = (
             planner.plan_to_request_updates(sample_plan_floral_jacket)
         )
 
@@ -206,7 +206,7 @@ class TestPlanToRequestUpdates:
     def test_brand_plan_updates(self, sample_plan_brand_exact):
         """Brand plan should inject brand filter."""
         planner = self._make_planner()
-        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str, _ = (
             planner.plan_to_request_updates(sample_plan_brand_exact)
         )
 
@@ -217,7 +217,7 @@ class TestPlanToRequestUpdates:
     def test_mode_expansion_in_updates(self, sample_plan_vague):
         """Modes should be expanded into filters via expand_modes()."""
         planner = self._make_planner()
-        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str, _ = (
             planner.plan_to_request_updates(sample_plan_vague)
         )
 
@@ -240,7 +240,7 @@ class TestPlanToRequestUpdates:
     def test_coverage_mode_produces_exclusions(self, sample_plan_coverage):
         """Coverage modes should expand into exclude_* request fields."""
         planner = self._make_planner()
-        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str, _ = (
             planner.plan_to_request_updates(sample_plan_coverage)
         )
 
@@ -279,7 +279,7 @@ class TestPlanToRequestUpdates:
             attributes={"category_l1": ["Bottoms"]},
             avoid={"style_tags": ["Distressed"], "materials": ["Polyester"]},
         )
-        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str = (
+        updates, expanded, excludes, matched, algolia_q, semantic_q, intent_str, _ = (
             planner.plan_to_request_updates(plan)
         )
 
@@ -297,7 +297,7 @@ class TestPlanToRequestUpdates:
             attributes={},
             avoid={"materials": ["Polyester", "Mesh"]},  # Mesh overlaps with opaque
         )
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "exclude_materials" in updates
         materials = updates["exclude_materials"]
@@ -317,7 +317,7 @@ class TestPlanToRequestUpdates:
             attributes={"invalid_field": ["value"], "patterns": ["Floral"]},
             avoid={},
         )
-        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "invalid_field" not in updates
         assert "patterns" in updates
@@ -331,7 +331,7 @@ class TestPlanToRequestUpdates:
             attributes={"patterns": [], "colors": ["Red"]},
             avoid={},
         )
-        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "patterns" not in updates
         assert "colors" in updates
@@ -345,7 +345,7 @@ class TestPlanToRequestUpdates:
             attributes={"necktine": ["V-Neck"], "pattern": ["Floral"]},
             avoid={"material": ["Polyester"]},
         )
-        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         # necktine → neckline
         assert "neckline" in updates
@@ -369,7 +369,7 @@ class TestPlanToRequestUpdates:
             min_price=20.0,
             on_sale_only=True,
         )
-        updates, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert updates["max_price"] == 50.0
         assert updates["min_price"] == 20.0
@@ -386,7 +386,7 @@ class TestPlanToRequestUpdates:
             attributes={},
             avoid={},
         )
-        _, _, _, _, algolia_q, semantic_q, _ = planner.plan_to_request_updates(plan)
+        _, _, _, _, algolia_q, semantic_q, _, _ = planner.plan_to_request_updates(plan)
 
         assert algolia_q == "red dress"
         assert semantic_q == "red dress"  # fallback
@@ -400,7 +400,7 @@ class TestPlanToRequestUpdates:
             attributes={"occasions": ["Meeting"]},  # extra value
             avoid={},
         )
-        _, expanded, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        _, expanded, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "occasions" in expanded
         assert "Office" in expanded["occasions"]
@@ -411,7 +411,7 @@ class TestPlanToRequestUpdates:
         """matched_terms should always be empty list (legacy compat)."""
         planner = self._make_planner()
         plan = SearchPlan(intent="specific")
-        _, _, _, matched, _, _, _ = planner.plan_to_request_updates(plan)
+        _, _, _, matched, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert matched == []
 
 
@@ -540,7 +540,7 @@ class TestMockLLMResponses:
         assert plan.attributes["neckline"] == ["Square"]
 
         # Verify plan_to_request_updates
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert "neckline" in updates
         assert "Square" in updates["neckline"]
         assert "category_l1" in updates
@@ -562,7 +562,7 @@ class TestMockLLMResponses:
         assert plan is not None
         assert "cover_arms" in plan.modes
 
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert "exclude_sleeve_type" in updates
         assert "Sleeveless" in updates["exclude_sleeve_type"]
         assert "exclude_neckline" in updates
@@ -588,7 +588,7 @@ class TestMockLLMResponses:
         assert "wedding_guest" in plan.modes
         assert "Polyester" in plan.avoid.get("materials", [])
 
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         # Polyester merged with mode material exclusions
         assert "Polyester" in updates["exclude_materials"]
         assert "Mesh" in updates["exclude_materials"]
@@ -612,7 +612,7 @@ class TestMockLLMResponses:
         assert plan is not None
         assert plan.intent == "vague"
 
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         # glamorous → Glamorous, Sexy style_tags
         assert "style_tags" in updates
         assert "Glamorous" in updates["style_tags"]
@@ -659,7 +659,7 @@ class TestMockLLMResponses:
         plan = planner.plan("mid rise straight jeans no rips")
         assert plan is not None
 
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert updates.get("rise") == ["Mid"]
         assert updates.get("silhouette") == ["Straight"]
         assert "exclude_style_tags" in updates
@@ -684,7 +684,7 @@ class TestMockLLMResponses:
         assert plan is not None
         assert "opaque" in plan.modes
 
-        updates, _, excludes, _, _, _, _ = planner.plan_to_request_updates(plan)
+        updates, _, excludes, _, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert "materials" in updates
         assert "Linen" in updates["materials"]
         assert "exclude_materials" in updates

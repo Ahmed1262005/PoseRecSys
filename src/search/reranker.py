@@ -8,8 +8,12 @@ Scoring components (shared with the feed pipeline):
 - ProfileScorer:  11-dimension attribute-driven scoring (brand clusters,
   style, formality, fit/sleeve/length/neckline/rise, type, pattern,
   occasion, color-avoid, price, coverage hard-kills, category boosts).
+  Search uses LIGHT positive cap (+0.10) vs feed (+0.50).
+  Negative cap is -1.0 to allow coverage hard-kills through.
 - ContextScorer:  age-affinity + weather/season scoring.
+  Search uses reduced weight (0.20) vs feed (1.0).
 - Session scoring: EMA-powered brand/type/attr/intent boosts.
+  Search uses +/-0.08 cap vs feed's +/-0.15.
 
 Diversity enforcement:
 - Near-duplicate removal (size variants, sister-brand mapping, same-image)
@@ -39,7 +43,7 @@ if TYPE_CHECKING:
 # We keep a light overall cap to avoid session scoring from completely
 # overwhelming the RRF base score.
 SESSION_SKIP_PENALTY = -0.08
-MAX_SESSION_BOOST = 0.15  # Light overall cap (EMA scores rarely exceed ±0.5)
+MAX_SESSION_BOOST = 0.08  # Search cap (lighter than feed's 0.15)
 
 # Diversity defaults for search results
 MAX_PER_BRAND = 4
@@ -267,8 +271,17 @@ class SessionReranker:
         (as returned by ``WomenSearchEngine.load_user_profile()``).
         """
         try:
-            from scoring.profile_scorer import ProfileScorer
-            scorer = ProfileScorer()
+            from scoring.profile_scorer import ProfileScorer, ProfileScoringConfig
+            # Search uses light personalization: +0.10 positive cap
+            # (feed uses +0.50/-2.0). max_negative must allow coverage
+            # hard-kill (-1.0) to pass through — personality penalties
+            # won't exceed -0.10 anyway since individual weights are small.
+            search_config = ProfileScoringConfig(
+                max_positive=0.10,
+                max_negative=-1.0,
+                coverage_kill_penalty=-1.0,
+            )
+            scorer = ProfileScorer(config=search_config)
             scorer.score_items(results, profile, score_field="rrf_score")
             # Re-sort by adjusted score
             results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
@@ -376,7 +389,12 @@ class SessionReranker:
         try:
             from scoring import ContextScorer
             scorer = ContextScorer()
-            scorer.score_items(results, user_context, score_field="rrf_score")
+            # Search uses reduced weight (0.20) vs feed (1.0)
+            scorer.score_items(
+                results, user_context,
+                score_field="rrf_score",
+                weight=0.20,
+            )
             # Re-sort by adjusted rrf_score
             results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
         except Exception:

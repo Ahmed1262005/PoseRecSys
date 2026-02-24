@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.logging import get_logger
 from config.settings import get_settings
-from search.models import QueryIntent
+from search.models import QueryIntent, FollowUpQuestion, FollowUpOption
 from search.mode_config import expand_modes, get_mode_menu_text
 
 logger = get_logger(__name__)
@@ -57,6 +57,14 @@ class SearchPlan(BaseModel):
     semantic_query: str = Field(
         default="",
         description="Rich visual description for FashionCLIP semantic search"
+    )
+
+    # Multiple diverse semantic queries for wider result variety.
+    # Each targets a different visual subcategory or style angle.
+    # When present, these REPLACE semantic_query for the search.
+    semantic_queries: List[str] = Field(
+        default_factory=list,
+        description="2-4 diverse FashionCLIP queries targeting different visual angles"
     )
 
     # Mode tags — high-level intent labels from the mode menu
@@ -102,6 +110,20 @@ class SearchPlan(BaseModel):
     confidence: float = Field(
         default=0.8,
         description="Planner confidence in its interpretation"
+    )
+
+    # Follow-up questions for vague/ambiguous queries (Phase 1).
+    # Raw dicts from LLM output; parsed into FollowUpQuestion models
+    # by QueryPlanner.plan() and stored in parsed_follow_ups.
+    follow_ups: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Raw follow-up questions from the LLM (unparsed dicts)"
+    )
+
+    # Parsed follow-ups (populated after plan() validates the raw dicts)
+    parsed_follow_ups: List[Any] = Field(
+        default_factory=list,
+        description="Validated FollowUpQuestion objects (populated by QueryPlanner.plan())"
     )
 
     model_config = ConfigDict(extra="ignore")
@@ -219,7 +241,8 @@ def _build_system_prompt() -> str:
 Return a JSON object with these fields:
 - intent: "exact" | "specific" | "vague"
 - algolia_query: string (product-name keywords for text search)
-- semantic_query: string (rich visual description for FashionCLIP)
+- semantic_query: string (rich visual description for FashionCLIP — used as fallback)
+- semantic_queries: string[] (2-4 DIVERSE FashionCLIP queries — see Section 6b below)
 - modes: string[] (mode tags from the menu below)
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
@@ -304,6 +327,48 @@ avoid for specific concrete values that no mode covers.
 - For "no backless" → "a top with a fully closed high back"
 - For "not sheer" → "an opaque solid-fabric top"
 
+## SECTION 6b: DIVERSE SEMANTIC QUERIES (semantic_queries)
+
+A single semantic query pulls visually-similar items that cluster together. To get DIVERSE results,
+generate 2-4 semantic queries that each target a DIFFERENT visual angle of the user's intent.
+
+RULES:
+- Each query follows the same positive-only rules as semantic_query (Principle 7)
+- Vary by: garment TYPE, STYLE angle, SILHOUETTE, COLOR mood, or FABRIC texture
+- Do NOT repeat the same description with synonyms — each must pull a genuinely different cluster
+- For exact brand queries: just 1 query is fine (set semantic_queries to [semantic_query])
+- For specific queries: 2-3 queries exploring different interpretations
+- For vague queries: 3-4 queries covering different garment types or aesthetic angles
+- Keep each query under 77 tokens (FashionCLIP model limit)
+
+Example for "work outfit":
+```json
+"semantic_queries": [
+  "structured tailored blazer in solid neutral tones, professional office wear",
+  "elegant silk button-up blouse with refined collar, polished workwear",
+  "fitted knee-length pencil dress in dark fabric, clean professional silhouette"
+]
+```
+
+Example for "cute summer dress":
+```json
+"semantic_queries": [
+  "flowy floral print midi sundress in soft pastel colors, lightweight fabric",
+  "fitted ribbed knit mini dress in bright solid color, casual summer style",
+  "tiered ruffle cotton maxi dress with smocked bodice, bohemian summer"
+]
+```
+
+Example for "red midi dress" (specific — fewer needed):
+```json
+"semantic_queries": [
+  "a red satin midi dress with a fitted bodice and flowing skirt",
+  "a red knit bodycon midi dress with long sleeves, elegant and fitted"
+]
+```
+
+If you can only think of one meaningful angle, set semantic_queries to [semantic_query].
+
 ## SECTION 7: PRICE, BRAND, INTENT
 
 - **intent**: "exact" (pure brand search), "specific" (concrete product + attributes), "vague" (mood/aesthetic only)
@@ -332,6 +397,93 @@ VOCABULARY TRANSLATION:
 - "cherry red" / "crimson" → colors: ["Red", "Burgundy"]
 - "navy" → colors: ["Navy Blue"]
 - "nude" / "skin tone" → colors: ["Beige", "Taupe"]
+
+## SECTION 9: FOLLOW-UP QUESTIONS
+
+For vague or ambiguous queries, generate 1-3 contextual follow-up questions that would help
+refine the search. Only include questions where the user's intent is genuinely unclear.
+
+Each follow-up has:
+- "dimension": one of "formality", "coverage", "price", "garment_type", "color", "occasion"
+- "question": natural, conversational question text specific to THIS query
+- "options": 2-4 choices, each with "label" (display text) and "filters" (filter updates to apply)
+
+The "filters" object uses the same keys as the attributes section (category_l1, colors, formality,
+max_price, min_price, occasions, fit_type, sleeve_type, length, neckline, materials, patterns,
+style_tags, modes). "modes" is a special key that adds mode tags.
+
+RULES:
+- Only generate follow-ups when the query is genuinely ambiguous. "red midi dress" → no follow-ups.
+  "something cute for this weekend" → yes, 2-3 follow-ups.
+- Do NOT ask about things the user already specified. "office dress" → don't ask about occasion.
+- Questions must be SPECIFIC to the query, not generic. Not "What's your budget?" but
+  "What price range works for your date night outfit?"
+- Each option's filters should be ADDITIVE to the existing search plan (merged on top).
+- Keep options concise: 2-5 words per label.
+- For the "price" dimension, use min_price/max_price in filters.
+- For the "coverage" dimension, use modes (e.g. {{"modes": ["cover_arms", "cover_chest"]}}).
+- For "formality", use formality values (e.g. {{"formality": ["Smart Casual"]}}).
+- For "garment_type", use category_l1 (e.g. {{"category_l1": ["Dresses"]}}).
+- For "color", use colors (e.g. {{"colors": ["Black", "Navy Blue"]}}).
+- For "occasion", use occasions (e.g. {{"occasions": ["Date Night"]}}).
+
+Example for "something for a night out":
+```json
+"follow_ups": [
+  {{
+    "dimension": "formality",
+    "question": "How dressed up do you want to be?",
+    "options": [
+      {{"label": "Casual & fun", "filters": {{"formality": ["Casual"], "modes": ["casual"]}}}},
+      {{"label": "Sexy & glam", "filters": {{"formality": ["Semi-Formal"], "modes": ["glamorous"]}}}},
+      {{"label": "Elegant & classy", "filters": {{"formality": ["Formal"], "modes": ["very_formal"]}}}}
+    ]
+  }},
+  {{
+    "dimension": "garment_type",
+    "question": "What type of outfit are you thinking?",
+    "options": [
+      {{"label": "A dress", "filters": {{"category_l1": ["Dresses"]}}}},
+      {{"label": "Top & bottoms", "filters": {{"category_l1": ["Tops", "Bottoms"]}}}},
+      {{"label": "A jumpsuit", "filters": {{"category_l2": ["Jumpsuit", "Jumpsuits"]}}}}
+    ]
+  }}
+]
+```
+
+If the query is specific enough that no follow-ups are needed, return an empty array: "follow_ups": []
+
+Add follow_ups to your JSON output alongside intent, algolia_query, etc.
+
+## SECTION 10: PERSONALIZED FOLLOW-UPS (when user context is provided)
+
+When a [User context: ...] prefix is present before the query, use it to personalize follow-ups:
+
+1. **Reorder options** so the most likely choice for this user is FIRST:
+   - A Gen-Z user searching "outfit for a night out" → "Sexy & glam" first, not "Elegant & classy".
+   - An Established user searching "outfit for a night out" → "Elegant & classy" first.
+   - A user with brand_affinity "Ultra-Fast Fashion" → budget options first.
+   - A user with brand_affinity "Premium Contemporary" → mid/premium options first.
+
+2. **Calibrate price ranges** to the user's actual budget:
+   - If user context says price=$15-$80, price follow-up options should be "Under $30" / "$30-$60" / "$60+".
+   - If user context says price=$80-$300, options should be "Under $100" / "$100-$200" / "$200+".
+   - Never suggest price ranges far outside the user's range.
+
+3. **Adjust style/occasion for age group**:
+   - gen_z/young_adult: prioritize "Party", "Festival", "Night Out", "Casual & fun" options
+   - mid_career/established: prioritize "Work", "Dinner", "Wedding Guest", "Polished" options
+   - Modesty context: if modesty=covered, put coverage-related options higher; if modesty=balanced, keep default order
+
+4. **Match garment types to style persona**:
+   - style=bohemian → suggest flowy dresses, layered looks
+   - style=minimalist → suggest clean silhouettes, structured pieces
+   - style=trendy → suggest trending cuts, statement pieces
+
+5. **Do NOT filter out options** — still show all relevant choices, just reorder them.
+   The user can always pick any option. Personalization only affects DEFAULT ordering.
+
+6. **If no user context is provided**, generate follow-ups in the default order (most popular first).
 
 Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
 
@@ -376,9 +528,123 @@ class QueryPlanner:
     _MAX_RETRIES = 2
     _RETRY_BACKOFF_SECONDS = [6, 12]  # Wait times for retry 1, 2
 
-    def plan(self, query: str) -> Optional[SearchPlan]:
+    @staticmethod
+    def _parse_follow_ups(raw: Any) -> List[FollowUpQuestion]:
+        """Parse raw follow_ups dicts from LLM into validated FollowUpQuestion objects.
+
+        Gracefully skips malformed entries. Returns empty list on any issues.
+        """
+        if not isinstance(raw, list):
+            return []
+        parsed: List[FollowUpQuestion] = []
+        for raw_q in raw:
+            if not isinstance(raw_q, dict):
+                continue
+            try:
+                options = []
+                for raw_opt in raw_q.get("options", []):
+                    if isinstance(raw_opt, dict) and "label" in raw_opt:
+                        options.append(FollowUpOption(
+                            label=raw_opt["label"],
+                            filters=raw_opt.get("filters", {}),
+                        ))
+                if options and "question" in raw_q:
+                    parsed.append(FollowUpQuestion(
+                        dimension=raw_q.get("dimension", "other"),
+                        question=raw_q["question"],
+                        options=options,
+                    ))
+            except Exception:
+                continue  # Skip malformed follow-up, non-fatal
+        return parsed
+
+    @staticmethod
+    def _build_user_message(
+        query: str,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Build the user message with optional context prefix.
+
+        When user_context is provided, prepend a compact context line (~80-120
+        tokens) so the LLM can personalize follow-up option ordering per
+        Section 10.  The prefix does NOT change how the LLM interprets the
+        query itself — it only affects follow-up personalization.
+
+        Args:
+            query: The raw search query.
+            user_context: Optional dict with keys: age_group, brand_clusters,
+                cluster_descriptions, price_range, style_persona,
+                brand_openness, modesty.
+
+        Returns:
+            User message string (with or without context prefix).
+        """
+        if not user_context:
+            return query
+
+        parts = []
+
+        # Age group
+        age = user_context.get("age_group")
+        if age:
+            parts.append(f"age={age}")
+
+        # Style persona
+        style = user_context.get("style_persona")
+        if style:
+            if isinstance(style, list):
+                parts.append(f"style={'/'.join(style)}")
+            else:
+                parts.append(f"style={style}")
+
+        # Brand affinity — use cluster descriptions (natural language)
+        descs = user_context.get("cluster_descriptions")
+        if descs:
+            if isinstance(descs, list):
+                parts.append(f"brand_affinity={'/'.join(descs[:3])}")
+            else:
+                parts.append(f"brand_affinity={descs}")
+
+        # Price range
+        price_range = user_context.get("price_range")
+        if price_range and isinstance(price_range, dict):
+            pmin = price_range.get("min")
+            pmax = price_range.get("max")
+            if pmin is not None and pmax is not None:
+                parts.append(f"price=${pmin}-${pmax}")
+            elif pmax is not None:
+                parts.append(f"price=up to ${pmax}")
+
+        # Brand openness
+        openness = user_context.get("brand_openness")
+        if openness:
+            parts.append(f"openness={openness}")
+
+        # Modesty
+        modesty = user_context.get("modesty")
+        if modesty:
+            parts.append(f"modesty={modesty}")
+
+        if not parts:
+            return query
+
+        context_line = f"[User context: {', '.join(parts)}]"
+        return f"{context_line}\n\n{query}"
+
+    def plan(
+        self,
+        query: str,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[SearchPlan]:
         """
         Generate a search plan for the given query.
+
+        Args:
+            query: The user's search query.
+            user_context: Optional compact dict with user profile info for
+                personalized follow-ups. Keys: age_group, brand_clusters,
+                cluster_descriptions, price_range, style_persona,
+                brand_openness, modesty.
 
         Retries on rate-limit (429) errors with exponential backoff.
         Returns None if the planner is disabled, times out, or fails.
@@ -403,11 +669,16 @@ class QueryPlanner:
                     for p in ("gpt-5", "o1", "o3", "o4")
                 )
 
+                # Build user message: optional context prefix + query.
+                # Context is injected as a prefix (~80-120 tokens) so the LLM
+                # can personalize follow-up option ordering per Section 10.
+                user_message = self._build_user_message(query, user_context)
+
                 api_params = {
                     "model": self._model,
                     "messages": [
                         {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": query},
+                        {"role": "user", "content": user_message},
                     ],
                     "response_format": {"type": "json_object"},
                 }
@@ -446,6 +717,12 @@ class QueryPlanner:
 
                 plan = SearchPlan(**data)
 
+                # Parse follow_ups from raw LLM output into validated
+                # FollowUpQuestion Pydantic models.
+                plan.parsed_follow_ups = self._parse_follow_ups(
+                    data.get("follow_ups", [])
+                )
+
                 latency_ms = int((time.time() - t_start) * 1000)
                 logger.info(
                     "Query planner generated search plan",
@@ -456,6 +733,7 @@ class QueryPlanner:
                     modes=plan.modes,
                     attributes=plan.attributes,
                     avoid=plan.avoid,
+                    follow_ups_count=len(plan.parsed_follow_ups),
                     confidence=plan.confidence,
                     latency_ms=latency_ms,
                 )
@@ -659,7 +937,19 @@ class QueryPlanner:
             request_updates["on_sale_only"] = True
 
         # -----------------------------------------------------------
-        # Return the 7-tuple (same interface as before)
+        # Build the semantic queries list.
+        # Prefer the new diverse semantic_queries if the LLM provided them.
+        # Fall back to the single semantic_query (or algolia_query).
+        # -----------------------------------------------------------
+        fallback_semantic = plan.semantic_query or plan.algolia_query
+        semantic_queries = plan.semantic_queries if plan.semantic_queries else [fallback_semantic]
+        # Filter out empty strings
+        semantic_queries = [q for q in semantic_queries if q.strip()]
+        if not semantic_queries:
+            semantic_queries = [fallback_semantic]
+
+        # -----------------------------------------------------------
+        # Return the 8-tuple (extended from 7-tuple)
         # -----------------------------------------------------------
         return (
             request_updates,
@@ -667,8 +957,9 @@ class QueryPlanner:
             exclude_updates,
             [],  # matched_terms — no longer used, kept for API compat
             plan.algolia_query,
-            plan.semantic_query or plan.algolia_query,
+            fallback_semantic,  # single semantic query (backward compat)
             plan.intent,
+            semantic_queries,  # NEW: diverse semantic queries list
         )
 
 

@@ -26,6 +26,7 @@ from search.models import (
     AutocompleteResponse,
     SearchClickRequest,
     SearchConversionRequest,
+    SearchRefineRequest,
 )
 from search.hybrid_search import get_hybrid_search_service
 from search.autocomplete import get_autocomplete_service
@@ -81,6 +82,10 @@ def hybrid_search(
     # Build UserContext for context-aware scoring (age + weather)
     user_context = _build_user_context(user, user_profile)
 
+    # Build compact planner context for personalized follow-ups.
+    # Allow override from request body (for testing / report scripts).
+    planner_context = getattr(request, "planner_context", None) or _build_planner_context(user_profile, user_context)
+
     # Load live session scores if session_id provided (for session-aware reranking)
     session_scores = _load_session_scores(request.session_id)
 
@@ -90,6 +95,7 @@ def hybrid_search(
         user_profile=user_profile,
         user_context=user_context,
         session_scores=session_scores,
+        planner_context=planner_context,
     )
 
     # Wire search signals into recommendation session scoring (non-blocking)
@@ -102,6 +108,194 @@ def hybrid_search(
         )
     except Exception:
         pass  # Non-fatal — don't let search signal wiring break search
+
+    return result
+
+
+# =============================================================================
+# Refine Helpers
+# =============================================================================
+
+def _build_refined_query(original_query: str, selected_filters: dict) -> str:
+    """
+    Enrich the original query with context from selected follow-up filters.
+
+    This helps both Algolia keyword search and FashionCLIP semantic search
+    target the right products. E.g.:
+        "outfit for a night out" + {"category_l1": ["Dresses"]}
+        → "dress for a night out"
+    """
+    parts = []
+
+    # Garment type context from category_l1
+    cat = selected_filters.get("category_l1") or []
+    if isinstance(cat, list) and len(cat) == 1:
+        _CAT_TO_WORD = {
+            "Dresses": "dress",
+            "Tops": "top",
+            "Bottoms": "bottoms",
+            "Outerwear": "jacket",
+            "Sportswear": "activewear",
+        }
+        word = _CAT_TO_WORD.get(cat[0])
+        if word:
+            parts.append(word)
+
+    # Category L2 context (jumpsuit, skirt, etc.)
+    cat2 = selected_filters.get("category_l2") or []
+    if isinstance(cat2, list):
+        for c in cat2[:2]:
+            parts.append(c.lower())
+
+    # Color context
+    colors = selected_filters.get("colors") or []
+    if isinstance(colors, list):
+        for c in colors[:2]:
+            parts.append(c.lower())
+
+    # Formality context
+    formality = selected_filters.get("formality") or []
+    if isinstance(formality, list):
+        for f in formality[:1]:
+            parts.append(f.lower())
+
+    # Occasion context
+    occasions = selected_filters.get("occasions") or []
+    if isinstance(occasions, list):
+        for o in occasions[:1]:
+            parts.append(f"for {o.lower()}")
+
+    if parts:
+        prefix = " ".join(parts)
+        return f"{prefix} {original_query}"
+    return original_query
+
+
+# =============================================================================
+# Refine Search (apply follow-up answers)
+# =============================================================================
+
+@router.post(
+    "/refine",
+    response_model=HybridSearchResponse,
+    summary="Refine search by applying follow-up question answers",
+)
+def refine_search(
+    request: SearchRefineRequest,
+    user: SupabaseUser = Depends(require_auth),
+) -> HybridSearchResponse:
+    """
+    Refine a previous search by applying filter updates from follow-up answers.
+
+    The client sends the original query + the combined filters from selected
+    follow-up options. This endpoint merges them into a HybridSearchRequest
+    and re-runs the search **without** calling the LLM planner again (the
+    filters are already resolved).
+
+    This avoids a second 15-25s planner call while preserving the full
+    hybrid pipeline (Algolia + semantic + RRF + reranker).
+    """
+    service = get_hybrid_search_service()
+
+    # Build a refined query by injecting filter context into the original.
+    # This helps FashionCLIP semantic search target the right products
+    # (e.g. "outfit for a night out" + Dresses → "dress for a night out").
+    refined_query = _build_refined_query(
+        request.original_query, request.selected_filters
+    )
+
+    # Build a HybridSearchRequest from the refined query + selected filters
+    search_fields = {
+        "query": refined_query,
+        "page": request.page,
+        "page_size": request.page_size,
+        "session_id": request.session_id,
+        "sort_by": request.sort_by,
+        "semantic_boost": request.semantic_boost,
+    }
+
+    # Merge selected filters into the search request fields.
+    # Handle "modes" specially — they need to be expanded into filters via
+    # the planner's plan_to_request_updates, so we process them separately.
+    modes_from_filters = request.selected_filters.pop("modes", None)
+
+    # Direct filter fields (map 1:1 to HybridSearchRequest fields)
+    _ALLOWED_FILTER_FIELDS = {
+        "categories", "category_l1", "category_l2", "brands", "exclude_brands",
+        "colors", "color_family", "patterns", "materials", "occasions", "seasons",
+        "formality", "fit_type", "neckline", "sleeve_type", "length", "rise",
+        "silhouette", "article_type", "style_tags", "min_price", "max_price",
+        "on_sale_only",
+        # Exclusion filters
+        "exclude_neckline", "exclude_sleeve_type", "exclude_length",
+        "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
+        "exclude_colors", "exclude_materials", "exclude_occasions",
+        "exclude_seasons", "exclude_formality", "exclude_rise",
+        "exclude_style_tags",
+    }
+    for field, value in request.selected_filters.items():
+        if field in _ALLOWED_FILTER_FIELDS and value is not None:
+            search_fields[field] = value
+
+    # Expand modes into filters/exclusions if any were selected
+    if modes_from_filters and isinstance(modes_from_filters, list):
+        try:
+            from search.mode_config import expand_modes
+            mode_filters, mode_exclusions, _, _ = expand_modes(modes_from_filters)
+            # Merge mode filters into search fields (don't overwrite existing)
+            for field, values in mode_filters.items():
+                if field not in search_fields:
+                    search_fields[field] = list(values)
+            # Map mode exclusions to exclude_* fields
+            _EXCLUDE_MAP = {
+                "neckline": "exclude_neckline",
+                "sleeve_type": "exclude_sleeve_type",
+                "length": "exclude_length",
+                "fit_type": "exclude_fit_type",
+                "silhouette": "exclude_silhouette",
+                "patterns": "exclude_patterns",
+                "colors": "exclude_colors",
+                "materials": "exclude_materials",
+                "occasions": "exclude_occasions",
+                "seasons": "exclude_seasons",
+                "formality": "exclude_formality",
+                "rise": "exclude_rise",
+                "style_tags": "exclude_style_tags",
+            }
+            for field, values in mode_exclusions.items():
+                req_field = _EXCLUDE_MAP.get(field)
+                if req_field and req_field not in search_fields:
+                    search_fields[req_field] = list(values)
+        except Exception as e:
+            logger.warning("Failed to expand modes in refine", error=str(e))
+
+    # Build the search request
+    search_request = HybridSearchRequest(**search_fields)
+
+    # Load user profile + context (same as hybrid_search)
+    user_profile = _load_user_profile(user.id)
+    user_context = _build_user_context(user, user_profile)
+    session_scores = _load_session_scores(request.session_id)
+
+    result = service.search(
+        request=search_request,
+        user_id=user.id,
+        user_profile=user_profile,
+        user_context=user_context,
+        session_scores=session_scores,
+        skip_planner=True,  # Filters already resolved — skip the LLM call
+    )
+
+    # Forward search signal (same as hybrid_search)
+    try:
+        _forward_search_signal(
+            user_id=user.id,
+            session_id=request.session_id,
+            query=request.original_query,
+            request=search_request,
+        )
+    except Exception:
+        pass
 
     return result
 
@@ -328,6 +522,86 @@ def _load_session_scores(session_id: Optional[str]):
         return pipeline.get_session_scores(session_id)
     except Exception:
         return None  # Session scores are optional for search
+
+
+def _build_planner_context(
+    user_profile: Optional[Dict[str, Any]],
+    user_context: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a compact dict for the LLM planner to personalize follow-ups.
+
+    Distills the user's onboarding profile + resolved context into a small
+    payload (~100 tokens when serialized) that gets injected as a prefix
+    in the planner's user message.
+
+    Returns None if no useful profile data is available.
+    """
+    if not user_profile:
+        return None
+
+    ctx: Dict[str, Any] = {}
+
+    # Age group from resolved UserContext (most reliable)
+    if user_context is not None:
+        age_group = getattr(user_context, "age_group", None)
+        if age_group is not None:
+            # age_group is an enum — get its value
+            ctx["age_group"] = age_group.value if hasattr(age_group, "value") else str(age_group)
+
+    # Style persona
+    style_persona = user_profile.get("style_persona")
+    if style_persona:
+        ctx["style_persona"] = style_persona if isinstance(style_persona, list) else [style_persona]
+
+    # Brand clusters + descriptions
+    preferred_brands = user_profile.get("preferred_brands") or []
+    if preferred_brands:
+        try:
+            from recs.brand_clusters import (
+                get_brand_clusters,
+                get_cluster_traits,
+            )
+            # Collect unique cluster IDs from preferred brands
+            cluster_ids: set = set()
+            for brand in preferred_brands:
+                for cid, _conf in get_brand_clusters(brand):
+                    cluster_ids.add(cid)
+
+            if cluster_ids:
+                ctx["brand_clusters"] = sorted(cluster_ids)
+                # Get short cluster name descriptions for LLM context
+                descs = []
+                for cid in sorted(cluster_ids):
+                    traits = get_cluster_traits(cid)
+                    if traits:
+                        descs.append(traits.name)
+                if descs:
+                    ctx["cluster_descriptions"] = descs
+        except Exception:
+            pass  # Brand cluster lookup is optional
+
+    # Price range
+    global_min = user_profile.get("global_min_price")
+    global_max = user_profile.get("global_max_price")
+    if global_min is not None or global_max is not None:
+        price_range: Dict[str, Any] = {}
+        if global_min is not None:
+            price_range["min"] = int(global_min)
+        if global_max is not None:
+            price_range["max"] = int(global_max)
+        ctx["price_range"] = price_range
+
+    # Brand openness
+    brand_openness = user_profile.get("brand_openness")
+    if brand_openness:
+        ctx["brand_openness"] = brand_openness
+
+    # Modesty
+    modesty = user_profile.get("modesty")
+    if modesty:
+        ctx["modesty"] = modesty
+
+    return ctx if ctx else None
 
 
 def _forward_search_signal(

@@ -88,6 +88,9 @@ class HybridSearchRequest(BaseModel):
     # Search options
     semantic_boost: float = Field(0.4, ge=0.0, le=1.0, description="Weight for semantic results in RRF")
 
+    # Planner context override (for testing / scripts — normally built server-side from user profile)
+    planner_context: Optional[Dict[str, Any]] = Field(None, description="Override planner context for personalized follow-ups (testing only)", exclude=True)
+
     @model_validator(mode="after")
     def validate_price_range(self):
         """Ensure min_price <= max_price when both are set."""
@@ -95,6 +98,21 @@ class HybridSearchRequest(BaseModel):
             if self.min_price > self.max_price:
                 raise ValueError(f"min_price ({self.min_price}) must be <= max_price ({self.max_price})")
         return self
+
+
+class SearchRefineRequest(BaseModel):
+    """Request to refine a search by applying follow-up answers."""
+    original_query: str = Field(..., min_length=1, max_length=500, description="The original search query")
+    selected_filters: Dict[str, Any] = Field(
+        ...,
+        description="Combined filter updates from selected follow-up options"
+    )
+    # All the same filter fields as HybridSearchRequest (inherited via merge)
+    page: int = Field(1, ge=1, description="Page number")
+    page_size: int = Field(50, ge=1, le=100, description="Results per page")
+    session_id: Optional[str] = Field(None, description="Session ID for deduplication")
+    sort_by: SortBy = Field(SortBy.RELEVANCE, description="Sort order")
+    semantic_boost: float = Field(0.4, ge=0.0, le=1.0, description="Weight for semantic results in RRF")
 
 
 class AutocompleteRequest(BaseModel):
@@ -119,6 +137,29 @@ class SearchConversionRequest(BaseModel):
 # ============================================================================
 # Response Models
 # ============================================================================
+
+# ============================================================================
+# Follow-Up Questions (Phase 1: Interactive Search)
+# ============================================================================
+
+class FollowUpOption(BaseModel):
+    """A selectable option for a follow-up question."""
+    label: str = Field(..., description="Display text for the option (e.g. 'Under $50')")
+    filters: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Filter updates to apply when this option is selected (e.g. {'max_price': 50})"
+    )
+
+
+class FollowUpQuestion(BaseModel):
+    """A contextual follow-up question to refine ambiguous search queries."""
+    dimension: str = Field(
+        ...,
+        description="Which aspect this question addresses: formality, coverage, price, garment_type, color, occasion"
+    )
+    question: str = Field(..., description="The question text to display to the user")
+    options: List[FollowUpOption] = Field(..., description="2-4 selectable options")
+
 
 class ProductResult(BaseModel):
     """A single product in search results."""
@@ -188,6 +229,11 @@ class HybridSearchResponse(BaseModel):
         "Keys: brand, category_l1, formality, primary_color, color_family, pattern, "
         "fit_type, neckline, sleeve_type, length, silhouette, rise, occasions, "
         "seasons, style_tags, article_type, broad_category, is_on_sale, materials",
+    )
+    follow_ups: Optional[List[FollowUpQuestion]] = Field(
+        None,
+        description="Contextual follow-up questions to refine the search (only for vague/ambiguous queries). "
+        "Each question has 2-4 options with pre-computed filter updates.",
     )
 
 
