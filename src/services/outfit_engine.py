@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1771,14 +1772,22 @@ class OutfitEngine:
     - get_similar_scored(): Same-category similar items with 9-dim scoring
     """
 
+    # Maximum cached prompt embeddings (bounded to avoid memory growth)
+    _EMBEDDING_CACHE_SIZE = 512
+
     def __init__(self, supabase: Client):
         self.supabase = supabase
         self._clip_model = None
         self._clip_processor = None
         self._clip_lock = threading.Lock()
+        # Phase 4: LRU prompt embedding cache  {prompt_text -> pgvector_str}
+        self._embedding_cache: Dict[str, str] = {}
+        self._embedding_cache_order: List[str] = []  # insertion order for eviction
+        # Thread pool for parallel I/O (Supabase RPCs)
+        self._io_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="outfit_io")
 
     # ------------------------------------------------------------------
-    # FashionCLIP text encoder (lazy-loaded)
+    # FashionCLIP text encoder (lazy-loaded, batched, cached)
     # ------------------------------------------------------------------
 
     def _load_clip(self):
@@ -1793,22 +1802,69 @@ class OutfitEngine:
                     processor = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
                     if torch.cuda.is_available():
                         model = model.cuda()
+                        logger.info("OutfitEngine: FashionCLIP on CUDA")
+                    else:
+                        logger.info("OutfitEngine: FashionCLIP on CPU")
                     model.eval()
                     self._clip_processor = processor
                     self._clip_model = model
                     logger.info("OutfitEngine: FashionCLIP model loaded")
 
+    def _cache_put(self, key: str, value: str) -> None:
+        """Add to embedding cache with bounded eviction."""
+        if key in self._embedding_cache:
+            return
+        if len(self._embedding_cache) >= self._EMBEDDING_CACHE_SIZE:
+            # Evict oldest
+            evict_key = self._embedding_cache_order.pop(0)
+            self._embedding_cache.pop(evict_key, None)
+        self._embedding_cache[key] = value
+        self._embedding_cache_order.append(key)
+
     def _encode_text(self, text: str) -> str:
-        """Encode text to a pgvector-compatible embedding string."""
+        """Encode a single text to a pgvector-compatible embedding string.
+
+        Uses cache if available, otherwise delegates to batch encode.
+        """
+        cached = self._embedding_cache.get(text)
+        if cached is not None:
+            return cached
+        results = self._encode_texts_batch([text])
+        return results[0]
+
+    def _encode_texts_batch(self, texts: List[str]) -> List[str]:
+        """Batch-encode multiple texts in a single FashionCLIP forward pass.
+
+        Returns list of pgvector-compatible embedding strings, one per input.
+        Cache hits are served from cache; only uncached texts hit the model.
+        """
         import torch
         self._load_clip()
+
+        # Separate cached vs uncached
+        results = [None] * len(texts)
+        uncached_indices = []
+        uncached_texts = []
+        for i, text in enumerate(texts):
+            cached = self._embedding_cache.get(text)
+            if cached is not None:
+                results[i] = cached
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
+
+        if not uncached_texts:
+            return results  # all cached
+
+        # Batch encode uncached texts in one forward pass
         with torch.no_grad():
             inputs = self._clip_processor(
-                text=[text], return_tensors="pt",
+                text=uncached_texts, return_tensors="pt",
                 padding=True, truncation=True, max_length=77,
             )
             if torch.cuda.is_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
+
             emb = self._clip_model.get_text_features(**inputs)
             if isinstance(emb, torch.Tensor):
                 pass
@@ -1817,8 +1873,20 @@ class OutfitEngine:
             elif hasattr(emb, "text_embeds") and emb.text_embeds is not None:
                 emb = emb.text_embeds
             emb = emb / emb.norm(dim=-1, keepdim=True)
-            vec = emb.cpu().numpy().flatten().astype("float32").tolist()
-        return f"[{','.join(map(str, vec))}]"
+            vecs = emb.cpu().numpy().astype("float32")
+
+        # Store results and populate cache
+        for j, idx in enumerate(uncached_indices):
+            vec_list = vecs[j].tolist()
+            vec_str = f"[{','.join(map(str, vec_list))}]"
+            self._cache_put(uncached_texts[j], vec_str)
+            results[idx] = vec_str
+
+        logger.debug(
+            "Batch encoded %d texts (%d cached, %d computed)",
+            len(texts), len(texts) - len(uncached_texts), len(uncached_texts),
+        )
+        return results
 
     # ------------------------------------------------------------------
     # Diverse prompt generation
@@ -1951,28 +2019,45 @@ class OutfitEngine:
         per_prompt: int = 8,
     ) -> List[Dict]:
         """
-        Run each prompt through FashionCLIP → text_search_products and
-        merge results.  Deduplicates by product_id across prompts.
+        Batch-encode all prompts via FashionCLIP (single GPU forward pass),
+        then fire all text_search_products RPCs concurrently via thread pool.
+        Deduplicates by product_id across prompts.
         """
+        if not prompts:
+            return []
+
+        # Phase 1: Batch encode ALL prompts in one forward pass
+        vec_strs = self._encode_texts_batch(prompts)
+
+        # Phase 3: Fire all Supabase RPCs concurrently
+        def _run_rpc(vec_str: str) -> List[Dict]:
+            result = self.supabase.rpc("text_search_products", {
+                "query_embedding": vec_str,
+                "match_count": per_prompt,
+                "match_offset": 0,
+                "filter_category": target_category,
+            }).execute()
+            return result.data or []
+
         seen_ids: Set[str] = set()
         all_results: List[Dict] = []
 
-        for prompt in prompts:
+        futures = {
+            self._io_pool.submit(_run_rpc, vec_str): i
+            for i, vec_str in enumerate(vec_strs)
+        }
+        for future in as_completed(futures):
             try:
-                vec_str = self._encode_text(prompt)
-                result = self.supabase.rpc("text_search_products", {
-                    "query_embedding": vec_str,
-                    "match_count": per_prompt,
-                    "match_offset": 0,
-                    "filter_category": target_category,
-                }).execute()
-                for row in (result.data or []):
+                rows = future.result()
+                for row in rows:
                     pid = str(row.get("product_id", ""))
                     if pid and pid not in seen_ids:
                         seen_ids.add(pid)
                         all_results.append(row)
             except Exception as e:
-                logger.warning("Text search prompt failed (%s): %s", prompt[:40], e)
+                idx = futures[future]
+                logger.warning("Text search RPC failed (prompt %d): %s", idx, e)
+
         return all_results
 
     # ------------------------------------------------------------------
@@ -2030,14 +2115,36 @@ class OutfitEngine:
 
         effective_limit = limit if (target_category and limit) else items_per_category
 
-        # 4. Retrieve, enrich, filter, score per category
+        # 4. Retrieve, enrich, filter, score per category (PARALLEL)
         recommendations: Dict[str, Any] = {}
         all_top_picks = []
 
+        # Phase 2: score all target categories concurrently
+        scored_by_cat: Dict[str, List[Dict]] = {}
+        if len(target_broads) > 1:
+            futures = {
+                self._io_pool.submit(
+                    self._score_category,
+                    source, source_broad, tb, status, fusion_weight,
+                ): tb
+                for tb in target_broads
+            }
+            for future in as_completed(futures):
+                tb = futures[future]
+                try:
+                    scored_by_cat[tb] = future.result()
+                except Exception as e:
+                    logger.error("Parallel _score_category failed for %s: %s", tb, e)
+                    scored_by_cat[tb] = []
+        else:
+            for tb in target_broads:
+                scored_by_cat[tb] = self._score_category(
+                    source, source_broad, tb, status, fusion_weight,
+                )
+
+        # Assemble results (preserve target_broads order)
         for target_broad in target_broads:
-            scored = self._score_category(
-                source, source_broad, target_broad, status, fusion_weight,
-            )
+            scored = scored_by_cat.get(target_broad, [])
 
             # Pagination
             if target_category:
@@ -2156,16 +2263,26 @@ class OutfitEngine:
 
     def _fetch_product_with_attrs(self, product_id: str) -> Optional[AestheticProfile]:
         try:
-            result = self.supabase.table("products").select(
-                _PRODUCT_SELECT
-            ).eq("id", product_id).limit(1).execute()
+            # Fetch product row and Gemini attributes concurrently
+            def _get_product():
+                return self.supabase.table("products").select(
+                    _PRODUCT_SELECT
+                ).eq("id", product_id).limit(1).execute()
+
+            def _get_attrs():
+                return self.supabase.table("product_attributes").select(
+                    _ATTRS_SELECT
+                ).eq("sku_id", product_id).limit(1).execute()
+
+            prod_future = self._io_pool.submit(_get_product)
+            attrs_future = self._io_pool.submit(_get_attrs)
+
+            result = prod_future.result(timeout=10)
             if not result.data:
                 return None
             product = result.data[0]
 
-            attrs_result = self.supabase.table("product_attributes").select(
-                _ATTRS_SELECT
-            ).eq("sku_id", product_id).limit(1).execute()
+            attrs_result = attrs_future.result(timeout=10)
             attrs = attrs_result.data[0] if attrs_result.data else {}
             return AestheticProfile.from_product_and_attrs(product, attrs)
         except Exception as e:
@@ -2249,16 +2366,28 @@ class OutfitEngine:
         """
         target_db_cats = BROAD_TO_CATEGORIES.get(target_broad, [target_broad])
 
-        # --- Pool 1: product-to-product pgvector similarity ---
-        raw = self._retrieve_candidates(source.product_id, target_db_cats, limit=60)
+        # Phase 3: Run both retrieval pools concurrently.
+        # Generate prompts first (in-memory, instant) so text encoding can
+        # start while pgvector RPC is in flight.
+        prompts = self._generate_complement_prompts(source, source_broad, target_broad)
 
-        # --- Pool 2: diverse text prompt retrieval ---
+        pgvec_future = self._io_pool.submit(
+            self._retrieve_candidates, source.product_id, target_db_cats, 60,
+        )
+        text_future = self._io_pool.submit(
+            self._retrieve_text_candidates, prompts, target_db_cats[0], 8,
+        )
+
+        # Collect pgvector results
         try:
-            prompts = self._generate_complement_prompts(source, source_broad, target_broad)
-            text_raw = self._retrieve_text_candidates(
-                prompts, target_category=target_db_cats[0], per_prompt=8,
-            )
-            # Merge: deduplicate by product_id
+            raw = pgvec_future.result(timeout=30)
+        except Exception as e:
+            logger.warning("pgvector retrieval failed for %s: %s", target_broad, e)
+            raw = []
+
+        # Collect text-prompt results and merge
+        try:
+            text_raw = text_future.result(timeout=30)
             existing_ids = {
                 str(r.get("product_id") or r.get("id", ""))
                 for r in raw
