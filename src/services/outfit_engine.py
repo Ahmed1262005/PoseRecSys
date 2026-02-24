@@ -1785,18 +1785,41 @@ class OutfitEngine:
         self._embedding_cache_order: List[str] = []  # insertion order for eviction
         # Thread pool — large enough to avoid deadlock from nested submissions
         # (build_outfit -> _score_category -> _retrieve_text_candidates all submit here)
-        self._io_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="outfit_io")
-        # Semaphore to cap concurrent Supabase connections (prevents EAGAIN)
-        self._supabase_sem = threading.Semaphore(6)
+        self._io_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="outfit_io")
+        # Semaphore to cap concurrent Supabase connections (prevents EAGAIN).
+        # 4 concurrent is safe for most OS socket limits under rapid fire.
+        self._supabase_sem = threading.Semaphore(4)
 
     # ------------------------------------------------------------------
-    # Throttled Supabase I/O (prevents EAGAIN from too many connections)
+    # Throttled Supabase I/O with retry (prevents EAGAIN)
     # ------------------------------------------------------------------
 
-    def _supabase_call(self, fn, *args, **kwargs):
-        """Execute a Supabase call under the connection semaphore."""
-        with self._supabase_sem:
-            return fn(*args, **kwargs)
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        """Check if an exception is a transient OS/network error worth retrying."""
+        msg = str(exc)
+        return (
+            "[Errno 11]" in msg       # EAGAIN / Resource temporarily unavailable
+            or "Resource temporarily" in msg
+            or "[Errno 104]" in msg    # Connection reset by peer
+            or "ConnectionReset" in type(exc).__name__
+        )
+
+    def _supabase_retry(self, fn, *args, max_retries: int = 3, **kwargs):
+        """Execute a Supabase call with semaphore + retry on transient errors."""
+        import time as _time
+        for attempt in range(max_retries + 1):
+            try:
+                with self._supabase_sem:
+                    return fn(*args, **kwargs)
+            except Exception as e:
+                if attempt < max_retries and self._is_retryable(e):
+                    delay = 0.3 * (2 ** attempt)  # 0.3s, 0.6s, 1.2s
+                    logger.debug("Retryable error (attempt %d/%d), waiting %.1fs: %s",
+                                 attempt + 1, max_retries, delay, e)
+                    _time.sleep(delay)
+                else:
+                    raise
 
     # ------------------------------------------------------------------
     # FashionCLIP text encoder (lazy-loaded, batched, cached)
@@ -2041,15 +2064,16 @@ class OutfitEngine:
         # Phase 1: Batch encode ALL prompts in one forward pass
         vec_strs = self._encode_texts_batch(prompts)
 
-        # Phase 3: Fire all Supabase RPCs concurrently (throttled by semaphore)
+        # Phase 3: Fire all Supabase RPCs concurrently (throttled + retry)
         def _run_rpc(vec_str: str) -> List[Dict]:
-            with self._supabase_sem:
-                result = self.supabase.rpc("text_search_products", {
+            result = self._supabase_retry(
+                lambda: self.supabase.rpc("text_search_products", {
                     "query_embedding": vec_str,
                     "match_count": per_prompt,
                     "match_offset": 0,
                     "filter_category": target_category,
                 }).execute()
+            )
             return result.data or []
 
         seen_ids: Set[str] = set()
@@ -2278,16 +2302,18 @@ class OutfitEngine:
         try:
             # Fetch product row and Gemini attributes concurrently
             def _get_product():
-                with self._supabase_sem:
-                    return self.supabase.table("products").select(
+                return self._supabase_retry(
+                    lambda: self.supabase.table("products").select(
                         _PRODUCT_SELECT
                     ).eq("id", product_id).limit(1).execute()
+                )
 
             def _get_attrs():
-                with self._supabase_sem:
-                    return self.supabase.table("product_attributes").select(
+                return self._supabase_retry(
+                    lambda: self.supabase.table("product_attributes").select(
                         _ATTRS_SELECT
                     ).eq("sku_id", product_id).limit(1).execute()
+                )
 
             prod_future = self._io_pool.submit(_get_product)
             attrs_future = self._io_pool.submit(_get_attrs)
@@ -2315,13 +2341,14 @@ class OutfitEngine:
         per_cat = max(10, limit // len(target_categories)) if target_categories else limit
         for cat in target_categories:
             try:
-                with self._supabase_sem:
-                    result = self.supabase.rpc("get_similar_products_v2", {
+                result = self._supabase_retry(
+                    lambda c=cat: self.supabase.rpc("get_similar_products_v2", {
                         "source_product_id": source_id,
                         "match_count": per_cat,
                         "match_offset": 0,
-                        "filter_category": cat,
+                        "filter_category": c,
                     }).execute()
+                )
                 all_results.extend(result.data or [])
             except Exception as e:
                 logger.warning("pgvector retrieval failed for %s: %s", cat, e)
@@ -2337,10 +2364,11 @@ class OutfitEngine:
         for i in range(0, len(ids), 500):
             batch = ids[i: i + 500]
             try:
-                with self._supabase_sem:
-                    result = self.supabase.table("product_attributes").select(
+                result = self._supabase_retry(
+                    lambda b=batch: self.supabase.table("product_attributes").select(
                         _ATTRS_SELECT
-                    ).in_("sku_id", batch).execute()
+                    ).in_("sku_id", b).execute()
+                )
                 for row in (result.data or []):
                     attrs_by_id[row["sku_id"]] = row
             except Exception as e:
