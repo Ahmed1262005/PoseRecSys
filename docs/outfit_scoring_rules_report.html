@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Outfit Scoring Rules — Complete the Fit v2</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222633;
+    --border: #2e3348;
+    --text: #e2e4ec;
+    --text2: #9da2b8;
+    --accent: #7c6ff7;
+    --accent2: #a78bfa;
+    --green: #34d399;
+    --green-bg: rgba(52,211,153,.08);
+    --red: #f87171;
+    --red-bg: rgba(248,113,113,.08);
+    --yellow: #fbbf24;
+    --yellow-bg: rgba(251,191,36,.08);
+    --blue: #60a5fa;
+    --blue-bg: rgba(96,165,250,.08);
+    --pink: #f472b6;
+    --cyan: #22d3ee;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    padding: 0;
+  }
+  .wrapper { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  /* ── Header ─────────────────────────────────────── */
+  header {
+    text-align: center;
+    padding: 3rem 0 2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2.5rem;
+  }
+  header h1 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--pink));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: .5rem;
+  }
+  header p { color: var(--text2); font-size: .95rem; }
+  header .tag {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: .25rem .9rem;
+    font-size: .78rem;
+    color: var(--accent2);
+    margin-top: .75rem;
+  }
+
+  /* ── Nav / TOC ──────────────────────────────────── */
+  nav.toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: .6rem;
+    margin-bottom: 2.5rem;
+  }
+  nav.toc a {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: .8rem 1rem;
+    text-decoration: none;
+    color: var(--text);
+    font-size: .85rem;
+    font-weight: 500;
+    transition: border-color .2s, background .2s;
+  }
+  nav.toc a:hover { border-color: var(--accent); background: var(--surface2); }
+  nav.toc a span { display: block; color: var(--text2); font-size: .72rem; font-weight: 400; margin-top: .2rem; }
+
+  /* ── Section ────────────────────────────────────── */
+  section.dim {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 2rem 2rem 1.8rem;
+    margin-bottom: 2rem;
+  }
+  section.dim h2 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    margin-bottom: .25rem;
+  }
+  section.dim h2 .num {
+    display: inline-block;
+    width: 1.9rem; height: 1.9rem;
+    line-height: 1.9rem;
+    text-align: center;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 8px;
+    font-size: .85rem;
+    margin-right: .5rem;
+    vertical-align: middle;
+  }
+  section.dim .subtitle { color: var(--text2); font-size: .87rem; margin-bottom: 1.5rem; }
+
+  h3 { font-size: 1.05rem; margin: 1.5rem 0 .6rem; color: var(--accent2); }
+  h4 { font-size: .92rem; margin: 1rem 0 .4rem; color: var(--text); font-weight: 600; }
+  p, li { font-size: .9rem; color: var(--text); }
+  ul { padding-left: 1.3rem; margin-bottom: .8rem; }
+  li { margin-bottom: .3rem; }
+  li code, p code {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: .1rem .4rem;
+    border-radius: 5px;
+    font-size: .82rem;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: var(--cyan);
+  }
+
+  /* ── Tables ─────────────────────────────────────── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: .8rem 0 1rem;
+    font-size: .85rem;
+  }
+  th, td {
+    padding: .55rem .8rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--surface2);
+    color: var(--text2);
+    font-weight: 600;
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  tr:hover td { background: rgba(124,111,247,.04); }
+
+  /* ── Example cards ──────────────────────────────── */
+  .examples {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .8rem;
+    margin-top: 1rem;
+  }
+  @media (max-width: 700px) { .examples { grid-template-columns: 1fr; } }
+  .ex {
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--border);
+  }
+  .ex.good { background: var(--green-bg); border-color: rgba(52,211,153,.25); }
+  .ex.bad  { background: var(--red-bg);   border-color: rgba(248,113,113,.25); }
+  .ex.ok   { background: var(--yellow-bg); border-color: rgba(251,191,36,.25); }
+  .ex.info { background: var(--blue-bg);  border-color: rgba(96,165,250,.25); }
+  .ex .label {
+    font-size: .72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom: .35rem;
+  }
+  .ex.good .label { color: var(--green); }
+  .ex.bad  .label { color: var(--red); }
+  .ex.ok   .label { color: var(--yellow); }
+  .ex.info .label { color: var(--blue); }
+  .ex .title { font-weight: 600; font-size: .88rem; margin-bottom: .25rem; }
+  .ex .desc  { font-size: .82rem; color: var(--text2); line-height: 1.5; }
+
+  /* ── Status badges ──────────────────────────────── */
+  .badge {
+    display: inline-block;
+    font-size: .7rem;
+    font-weight: 600;
+    padding: .15rem .55rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    vertical-align: middle;
+    margin-left: .4rem;
+  }
+  .badge.impl { background: rgba(52,211,153,.15); color: var(--green); }
+  .badge.partial { background: rgba(251,191,36,.15); color: var(--yellow); }
+  .badge.not { background: rgba(248,113,113,.15); color: var(--red); }
+
+  /* ── Scoring formula boxes ──────────────────────── */
+  .formula {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .8rem 1rem;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: .82rem;
+    color: var(--cyan);
+    margin: .8rem 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  /* ── Cross-dim gates ────────────────────────────── */
+  .gate {
+    background: var(--surface2);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: .8rem 1rem;
+    margin: .6rem 0;
+  }
+  .gate .gate-name { font-weight: 700; font-size: .88rem; color: var(--accent2); }
+  .gate .gate-desc { font-size: .84rem; color: var(--text2); margin-top: .2rem; }
+
+  /* ── Weights section ────────────────────────────── */
+  .weight-bar {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin: .3rem 0;
+  }
+  .weight-bar .wlabel {
+    width: 140px;
+    font-size: .82rem;
+    color: var(--text2);
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .weight-bar .bar-track {
+    flex: 1;
+    height: 18px;
+    background: var(--surface2);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+  }
+  .weight-bar .bar-fill {
+    height: 100%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--accent), var(--pink));
+  }
+  .weight-bar .wval {
+    width: 40px;
+    font-size: .82rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  /* ── Summary stats ──────────────────────────────── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: .7rem;
+    margin: 1.5rem 0;
+  }
+  .stat-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    text-align: center;
+  }
+  .stat-card .val { font-size: 1.6rem; font-weight: 700; color: var(--accent2); }
+  .stat-card .lbl { font-size: .78rem; color: var(--text2); margin-top: .2rem; }
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- ═══════════════════════ HEADER ═══════════════════════ -->
+<header>
+  <h1>Complete the Fit — Scoring Rules Report</h1>
+  <p>ChatGPT's rule map translated into the TATTOO v2 scoring engine</p>
+  <div class="tag">outfit_engine.py &middot; 8 dimensions &middot; 1962 lines</div>
+</header>
+
+<!-- ═══════════════════════ STATS ═══════════════════════ -->
+<div class="stats">
+  <div class="stat-card"><div class="val">8</div><div class="lbl">Scoring Dimensions</div></div>
+  <div class="stat-card"><div class="val">4</div><div class="lbl">Cross-Dim Gates</div></div>
+  <div class="stat-card"><div class="val">15&times;15</div><div class="lbl">Style Matrix</div></div>
+  <div class="stat-card"><div class="val">16&times;16</div><div class="lbl">Fabric Matrix</div></div>
+  <div class="stat-card"><div class="val">55/45</div><div class="lbl">Attr / Cosine Fusion</div></div>
+  <div class="stat-card"><div class="val">0.528</div><div class="lbl">Good/Bad Gap</div></div>
+</div>
+
+<!-- ═══════════════════════ TOC ═══════════════════════ -->
+<nav class="toc">
+  <a href="#dim1">1. Occasion<span>Formality + context</span></a>
+  <a href="#dim2">2. Style<span>Vibe / archetype</span></a>
+  <a href="#dim3">3. Fabric<span>Material + texture</span></a>
+  <a href="#dim4">4. Silhouette<span>Shape + proportions</span></a>
+  <a href="#dim5">5. Color<span>Harmony rules</span></a>
+  <a href="#dim6">6. Seasonality<span>Weather + layering</span></a>
+  <a href="#dim7">7. Pattern<span>Print mixing</span></a>
+  <a href="#dim8">8. Price<span>Coherence</span></a>
+  <a href="#gates">Cross-Dim Gates<span>Hard caps &amp; penalties</span></a>
+  <a href="#weights">Weights<span>Category-pair tuned</span></a>
+</nav>
+
+<!-- ═══════════════════ 1. OCCASION ═══════════════════ -->
+<section class="dim" id="dim1">
+  <h2><span class="num">1</span> Occasion &amp; Formality <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Prevents nonsense pairings (gym shorts + silk blazer). The heaviest-weighted dimension.</div>
+
+  <h3>What we store (per item)</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>occasions</code></td><td>multi-tag</td><td>everyday, work, date, night out, wedding guest, vacation, lounge, active...</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>formality</code></td><td>string</td><td>Casual, Smart Casual, Business Casual, Semi-Formal, Formal</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>formality_level</code></td><td>int 1-5</td><td>1=ultra casual ... 5=formal/evening</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>is_bridge</code></td><td>bool</td><td>blazer, trench, leather jacket, button-down, clean tee, cardigan...</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>time_context</code></td><td>inferred</td><td>day / night (from occasion tags)</td><td><span class="badge impl">Inferred</span></td></tr>
+    <tr><td><code>dress_code</code></td><td>optional</td><td>casual, smart_casual, business, cocktail, formal</td><td><span class="badge not">Not stored</span></td></tr>
+    <tr><td><code>comfort_level</code></td><td>optional</td><td>high / medium / low</td><td><span class="badge not">Not stored</span></td></tr>
+  </table>
+
+  <h3>Rule A: Formality Distance (weight 0.55)</h3>
+  <p>Core mechanism &mdash; absolute delta between formality levels on a 1&ndash;5 scale.</p>
+  <table>
+    <tr><th>&Delta; (distance)</th><th>Score</th><th>Meaning</th></tr>
+    <tr><td>0</td><td><strong>1.00</strong></td><td>Perfect match (both casual, both formal, etc.)</td></tr>
+    <tr><td>1</td><td>0.85</td><td>Adjacent levels (casual + smart casual)</td></tr>
+    <tr><td>2 + bridge item</td><td>0.70</td><td>Bridged &mdash; blazer/trench/leather jacket saves it</td></tr>
+    <tr><td>2, no bridge</td><td>0.55</td><td>Risky pairing, noticeable mismatch</td></tr>
+    <tr><td>&ge;3</td><td><strong>0.10</strong></td><td>Kill &mdash; gym wear + evening gown territory</td></tr>
+  </table>
+
+  <h3>Rule B: Occasion Overlap &amp; Conflicts (weight 0.30)</h3>
+  <h4>Hard conflicts (score = 0.05):</h4>
+  <ul>
+    <li><code>{workout, gym, exercise}</code> vs <code>{formal event, wedding guest, office, work}</code></li>
+    <li><code>{lounging}</code> vs <code>{office, work, formal event, wedding guest}</code></li>
+    <li><code>{night out, party, club}</code> vs <code>{workout, gym, exercise}</code></li>
+  </ul>
+
+  <h3>Rule C: Time Context (weight 0.15)</h3>
+  <table>
+    <tr><th>Match</th><th>Score</th></tr>
+    <tr><td>Both day or both night</td><td>1.00</td></tr>
+    <tr><td>Day + Night (no overlap)</td><td>0.50</td></tr>
+    <tr><td>Unknown / mixed</td><td>0.60</td></tr>
+  </table>
+
+  <div class="formula">final = 0.55 &times; formality_score + 0.30 &times; occasion_score + 0.15 &times; time_score</div>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Dark jeans (level 2) + Blazer (level 3)</div>
+      <div class="desc">&Delta;=1 &rarr; 0.85. Blazer is a bridge item. Occasions overlap on "work" and "everyday". Expected score: ~0.82</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Satin blouse (level 4) + Wool trousers (level 4)</div>
+      <div class="desc">&Delta;=0, both semi-formal. Occasions overlap on "work" + "date night". Expected score: ~0.95</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Distressed jeans (level 1) + Satin blouse (level 4)</div>
+      <div class="desc">&Delta;=3 &rarr; 0.10 formality kill. No bridge can save &Delta;&ge;3. Cross-dim gate caps total at 0.35.</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Gym leggings (active) + Structured blazer (office)</div>
+      <div class="desc">Hard conflict: active vs office. Occasion score = 0.05. Formality &Delta;=3. Expected score: ~0.08</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Edge Case</div>
+      <div class="title">Lounge joggers (level 1) + Cashmere knit (level 2)</div>
+      <div class="desc">&Delta;=1 &rarr; 0.85. No hard conflict (lounge + everyday overlap possible). Off-duty chic. Score: ~0.70</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Bridge Saves It</div>
+      <div class="title">Casual tee (level 1) + Semi-formal skirt (level 3-4)</div>
+      <div class="desc">&Delta;=2-3. If tee is_bridge=true (clean tee), &Delta;=2 &rarr; 0.70. Without bridge: 0.55 or 0.10.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 2. STYLE ═══════════════════ -->
+<section class="dim" id="dim2">
+  <h2><span class="num">2</span> Style (Vibe / Archetype) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">15&times;15 adjacency matrix with neighbor, weak-neighbor, and clash tiers. Statement pieces need supporting cast.</div>
+
+  <h3>What we store</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>primary_style</code></td><td>string</td><td>First tag from style_tags, lowercased</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>style_tags</code></td><td>list (top 3)</td><td>casual, minimalist, classic, chic, modern, trendy, streetwear, edgy, romantic, glamorous, bohemian, sporty, party, vintage, preppy</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>style_strength</code></td><td>float 0-1</td><td>0.20 (basic tee) ... 0.90 (sequin corset)</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>aesthetic_tags</code></td><td>optional</td><td>clean, vintage, y2k, coastal, western, grunge...</td><td><span class="badge not">Not stored</span></td></tr>
+  </table>
+
+  <h3>Adjacency Matrix (excerpt)</h3>
+  <table>
+    <tr><th>Style</th><th>Neighbors (0.75)</th><th>Weak (0.40)</th><th>Clashes (0.10)</th></tr>
+    <tr><td>Casual</td><td>minimalist, streetwear, sporty, trendy, chic</td><td>classic, bohemian, vintage</td><td>&mdash;</td></tr>
+    <tr><td>Romantic</td><td>chic, bohemian, glamorous, vintage</td><td>classic, party</td><td><strong>streetwear, sporty</strong></td></tr>
+    <tr><td>Streetwear</td><td>casual, trendy, edgy, sporty</td><td>bohemian</td><td>&mdash;</td></tr>
+    <tr><td>Preppy</td><td>classic, vintage, chic</td><td>&mdash;</td><td><strong>edgy, streetwear</strong></td></tr>
+    <tr><td>Sporty</td><td>casual, streetwear</td><td>trendy, edgy</td><td><strong>romantic, glamorous, preppy</strong></td></tr>
+    <tr><td>Glamorous</td><td>romantic, chic, party, edgy</td><td>classic, modern</td><td><strong>sporty, casual</strong></td></tr>
+  </table>
+
+  <h3>Style Strength Balance (weight 0.25)</h3>
+  <table>
+    <tr><th>Pairing</th><th>Score</th><th>Why</th></tr>
+    <tr><td>Statement + Supporting (&ge;0.6 + &le;0.35)</td><td><strong>0.90</strong></td><td>Sequin top + plain jeans: perfect balance</td></tr>
+    <tr><td>Both basic (&le;0.3)</td><td>0.70</td><td>Plain tee + plain trousers: safe but boring</td></tr>
+    <tr><td>Both statement (&ge;0.7)</td><td><strong>0.30</strong></td><td>Sequin top + leopard skirt: too loud (unless maximalist)</td></tr>
+    <tr><td>Other</td><td>0.65</td><td>Moderate pairing</td></tr>
+  </table>
+
+  <h3>Style Bridge Items</h3>
+  <p>These tags act as universal connectors — they raise adjacency when styles don't match:
+    <code>casual</code>, <code>minimalist</code>, <code>classic</code>, <code>chic</code>, <code>modern</code>.
+    If adjacency &lt; 0.50 and either item has a bridge tag: +0.30 boost.
+  </p>
+
+  <div class="formula">final = 0.60 &times; adjacency + 0.25 &times; strength_balance + 0.15 &times; bridge_boost</div>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Romantic blouse (high strength) + Classic trousers (low strength)</div>
+      <div class="desc">Romantic&rarr;Classic is weak-neighbor (0.40), but strength balance is ideal (0.90). Statement + supporting cast. Score: ~0.62</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Streetwear hoodie + Casual cargo pants</div>
+      <div class="desc">Streetwear&rarr;Casual is neighbor (0.75). Both moderate strength. Cohesive vibe. Score: ~0.72</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Romantic lace top + Sporty track pants</div>
+      <div class="desc">Romantic&rarr;Sporty is explicit clash (0.10). Both are identifiable styles. Score: ~0.18</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Sequin corset (0.90) + Leopard midi skirt (0.90)</div>
+      <div class="desc">Both high-strength statement pieces: balance score = 0.30. Too much competing for attention. Score: ~0.35</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Bridge Saves It</div>
+      <div class="title">Streetwear hoodie + Classic trench coat</div>
+      <div class="desc">Streetwear&rarr;Classic is unrelated (0.35). But trench is is_bridge=true and classic is bridge style. Boosted to 0.65. "Clean street" look.</div>
+    </div>
+    <div class="ex info">
+      <div class="label">Implementation Note</div>
+      <div class="title">Top-3 cross-matching</div>
+      <div class="desc">Adjacency uses the best score across all combinations of source's top-3 style tags &times; candidate's top-3 style tags. Secondary styles matter.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 3. FABRIC ═══════════════════ -->
+<section class="dim" id="dim3">
+  <h2><span class="num">3</span> Fabric (Material + Texture) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Contrast principle: mix textures, don't match them. 16 fabric families with a full pair-compatibility matrix.</div>
+
+  <h3>What we store</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>material_family</code></td><td>string</td><td>cotton, denim, silk, linen, wool, knit, leather, satin, velvet, corduroy, technical, crochet, sequin, sheer, synthetic_woven, synthetic_stretch</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>texture_intensity</code></td><td>string</td><td>smooth / medium / strong</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>shine_level</code></td><td>string</td><td>matte / slight / shiny (from DB sheen field)</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>fabric_weight</code></td><td>string</td><td>light / mid / heavy</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>stretch</code></td><td>string</td><td>No Stretch / Slight / Stretchy</td><td><span class="badge impl">DB</span></td></tr>
+  </table>
+
+  <h3>Rule A: Contrast Principle (weight 0.40)</h3>
+  <table>
+    <tr><th>Texture Combo</th><th>Score</th><th>Rationale</th></tr>
+    <tr><td>strong + smooth</td><td><strong>0.85</strong></td><td>Visual interest: cable knit + satin, denim + silk</td></tr>
+    <tr><td>smooth + smooth</td><td>0.70</td><td>Cohesive but can feel flat</td></tr>
+    <tr><td>medium + any</td><td>0.65</td><td>Safe middle ground</td></tr>
+    <tr><td>strong + strong</td><td><strong>0.40</strong></td><td>Too much competing texture (tweed + cable knit)</td></tr>
+  </table>
+
+  <h4>Shine override:</h4>
+  <ul>
+    <li><code>shiny + matte</code> &rarr; score floored at 0.80 (great contrast)</li>
+    <li><code>shiny + shiny</code> &rarr; score capped at 0.30 (too much shimmer &mdash; unless evening set)</li>
+  </ul>
+
+  <h3>Rule B: Fabric Pair Table (weight 0.45)</h3>
+  <table>
+    <tr><th>Pair</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>denim + knit</td><td><strong>0.85</strong></td><td>Classic combo (jeans + sweater)</td></tr>
+    <tr><td>denim + cotton</td><td><strong>0.85</strong></td><td>Casual staple</td></tr>
+    <tr><td>denim + leather</td><td>0.80</td><td>Edgy contrast</td></tr>
+    <tr><td>satin + knit</td><td>0.75</td><td>Satin skirt + knit sweater &mdash; texture play</td></tr>
+    <tr><td>wool + leather</td><td>0.80</td><td>Winter staple</td></tr>
+    <tr><td>linen + cotton</td><td>0.80</td><td>Summer layering</td></tr>
+    <tr><td colspan="3" style="color:var(--red)"><strong>Penalized same-material:</strong></td></tr>
+    <tr><td>denim + denim</td><td><strong>0.25</strong></td><td>Canadian tuxedo &mdash; penalized unless set/intentional</td></tr>
+    <tr><td>leather + leather</td><td><strong>0.25</strong></td><td>Head-to-toe leather &mdash; penalized unless set</td></tr>
+    <tr><td>sequin + sequin</td><td><strong>0.30</strong></td><td>Double sparkle overload</td></tr>
+    <tr><td colspan="3" style="color:var(--text2)"><strong>Low compatibility:</strong></td></tr>
+    <tr><td>silk + technical</td><td>0.30</td><td>Worlds apart (evening vs athletic)</td></tr>
+    <tr><td>velvet + technical</td><td>0.25</td><td>Total mismatch</td></tr>
+    <tr><td>satin + technical</td><td>0.25</td><td>Formal vs sport</td></tr>
+  </table>
+
+  <h3>Rule C: Weight Compatibility (weight 0.15)</h3>
+  <table>
+    <tr><th>Combo</th><th>Score</th></tr>
+    <tr><td>light + mid</td><td>0.75</td></tr>
+    <tr><td>mid + mid</td><td>0.80</td></tr>
+    <tr><td>light + heavy</td><td><strong>0.45</strong></td></tr>
+    <tr><td>heavy + heavy</td><td><strong>0.50</strong></td></tr>
+  </table>
+
+  <div class="formula">final = 0.40 &times; contrast_score + 0.45 &times; pair_score + 0.15 &times; weight_score</div>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Blue jeans (denim) + Knit sweater</div>
+      <div class="desc">Pair score: 0.85. Contrast: strong + medium = 0.65. Weight: mid + mid = 0.80. Classic combo. Score: ~0.78</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Satin skirt + Chunky knit top</div>
+      <div class="desc">Pair: 0.75. Contrast: smooth(shiny) + strong = 0.85 (shine boost to 0.85). Luxe texture play. Score: ~0.80</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Denim jacket + Denim jeans (same wash)</div>
+      <div class="desc">Same-material penalty: 0.25. Even with okay contrast, pair score dominates. Also triggers cross-dim gate (-0.12). Score: ~0.30</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Sequin top + Sequin skirt</div>
+      <div class="desc">Same-material penalty: 0.30. Shiny + shiny caps contrast at 0.30. Double sparkle overload. Score: ~0.30</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Edge Case</div>
+      <div class="title">Leather jacket + Silk camisole</div>
+      <div class="desc">Pair: 0.75. Contrast: strong + smooth = 0.85. Weight: heavy + light = 0.45. Good contrast but weight mismatch pulls it down. Score: ~0.72</div>
+    </div>
+    <div class="ex info">
+      <div class="label">Set Exception</div>
+      <div class="title">Matching linen co-ord</div>
+      <div class="desc">Items detected as co-ords/sets via regex + Gemini L2 go into "set" state &rarr; only outerwear recommendations. Same-material penalty doesn't apply within the set itself.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 4. SILHOUETTE ═══════════════════ -->
+<section class="dim" id="dim4">
+  <h2><span class="num">4</span> Silhouette (Shape + Proportions) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Balance is king: fitted top + wide bottom, relaxed top + slim bottom. Category-aware rules for top/bottom and outerwear.</div>
+
+  <h3>What we store</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>fit_type</code></td><td>string</td><td>fitted, slim, regular, relaxed, oversized, bodycon</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>silhouette</code></td><td>string</td><td>fitted, slim, wide leg, flared, a-line, straight, bodycon, relaxed, oversized...</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>length</code></td><td>string</td><td>cropped, regular, midi, maxi, mini, floor-length</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>coverage_level</code></td><td>string</td><td>full, moderate, partial, minimal, revealing</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>rise</code></td><td>string</td><td>Low, Mid, High</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>leg_shape</code></td><td>string</td><td>skinny, straight, wide, flare</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>neckline</code></td><td>string</td><td>crew, v, square, off-shoulder, halter...</td><td><span class="badge impl">DB</span></td></tr>
+  </table>
+
+  <h3>Core Rule: Balance (weight 0.50)</h3>
+
+  <h4>Top + Bottom Pairing Rules:</h4>
+  <table>
+    <tr><th>Top</th><th>Bottom</th><th>Score</th><th>Why</th></tr>
+    <tr><td>Fitted / Slim</td><td>Wide leg / Flared / A-line</td><td><strong>0.90</strong></td><td>Balanced proportions &mdash; the gold standard</td></tr>
+    <tr><td>Relaxed / Oversized</td><td>Skinny / Slim / Straight</td><td><strong>0.85</strong></td><td>Oversized top anchored by slim bottom</td></tr>
+    <tr><td>Fitted</td><td>Oversized / Relaxed</td><td>0.85</td><td>Clean top, volume on bottom</td></tr>
+    <tr><td style="color:var(--red)">Oversized</td><td style="color:var(--red)">Wide leg</td><td style="color:var(--red)"><strong>0.25</strong></td><td style="color:var(--red)">Volume on volume &mdash; shapeless (unless Streetwear &rarr; 0.60)</td></tr>
+    <tr><td style="color:var(--red)">Oversized</td><td style="color:var(--red)">Oversized</td><td style="color:var(--red)"><strong>0.25</strong></td><td style="color:var(--red)">Total volume doubling &mdash; triggers cross-dim gate (cap 0.40)</td></tr>
+  </table>
+
+  <h4>Waist Logic:</h4>
+  <table>
+    <tr><th>Top</th><th>Bottom</th><th>Effect</th></tr>
+    <tr><td>Cropped</td><td>High-rise</td><td>Score floored at <strong>0.90</strong> (shows waist, modern)</td></tr>
+    <tr><td>Cropped</td><td>Low-rise + Trendy/Y2K</td><td>Score floored at 0.60 (intentional Y2K)</td></tr>
+    <tr><td>Cropped</td><td>Low-rise (no Trendy tag)</td><td>Score capped at <strong>0.40</strong> (awkward gap)</td></tr>
+  </table>
+
+  <h4>Outerwear Rules:</h4>
+  <table>
+    <tr><th>Outer</th><th>Inner</th><th>Score</th></tr>
+    <tr><td>Cropped jacket</td><td>Wide leg / A-line</td><td>0.90</td></tr>
+    <tr><td>Longline coat</td><td>Slim / Straight</td><td>0.85</td></tr>
+    <tr><td>Oversized outer</td><td>Oversized inner</td><td><strong>0.30</strong></td></tr>
+  </table>
+
+  <h3>Sub-scores B &amp; C: Coverage (0.20) + Length Balance (0.30)</h3>
+  <table>
+    <tr><th>Pattern</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>moderate + moderate</td><td>0.80</td><td>Safe pairing</td></tr>
+    <tr><td>revealing + revealing</td><td><strong>0.30</strong></td><td>Too much skin on both</td></tr>
+    <tr><td>cropped + midi/maxi</td><td>0.70-0.75</td><td>Good length contrast</td></tr>
+    <tr><td>cropped + cropped</td><td><strong>0.40</strong></td><td>Both items very short</td></tr>
+    <tr><td>maxi + maxi</td><td><strong>0.35</strong></td><td>Both dragging on floor</td></tr>
+  </table>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Fitted crop top + High-rise wide-leg trousers</div>
+      <div class="desc">Wide bottom + fitted top = 0.90. Cropped + high-rise = floored at 0.90. Perfect proportional balance. Score: ~0.88</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Oversized sweater + Skinny jeans</div>
+      <div class="desc">Relaxed top + skinny bottom = 0.85. Classic "balance the volume" silhouette. Score: ~0.80</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Oversized hoodie + Wide-leg joggers</div>
+      <div class="desc">Oversized + wide = 0.25. Unless Streetwear (0.60). Triggers cross-dim gate: silhouette &lt;0.30 caps total at 0.40.</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Crop top + Low-rise flares (no Y2K tag)</div>
+      <div class="desc">Cropped + low-rise capped at 0.40. Awkward midriff-to-hip exposure without style intent.</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Style Exception</div>
+      <div class="title">Oversized hoodie + Wide-leg cargo (Streetwear tagged)</div>
+      <div class="desc">Normally 0.25, but Streetwear exception boosts to 0.60. Intentional baggy look recognized.</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Outerwear Balance</div>
+      <div class="title">Satin slip skirt + Chunky oversized sweater</div>
+      <div class="desc">Contrast + balance: slim flowing bottom + volume on top. Proportions work via the fitted+relaxed matrix entry. Elevated casual.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 5. COLOR ═══════════════════ -->
+<section class="dim" id="dim5">
+  <h2><span class="num">5</span> Color (Harmony, Not Similarity) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Neutrals are universal connectors. Warm neutrals clash with cool saturated tones. Denim has its own best-practice rules.</div>
+
+  <h3>What we store</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>color_family</code></td><td>string</td><td>neutral, blue, red, green, brown, pink, purple, yellow, orange...</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>primary_color</code></td><td>string</td><td>The specific color name</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>secondary_colors</code></td><td>list</td><td>Additional colors in the item</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>color_saturation</code></td><td>string</td><td>muted / medium / bright (derived from color name signals)</td><td><span class="badge impl">Derived</span></td></tr>
+  </table>
+
+  <h3>Color Classification</h3>
+  <table>
+    <tr><th>Category</th><th>Colors</th></tr>
+    <tr><td>True Neutrals</td><td>black, white, cream, grey, gray, charcoal, ivory, off-white, silver</td></tr>
+    <tr><td>Warm Neutrals</td><td>brown, camel, taupe, beige, tan, nude, oatmeal, stone, mushroom, khaki, cognac, chocolate, rust, terracotta, copper</td></tr>
+    <tr><td>Cool Neutrals</td><td>navy, slate, steel, gunmetal</td></tr>
+    <tr><td>Cool Saturated</td><td>purple, violet, plum, fuchsia, magenta, lilac, lavender, cobalt, electric blue, royal blue, neon</td></tr>
+  </table>
+
+  <h3>Scoring Rules</h3>
+  <table>
+    <tr><th>Scenario</th><th>Score</th></tr>
+    <tr><td>True neutral + any color</td><td><strong>0.80</strong></td></tr>
+    <tr><td>Both neutrals, same type</td><td>0.85</td></tr>
+    <tr><td>Same analogous group (e.g., red-orange-coral)</td><td>0.75</td></tr>
+    <tr><td>Complementary pair (e.g., blue + orange)</td><td>0.70</td></tr>
+    <tr><td>Warm neutral + warm chromatic</td><td>0.75</td></tr>
+    <tr><td style="color:var(--red)">Warm neutral + cool saturated (e.g., camel + fuchsia)</td><td style="color:var(--red)"><strong>0.35</strong></td></tr>
+    <tr><td style="color:var(--red)">Both bright saturated, different family</td><td style="color:var(--red)">base - 0.10</td></tr>
+    <tr><td style="color:var(--red)">Same material + same color group</td><td style="color:var(--red)">capped at <strong>0.30</strong></td></tr>
+  </table>
+
+  <h4>Denim Best Practice:</h4>
+  <p>If one item is denim and the other's color is in the denim-friendly set, score is floored at <strong>0.80</strong>:</p>
+  <p><code>white, cream, ivory, off-white, black, grey, charcoal, navy, camel, beige, tan, cognac</code></p>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Blue jeans + White tee + Black blazer</div>
+      <div class="desc">Denim + white &rarr; denim boost (0.80). All neutrals and denim-friendly colors. The universal safe outfit. Score: 0.80+</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Blue jeans + Camel coat</div>
+      <div class="desc">Classic: denim + camel is in denim boost set. Warm neutral + denim. Score: 0.80</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Blue denim jeans + Blue denim jacket (same wash)</div>
+      <div class="desc">Same material (denim) + same color group &rarr; capped at 0.30. Also triggers cross-dim -0.12 penalty. The "Canadian tuxedo" problem.</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Camel coat + Fuchsia dress</div>
+      <div class="desc">Warm neutral + cool saturated = 0.35. Temperature clash between earthy warm and electric cool tones.</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Edge Case</div>
+      <div class="title">Bright red top + Bright orange skirt</div>
+      <div class="desc">Same analogous group (0.75), but both bright &rarr; -0.10 penalty = 0.65. Two loud colors compete. One bright item is better.</div>
+    </div>
+    <div class="ex info">
+      <div class="label">Important Gate</div>
+      <div class="title">Color contribution halved on formality clash</div>
+      <div class="desc">If occasion_formality &lt; 0.50, color's weight contribution is halved. Perfect color harmony can't save a gym-shorts-with-blazer pairing.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 6. SEASONALITY ═══════════════════ -->
+<section class="dim" id="dim6">
+  <h2><span class="num">6</span> Seasonality (Weather + Layering) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Temperature bands, layer roles, and seasonal fabric logic prevent puffer+linen-shorts nonsense.</div>
+
+  <h3>What we store</h3>
+  <table>
+    <tr><th>Attribute</th><th>Type</th><th>Values</th><th>Status</th></tr>
+    <tr><td><code>seasons</code></td><td>list</td><td>spring, summer, fall, winter</td><td><span class="badge impl">DB</span></td></tr>
+    <tr><td><code>temp_band</code></td><td>string</td><td>hot / mild / cold / any</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>layer_role</code></td><td>string</td><td>base / midlayer / outer</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>fabric_weight</code></td><td>string</td><td>light / mid / heavy</td><td><span class="badge impl">Derived</span></td></tr>
+    <tr><td><code>coverage_level</code></td><td>string</td><td>sleeveless, short, long (for coverage scoring)</td><td><span class="badge impl">DB</span></td></tr>
+  </table>
+
+  <h3>Rule A: Temperature Compatibility (weight 0.45)</h3>
+  <table>
+    <tr><th>Combo</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>Same band / either "any"</td><td><strong>1.00</strong></td><td>Both summer or both winter &mdash; perfect</td></tr>
+    <tr><td>hot + mild, or mild + cold</td><td>0.70</td><td>Adjacent seasons (spring dress + light jacket)</td></tr>
+    <tr><td>hot + cold (with outer layer)</td><td>0.35</td><td>Layering softens it (summer dress + winter coat = transitional)</td></tr>
+    <tr><td style="color:var(--red)">hot + cold (no outer)</td><td style="color:var(--red)"><strong>0.15</strong></td><td style="color:var(--red)">Linen shorts + wool sweater &mdash; nonsense</td></tr>
+  </table>
+
+  <h3>Rule B: Layer Compatibility (weight 0.30)</h3>
+  <table>
+    <tr><th>Combo</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>base + midlayer</td><td><strong>0.85</strong></td><td>Tank top + cardigan &mdash; classic layering</td></tr>
+    <tr><td>base + outer</td><td>0.80</td><td>Tee + coat</td></tr>
+    <tr><td>midlayer + outer</td><td>0.75</td><td>Sweater + coat</td></tr>
+    <tr><td>base + base</td><td>0.60</td><td>Two base layers (tee + camisole?) &mdash; usually odd</td></tr>
+    <tr><td>midlayer + midlayer</td><td>0.50</td><td>Two midlayers (sweater + cardigan) &mdash; often bulky</td></tr>
+    <tr><td style="color:var(--red)">outer + outer</td><td style="color:var(--red)"><strong>0.30</strong></td><td style="color:var(--red)">Two coats &mdash; almost never makes sense</td></tr>
+  </table>
+
+  <h3>Rule C: Seasonal Fabric Logic (weight 0.25)</h3>
+  <table>
+    <tr><th>Combo</th><th>Score</th></tr>
+    <tr><td>Both summer fabrics (linen, cotton, sheer, crochet, satin, silk)</td><td>0.80</td></tr>
+    <tr><td>Both winter fabrics (wool, leather, velvet, corduroy, technical, knit)</td><td>0.80</td></tr>
+    <tr><td>Cross-season + outer layer present</td><td>0.45</td></tr>
+    <tr><td style="color:var(--red)">Cross-season, no outer</td><td style="color:var(--red)"><strong>0.20</strong></td></tr>
+  </table>
+
+  <div class="formula">final = 0.45 &times; temp_score + 0.30 &times; layer_score + 0.25 &times; fabric_season_score</div>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Summer dress (hot) + Light cardigan (mild, midlayer)</div>
+      <div class="desc">Temp: hot+mild = 0.70. Layer: base+midlayer = 0.85. Both light fabrics = 0.80. Transitional layering. Score: ~0.77</div>
+    </div>
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Wool sweater (cold) + Wool coat (cold, outer)</div>
+      <div class="desc">Same temp band = 1.0. Midlayer + outer = 0.75. Both winter fabrics = 0.80. Full winter outfit. Score: ~0.87</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Linen shorts (hot) + Puffer jacket (cold)</div>
+      <div class="desc">Hot + cold = 0.35 (outer softens, but still bad). Cross-season fabrics, outer present = 0.45. Score: ~0.44</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Summer cotton tank (hot, base) + Winter wool trousers (cold)</div>
+      <div class="desc">Hot + cold without outer = 0.15. Cross-season fabrics, no outer = 0.20. Score: ~0.29</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Layering Softens</div>
+      <div class="title">Summer dress + Winter coat (transitional look)</div>
+      <div class="desc">Hot + cold WITH outer layer = 0.35 (not 0.15). Layering is recognized as a valid fashion strategy for transitional weather.</div>
+    </div>
+    <div class="ex info">
+      <div class="label">Implementation Note</div>
+      <div class="title">Temp band derivation</div>
+      <div class="desc">Summer-only &rarr; hot. Winter-only &rarr; cold. Spring/Fall &rarr; mild. 3+ seasons &rarr; "any" (versatile item, always scores 1.0 on temp).</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 7. PATTERN ═══════════════════ -->
+<section class="dim" id="dim7">
+  <h2><span class="num">7</span> Pattern (Print Mixing) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Solid is the universal connector. Two bold prints clash unless they're the same pattern. Added beyond the original 6 ChatGPT dimensions.</div>
+
+  <h3>Pattern Tiers</h3>
+  <table>
+    <tr><th>Tier</th><th>Patterns</th></tr>
+    <tr><td><strong>Solid</strong></td><td>solid, plain, none</td></tr>
+    <tr><td><strong>Subtle</strong></td><td>pinstripe, herringbone, tweed, textured, tonal, ribbed, knit, lace, crochet, cable knit, quilted, embroidered, woven, mesh, broderie, eyelet, ruched</td></tr>
+    <tr><td><strong>Bold</strong></td><td>floral, tropical, graphic, geometric, abstract, animal, leopard, zebra, paisley, tie-dye, camouflage, plaid, checked, polka dot, striped, gingham</td></tr>
+  </table>
+
+  <h3>Compatibility</h3>
+  <table>
+    <tr><th>Combo</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>solid + anything</td><td><strong>0.85</strong></td><td>Solid is always safe</td></tr>
+    <tr><td>solid + solid</td><td>0.80</td><td>Clean, minimal</td></tr>
+    <tr><td>subtle + subtle</td><td>0.65</td><td>Can work (herringbone + ribbed)</td></tr>
+    <tr><td>bold + bold (same pattern)</td><td>0.45</td><td>Matching prints (floral + floral) &mdash; risky but cohesive</td></tr>
+    <tr><td style="color:var(--red)">bold + bold (different)</td><td style="color:var(--red)"><strong>0.20</strong></td><td style="color:var(--red)">Leopard + plaid = visual chaos</td></tr>
+  </table>
+
+  <h3>Examples</h3>
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">Floral blouse + Solid black skirt</div>
+      <div class="desc">Bold + solid = 0.85. The solid grounds the bold print. Score: 0.85</div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Bad Pairing</div>
+      <div class="title">Leopard print top + Plaid trousers</div>
+      <div class="desc">Bold + bold (different) = 0.20. Two competing visual statements. Score: 0.20</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ 8. PRICE ═══════════════════ -->
+<section class="dim" id="dim8">
+  <h2><span class="num">8</span> Price (Coherence) <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Items in an outfit should be in a similar price tier. Added beyond the original 6 ChatGPT dimensions.</div>
+
+  <h3>Price Ratio Scoring</h3>
+  <table>
+    <tr><th>Ratio (max/min)</th><th>Score</th><th>Example</th></tr>
+    <tr><td>&le; 1.5&times;</td><td><strong>1.00</strong></td><td>$40 top + $50 pants</td></tr>
+    <tr><td>&le; 2.0&times;</td><td>0.85</td><td>$30 top + $55 pants</td></tr>
+    <tr><td>&le; 3.0&times;</td><td>0.60</td><td>$25 tee + $70 jeans</td></tr>
+    <tr><td>&le; 4.0&times;</td><td>0.40</td><td>$15 tee + $55 skirt</td></tr>
+    <tr><td>&gt; 4.0&times;</td><td><strong>0.20</strong></td><td>$10 tank + $80 coat</td></tr>
+  </table>
+
+  <div class="examples">
+    <div class="ex good">
+      <div class="label">Good Pairing</div>
+      <div class="title">$45 blouse + $55 trousers (ratio 1.2&times;)</div>
+      <div class="desc">Similar price tier &rarr; 1.00. Items feel like they belong in the same wardrobe.</div>
+    </div>
+    <div class="ex ok">
+      <div class="label">Edge Case</div>
+      <div class="title">$15 basic tee + $120 designer coat (ratio 8&times;)</div>
+      <div class="desc">Ratio > 4&times; &rarr; 0.20. But price weight is only 0.06-0.08 so it won't kill the outfit alone. Reflects real mixing of investment pieces + basics.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ CROSS-DIM GATES ═══════════════════ -->
+<section class="dim" id="gates">
+  <h2>Cross-Dimension Gates <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Hard overrides applied after the weighted sum. Prevent good scores in one dimension from masking disasters in another.</div>
+
+  <p>This was ChatGPT's key implementation note: <em>"To stop color dominates everything, compute color score only after occasion + silhouette checks. Cap color contribution. Add explicit same-material-same-color penalties."</em></p>
+
+  <div class="gate">
+    <div class="gate-name">Gate 1: Formality Hard Gate</div>
+    <div class="gate-desc">If <code>occasion_formality &lt; 0.25</code> &rarr; cap total score at <strong>0.35</strong>.<br>
+    Meaning: no amount of perfect color/fabric/style can save gym shorts with an evening gown. The outfit is fundamentally broken.</div>
+  </div>
+
+  <div class="gate">
+    <div class="gate-name">Gate 2: Color Contribution Halved</div>
+    <div class="gate-desc">If <code>occasion_formality &lt; 0.50</code> &rarr; subtract <code>color_weight &times; color_score &times; 0.50</code> from total.<br>
+    Meaning: when there's a formality clash, perfect color harmony shouldn't carry the score. Color becomes less relevant.</div>
+  </div>
+
+  <div class="gate">
+    <div class="gate-name">Gate 3: Oversized Silhouette Hard Cap</div>
+    <div class="gate-desc">If <code>silhouette &lt; 0.30</code> &rarr; cap total at <strong>0.40</strong>.<br>
+    Meaning: oversized + oversized / volume doubling is a hard proportional failure. Capped regardless of other scores.</div>
+  </div>
+
+  <div class="gate">
+    <div class="gate-name">Gate 4: Same-Material Same-Color Penalty</div>
+    <div class="gate-desc">If same <code>material_family</code> is in penalty list (denim, leather, sequin) AND both items are chromatic (not neutral) &rarr; subtract <strong>0.12</strong> from total.<br>
+    Meaning: denim-on-denim, leather-on-leather with matching colors gets penalized at the outfit level, not just per-dimension.</div>
+  </div>
+
+  <h3>Gate Examples</h3>
+  <div class="examples">
+    <div class="ex bad">
+      <div class="label">Gate 1 Fires</div>
+      <div class="title">Formal silk top + Gym shorts</div>
+      <div class="desc">Formality &Delta;=4, occ conflict. occasion_formality ~ 0.08 &lt; 0.25. Total score capped at 0.35 regardless of other dimension scores. Actual result: <strong>0.302</strong></div>
+    </div>
+    <div class="ex bad">
+      <div class="label">Gate 3 Fires</div>
+      <div class="title">Oversized hoodie + Wide-leg palazzo pants</div>
+      <div class="desc">Silhouette = 0.25 &lt; 0.30. Total capped at 0.40. Even if style (streetwear match) and color are perfect.</div>
+    </div>
+    <div class="ex good">
+      <div class="label">No Gates Fire</div>
+      <div class="title">Formal silk top + Satin pencil skirt</div>
+      <div class="desc">Formality match, good silhouette, texture contrast. No gates triggered. Actual result: <strong>0.830</strong>. Gap vs bad pairing: 0.528</div>
+    </div>
+    <div class="ex info">
+      <div class="label">Discrimination Power</div>
+      <div class="title">Good outfit: 0.830 &mdash; Bad outfit: 0.302 &mdash; Gap: 0.528</div>
+      <div class="desc">The cross-dimension gates are the main reason v2 achieves this wide discrimination gap. Without gates, bad outfits could score 0.50+ from lucky color/pattern matches.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ WEIGHTS ═══════════════════ -->
+<section class="dim" id="weights">
+  <h2>Weight Distribution <span class="badge impl">Implemented</span></h2>
+  <div class="subtitle">Weights are tuned per category pair. Silhouette matters most for top+bottom; seasonality matters most for dress+outerwear.</div>
+
+  <h3>Tops + Bottoms</h3>
+  <div class="weight-bar"><span class="wlabel">occasion_formality</span><div class="bar-track"><div class="bar-fill" style="width:90%"></div></div><span class="wval">0.20</span></div>
+  <div class="weight-bar"><span class="wlabel">silhouette</span><div class="bar-track"><div class="bar-fill" style="width:82%"></div></div><span class="wval">0.18</span></div>
+  <div class="weight-bar"><span class="wlabel">style</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">fabric</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">color</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">seasonality</span><div class="bar-track"><div class="bar-fill" style="width:45%"></div></div><span class="wval">0.10</span></div>
+  <div class="weight-bar"><span class="wlabel">pattern</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+  <div class="weight-bar"><span class="wlabel">price</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+
+  <h3>Dresses + Outerwear</h3>
+  <div class="weight-bar"><span class="wlabel">occasion_formality</span><div class="bar-track"><div class="bar-fill" style="width:82%"></div></div><span class="wval">0.18</span></div>
+  <div class="weight-bar"><span class="wlabel">fabric</span><div class="bar-track"><div class="bar-fill" style="width:73%"></div></div><span class="wval">0.16</span></div>
+  <div class="weight-bar"><span class="wlabel">seasonality</span><div class="bar-track"><div class="bar-fill" style="width:73%"></div></div><span class="wval">0.16</span></div>
+  <div class="weight-bar"><span class="wlabel">style</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">silhouette</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">color</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">pattern</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+  <div class="weight-bar"><span class="wlabel">price</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+
+  <h3>Outerwear + Tops/Bottoms</h3>
+  <div class="weight-bar"><span class="wlabel">occasion_formality</span><div class="bar-track"><div class="bar-fill" style="width:82%"></div></div><span class="wval">0.18</span></div>
+  <div class="weight-bar"><span class="wlabel">style</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">fabric</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">silhouette</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">seasonality</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">color</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">pattern</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+  <div class="weight-bar"><span class="wlabel">price</span><div class="bar-track"><div class="bar-fill" style="width:36%"></div></div><span class="wval">0.08</span></div>
+
+  <h3>Default (all other pairs)</h3>
+  <div class="weight-bar"><span class="wlabel">occasion_formality</span><div class="bar-track"><div class="bar-fill" style="width:100%"></div></div><span class="wval">0.22</span></div>
+  <div class="weight-bar"><span class="wlabel">silhouette</span><div class="bar-track"><div class="bar-fill" style="width:73%"></div></div><span class="wval">0.16</span></div>
+  <div class="weight-bar"><span class="wlabel">style</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">fabric</span><div class="bar-track"><div class="bar-fill" style="width:64%"></div></div><span class="wval">0.14</span></div>
+  <div class="weight-bar"><span class="wlabel">color</span><div class="bar-track"><div class="bar-fill" style="width:55%"></div></div><span class="wval">0.12</span></div>
+  <div class="weight-bar"><span class="wlabel">seasonality</span><div class="bar-track"><div class="bar-fill" style="width:45%"></div></div><span class="wval">0.10</span></div>
+  <div class="weight-bar"><span class="wlabel">pattern</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+  <div class="weight-bar"><span class="wlabel">price</span><div class="bar-track"><div class="bar-fill" style="width:27%"></div></div><span class="wval">0.06</span></div>
+
+  <h3>Final Fusion</h3>
+  <div class="formula">tattoo_score = 0.55 &times; compatibility_score + 0.45 &times; cosine_similarity</div>
+  <p>55% rule-based attribute scoring (this report), 45% pgvector cosine similarity (visual/embedding similarity). The fusion balances fashion rules with visual coherence.</p>
+</section>
+
+<!-- ═══════════════════ FOOTER ═══════════════════ -->
+<div style="text-align:center; padding:2rem 0; border-top:1px solid var(--border); margin-top:1rem; color:var(--text2); font-size:.8rem;">
+  Complete the Fit &mdash; TATTOO v2 Scoring Engine &middot; outfit_engine.py &middot; Generated Feb 2026
+</div>
+
+</div><!-- /wrapper -->
+</body>
+</html>

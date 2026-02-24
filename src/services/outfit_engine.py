@@ -1,21 +1,22 @@
 """
-TATTOO-Inspired Outfit Engine
-==============================
+TATTOO-Inspired Outfit Engine  v2
+==================================
 
 Production service for "Complete the Fit" outfit recommendations and
-TATTOO-scored similar items. Uses 9-dimension aesthetic compatibility
-scoring based on the TATTOO paper (arXiv:2509.23242).
+TATTOO-scored similar items.  8-dimension rule-based compatibility
+scoring inspired by the TATTOO paper (arXiv:2509.23242) with
+fashion-expert rules for occasion, style, fabric, silhouette, color,
+seasonality, pattern, and price.
 
-Dimensions (6 TATTOO + 3 extensions):
-  1. Style       - style_tags overlap
-  2. Occasion    - occasions overlap
-  3. Color       - temperature-aware color harmony
-  4. Season      - season overlap
-  5. Material    - fabric family + texture compatibility  (TATTOO dim 5)
-  6. Balance     - silhouette contrast + coverage + length (TATTOO dim 6)
-  7. Formality   - formality distance
-  8. Pattern     - pattern clash detection
-  9. Price       - price coherence ratio
+Dimensions (8):
+  1. Occasion & Formality  - formality ladder + occasion overlap + conflict penalties
+  2. Style                 - adjacency matrix + style strength + bridge items
+  3. Fabric                - contrast principle + pair table + weight compatibility
+  4. Silhouette            - category-aware balance rules + waist logic
+  5. Color                 - temperature-aware harmony + saturation + same-mat penalty
+  6. Seasonality           - temp band + layer role + seasonal fabric logic
+  7. Pattern               - solid/subtle/bold clash detection
+  8. Price                 - price coherence ratio
 """
 
 import json
@@ -25,6 +26,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 from supabase import Client
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ logger = logging.getLogger(__name__)
 class AestheticProfile:
     """Structured aesthetic profile extracted from Gemini product_attributes."""
 
-    # Core TATTOO dimensions
+    # Core attributes (from DB)
     color_family: Optional[str] = None
     primary_color: Optional[str] = None
     secondary_colors: List[str] = field(default_factory=list)
@@ -48,8 +50,6 @@ class AestheticProfile:
     apparent_fabric: Optional[str] = None
     texture: Optional[str] = None
     formality: Optional[str] = None
-
-    # Extended fashion dimensions
     pattern: Optional[str] = None
     fit_type: Optional[str] = None
     silhouette: Optional[str] = None
@@ -57,6 +57,23 @@ class AestheticProfile:
     sleeve_type: Optional[str] = None
     length: Optional[str] = None
     coverage_level: Optional[str] = None
+    sheen: Optional[str] = None         # NEW: matte/satin/shiny/shimmer/metallic
+    rise: Optional[str] = None          # NEW: high/mid/low
+    leg_shape: Optional[str] = None     # NEW: skinny/straight/wide/flare
+    stretch: Optional[str] = None       # NEW: no stretch/slight/stretchy/very stretchy
+
+    # Derived fields (computed at build time, not from DB)
+    formality_level: int = 2            # 1-5 scale
+    is_bridge: bool = False             # blazer, trench, leather jacket, etc.
+    primary_style: Optional[str] = None # dominant style tag
+    style_strength: float = 0.4         # 0-1: basic tee=0.2, sequin corset=0.9
+    material_family: Optional[str] = None  # from _get_fabric_family()
+    texture_intensity: Optional[str] = None  # smooth/medium/strong
+    shine_level: Optional[str] = None   # matte/slight/shiny
+    fabric_weight: Optional[str] = None # light/mid/heavy
+    layer_role: Optional[str] = None    # base/midlayer/outer
+    temp_band: Optional[str] = None     # hot/mild/cold/any
+    color_saturation: Optional[str] = None  # muted/medium/bright
 
     # Product metadata
     product_id: Optional[str] = None
@@ -87,7 +104,7 @@ class AestheticProfile:
             except (json.JSONDecodeError, TypeError):
                 construction = {}
 
-        return cls(
+        profile = cls(
             product_id=p.get("id") or p.get("product_id"),
             name=p.get("name", ""),
             brand=p.get("brand", ""),
@@ -111,9 +128,16 @@ class AestheticProfile:
             sleeve_type=construction.get("sleeve_type"),
             length=construction.get("length"),
             coverage_level=a.get("coverage_level"),
+            sheen=a.get("sheen"),
+            rise=a.get("rise"),
+            leg_shape=a.get("leg_shape"),
+            stretch=a.get("stretch"),
             gemini_category_l1=a.get("category_l1"),
             gemini_category_l2=a.get("category_l2"),
         )
+        # Compute derived fields
+        _derive_fields(profile)
+        return profile
 
     def to_api_dict(self) -> Dict[str, Any]:
         """Return aesthetic profile fields for API response."""
@@ -149,6 +173,160 @@ def _to_list(val) -> List[str]:
             pass
         return [val] if val else []
     return []
+
+
+# ---------------------------------------------------------------------------
+# Derived field computation
+# ---------------------------------------------------------------------------
+
+_FORMALITY_TO_LEVEL = {
+    "casual": 1, "smart casual": 2, "business casual": 3,
+    "semi-formal": 4, "formal": 5,
+}
+
+_BRIDGE_L2 = {
+    "blazer", "trench", "leather jacket", "denim jacket",
+    "shirt", "button-down", "oxford", "t-shirt", "tee",
+    "cardigan", "fine knit",
+}
+
+_BRIDGE_NAME_RE = re.compile(
+    r'\b(blazer|trench|leather jacket|denim jacket|white sneaker|button.?down)\b',
+    re.IGNORECASE,
+)
+
+_HIGH_STRENGTH_SIGNALS = {
+    "sequin", "sequined", "beaded", "embellished", "corset", "bustier",
+    "feather", "fringe", "rhinestone", "crystal",
+}
+
+_MID_STRENGTH_PATTERNS = {"floral", "animal", "leopard", "zebra", "tie-dye",
+                          "graphic", "geometric", "abstract", "tropical"}
+
+_TEXTURE_TO_INTENSITY = {
+    "smooth": "smooth", "matte": "smooth",
+    "ribbed": "medium", "pleated": "medium", "textured": "medium",
+    "cable knit": "strong", "quilted": "strong", "terry": "strong",
+    "waffle": "medium", "crochet": "strong",
+}
+
+_SHEEN_TO_SHINE = {
+    "matte": "matte", "satin": "slight", "shimmer": "slight",
+    "shiny": "shiny", "metallic": "shiny",
+}
+
+_FABRIC_WEIGHT_MAP = {
+    "silk": "light", "chiffon": "light", "sheer": "light", "satin": "light",
+    "crochet": "light", "linen": "light",
+    "cotton": "mid", "denim": "mid", "synthetic_woven": "mid",
+    "synthetic_stretch": "mid", "knit": "mid", "corduroy": "mid",
+    "sequin": "mid", "velvet": "mid",
+    "wool": "heavy", "leather": "heavy", "technical": "heavy",
+}
+
+_BASE_LAYER_L2 = {
+    "tank top", "camisole", "bandeau", "tube top", "bodysuit",
+    "t-shirt", "tee", "crop top", "bustier", "corset",
+}
+_MID_LAYER_L2 = {
+    "hoodie", "sweatshirt", "sweater", "cardigan", "vest",
+    "blazer", "shirt", "blouse",
+}
+
+_BRIGHT_SIGNALS = {"neon", "bright", "electric", "hot", "vivid", "fluorescent"}
+_MUTED_SIGNALS = {"dusty", "muted", "pastel", "soft", "pale", "washed", "faded"}
+
+
+def _derive_fields(p: "AestheticProfile") -> None:
+    """Compute all derived fields from raw DB attributes."""
+    # formality_level
+    f = (p.formality or "").lower().strip()
+    p.formality_level = _FORMALITY_TO_LEVEL.get(f, 2)
+    if p.formality_level == 2 and f:
+        for key, val in _FORMALITY_TO_LEVEL.items():
+            if key in f:
+                p.formality_level = val
+                break
+
+    # is_bridge
+    l2 = (p.gemini_category_l2 or "").lower().strip()
+    p.is_bridge = l2 in _BRIDGE_L2 or bool(_BRIDGE_NAME_RE.search(p.name or ""))
+
+    # primary_style
+    tags_lower = [t.lower().strip() for t in p.style_tags if t]
+    p.primary_style = tags_lower[0] if tags_lower else None
+
+    # style_strength (0-1)
+    strength = 0.35  # default for plain items
+    name_l = (p.name or "").lower()
+    pat_l = (p.pattern or "").lower().strip()
+    fab_l = (p.apparent_fabric or "").lower()
+    if any(sig in name_l or sig in fab_l for sig in _HIGH_STRENGTH_SIGNALS):
+        strength = 0.90
+    elif pat_l in _MID_STRENGTH_PATTERNS:
+        strength = 0.65
+    elif any(t in {"glamorous", "edgy", "party", "statement"}
+             for t in tags_lower):
+        strength = 0.70
+    elif any(t in {"casual", "minimalist"} for t in tags_lower):
+        strength = 0.20
+    elif pat_l in {"solid", "plain", "none", ""}:
+        strength = 0.25
+    p.style_strength = strength
+
+    # material_family
+    p.material_family = _get_fabric_family(p.apparent_fabric)
+
+    # texture_intensity
+    tex = (p.texture or "").lower().strip()
+    p.texture_intensity = _TEXTURE_TO_INTENSITY.get(tex)
+    if not p.texture_intensity and tex:
+        p.texture_intensity = "medium"  # unknown texture = medium
+
+    # shine_level
+    sh = (p.sheen or "").lower().strip()
+    p.shine_level = _SHEEN_TO_SHINE.get(sh, "matte" if sh else None)
+
+    # fabric_weight
+    if p.material_family:
+        p.fabric_weight = _FABRIC_WEIGHT_MAP.get(p.material_family, "mid")
+
+    # layer_role
+    l1 = (p.gemini_category_l1 or "").lower().strip()
+    if l1 == "outerwear":
+        p.layer_role = "outer"
+    elif l2 in _BASE_LAYER_L2:
+        p.layer_role = "base"
+    elif l2 in _MID_LAYER_L2:
+        p.layer_role = "midlayer"
+    else:
+        p.layer_role = "base"  # default tops/bottoms/dresses = base
+
+    # temp_band (from seasons)
+    seasons_lower = {s.lower().strip() for s in p.seasons if s}
+    if seasons_lower == {"summer"}:
+        p.temp_band = "hot"
+    elif seasons_lower == {"winter"}:
+        p.temp_band = "cold"
+    elif seasons_lower <= {"spring", "fall"} and seasons_lower:
+        p.temp_band = "mild"
+    elif len(seasons_lower) >= 3:
+        p.temp_band = "any"
+    elif "summer" in seasons_lower and "winter" not in seasons_lower:
+        p.temp_band = "hot"
+    elif "winter" in seasons_lower and "summer" not in seasons_lower:
+        p.temp_band = "cold"
+    else:
+        p.temp_band = "mild" if seasons_lower else None
+
+    # color_saturation
+    color_str = (p.color_family or p.primary_color or "").lower()
+    if any(s in color_str for s in _BRIGHT_SIGNALS):
+        p.color_saturation = "bright"
+    elif any(s in color_str for s in _MUTED_SIGNALS):
+        p.color_saturation = "muted"
+    elif color_str:
+        p.color_saturation = "medium"
 
 
 # =============================================================================
@@ -200,6 +378,12 @@ _COOL_SATURATED = {
     "cobalt", "electric blue", "royal blue", "neon",
 }
 
+# Denim best-practice boost colors
+_DENIM_BOOST_COLORS = {
+    "white", "cream", "ivory", "off-white", "black", "grey", "gray",
+    "charcoal", "navy", "camel", "beige", "tan", "cognac",
+}
+
 
 def _normalize_color(color: Optional[str]) -> str:
     if not color:
@@ -225,8 +409,8 @@ def _is_cool_saturated(color: str) -> bool:
     return any(cs in c for cs in _COOL_SATURATED)
 
 
-def score_color_harmony(source_color: Optional[str], candidate_color: Optional[str]) -> float:
-    """Temperature-aware color compatibility scoring. Returns 0.0-1.0."""
+def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[str]) -> float:
+    """Temperature-aware color compatibility (base logic, no cross-dim). Returns 0.0-1.0."""
     sc = _normalize_color(source_color)
     cc = _normalize_color(candidate_color)
     if not sc or not cc:
@@ -235,6 +419,7 @@ def score_color_harmony(source_color: Optional[str], candidate_color: Optional[s
     sc_neutral = _neutral_type(sc)
     cc_neutral = _neutral_type(cc)
 
+    # Both neutrals
     if sc_neutral and cc_neutral:
         if sc_neutral == cc_neutral:
             return 0.85
@@ -242,6 +427,7 @@ def score_color_harmony(source_color: Optional[str], candidate_color: Optional[s
             return 0.80
         return 0.65
 
+    # One neutral, one chromatic — neutrals always get minimum 0.75
     if sc_neutral or cc_neutral:
         neutral_type = sc_neutral if sc_neutral else cc_neutral
         chromatic_side = cc if sc_neutral else sc
@@ -264,6 +450,7 @@ def score_color_harmony(source_color: Optional[str], candidate_color: Optional[s
         if neutral_type == "cool":
             return 0.75
 
+    # Both chromatic
     if sc == cc:
         return 0.85
     if sc in cc or cc in sc:
@@ -285,64 +472,60 @@ def score_color_harmony(source_color: Optional[str], candidate_color: Optional[s
 
 
 # =============================================================================
-# 3. SCORING FUNCTIONS (9 dimensions)
+# 3. SCORING FUNCTIONS (8 dimensions — v2 rule-based)
 # =============================================================================
 
-FORMALITY_LEVELS = {
-    "very casual": 0, "casual": 1, "smart casual": 2,
-    "semi-formal": 3, "business casual": 3,
-    "formal": 4, "very formal": 5, "black tie": 6,
-}
-
-# --- Weight dictionaries (9 dims, all sum to 1.0) ---
+# --- Weight dictionaries (8 dims, all sum to 1.0) ---
+# Dimension keys: occasion_formality, style, fabric, silhouette,
+#                 color, seasonality, pattern, price
 
 CATEGORY_PAIR_WEIGHTS: Dict[Tuple[str, str], Dict[str, float]] = {
     ("tops", "bottoms"): {
-        "style": 0.18, "occasion": 0.14, "color": 0.14,
-        "formality": 0.12, "season": 0.10, "material": 0.08, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.18, "color": 0.12, "seasonality": 0.10,
+        "pattern": 0.06, "price": 0.06,
     },
     ("bottoms", "tops"): {
-        "style": 0.18, "color": 0.16, "occasion": 0.14,
-        "formality": 0.10, "season": 0.10, "material": 0.08, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.18, "color": 0.12, "seasonality": 0.10,
+        "pattern": 0.06, "price": 0.06,
     },
     ("dresses", "outerwear"): {
-        "style": 0.16, "season": 0.16, "color": 0.14,
-        "material": 0.12, "formality": 0.10, "occasion": 0.10, "balance": 0.06,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.12, "fabric": 0.16,
+        "silhouette": 0.12, "color": 0.12, "seasonality": 0.16,
+        "pattern": 0.06, "price": 0.06,
     },
     ("outerwear", "tops"): {
-        "style": 0.18, "season": 0.14, "color": 0.14,
-        "material": 0.10, "formality": 0.10, "occasion": 0.10, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "pattern": 0.06, "price": 0.08,
     },
     ("outerwear", "bottoms"): {
-        "style": 0.18, "season": 0.14, "color": 0.14,
-        "formality": 0.10, "occasion": 0.10, "material": 0.10, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "pattern": 0.06, "price": 0.08,
     },
     ("outerwear", "dresses"): {
-        "style": 0.16, "season": 0.16, "color": 0.14,
-        "material": 0.12, "formality": 0.10, "occasion": 0.10, "balance": 0.06,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.12, "fabric": 0.16,
+        "silhouette": 0.12, "color": 0.12, "seasonality": 0.16,
+        "pattern": 0.06, "price": 0.06,
     },
     ("tops", "outerwear"): {
-        "style": 0.18, "season": 0.14, "color": 0.14,
-        "material": 0.10, "formality": 0.10, "occasion": 0.10, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "pattern": 0.06, "price": 0.08,
     },
     ("bottoms", "outerwear"): {
-        "style": 0.18, "season": 0.14, "color": 0.14,
-        "formality": 0.10, "occasion": 0.10, "material": 0.10, "balance": 0.08,
-        "price": 0.08, "pattern": 0.08,
+        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
+        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "pattern": 0.06, "price": 0.08,
     },
 }
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "style": 0.18, "occasion": 0.14, "color": 0.14,
-    "formality": 0.10, "season": 0.10, "material": 0.10, "balance": 0.08,
-    "price": 0.08, "pattern": 0.08,
+    "occasion_formality": 0.22, "style": 0.14, "fabric": 0.14,
+    "silhouette": 0.16, "color": 0.12, "seasonality": 0.10,
+    "pattern": 0.06, "price": 0.06,
 }
 
 
@@ -356,84 +539,175 @@ def _jaccard(a: List[str], b: List[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _formality_distance(f1: Optional[str], f2: Optional[str]) -> float:
-    if not f1 or not f2:
-        return 0.5
-    level1 = FORMALITY_LEVELS.get(f1.lower().strip())
-    level2 = FORMALITY_LEVELS.get(f2.lower().strip())
-    if level1 is None:
-        for key, val in FORMALITY_LEVELS.items():
-            if key in f1.lower().strip():
-                level1 = val
+# ---------------------------------------------------------------------------
+# DIM 1: Occasion & Formality (merged)
+# ---------------------------------------------------------------------------
+
+_OCCASION_CONFLICTS = [
+    ({"workout", "gym", "exercise", "training"}, {"formal event", "wedding guest", "office", "work"}),
+    ({"lounging"}, {"office", "work", "formal event", "wedding guest"}),
+    ({"night out", "party", "club"}, {"workout", "gym", "exercise"}),
+]
+
+_DAY_OCCASIONS = {"everyday", "work", "office", "brunch", "school", "beach", "weekend"}
+_NIGHT_OCCASIONS = {"night out", "party", "club", "date night", "formal event"}
+
+
+def _score_occasion_formality(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Combined occasion + formality scoring with conflict detection."""
+    # Sub-score A: Formality distance ladder (weight 0.55)
+    delta = abs(source.formality_level - cand.formality_level)
+    if delta == 0:
+        form_score = 1.0
+    elif delta == 1:
+        form_score = 0.85
+    elif delta == 2:
+        # Bridge rule: soften penalty if one item is a bridge piece
+        form_score = 0.70 if (source.is_bridge or cand.is_bridge) else 0.55
+    else:
+        form_score = 0.10
+
+    # Sub-score B: Occasion overlap + conflicts (weight 0.30)
+    s_occ = {o.lower().strip() for o in source.occasions if o}
+    c_occ = {o.lower().strip() for o in cand.occasions if o}
+    if s_occ and c_occ:
+        # Check hard conflicts first
+        for group_a, group_b in _OCCASION_CONFLICTS:
+            if (s_occ & group_a and c_occ & group_b) or (s_occ & group_b and c_occ & group_a):
+                occ_score = 0.05
                 break
-    if level2 is None:
-        for key, val in FORMALITY_LEVELS.items():
-            if key in f2.lower().strip():
-                level2 = val
-                break
-    if level1 is None or level2 is None:
-        return 0.5
-    distance = abs(level1 - level2)
-    if distance == 0:
+        else:
+            overlap = len(s_occ & c_occ)
+            if overlap > 0:
+                jaccard = overlap / len(s_occ | c_occ)
+                occ_score = 0.4 + jaccard * 0.6
+            else:
+                # No overlap but no conflict — check if formality is close
+                occ_score = 0.30 if delta <= 1 else 0.15
+    elif not s_occ and not c_occ:
+        occ_score = 0.50
+    else:
+        occ_score = 0.35
+
+    # Sub-score C: Time context compatibility (weight 0.15)
+    s_day = bool(s_occ & _DAY_OCCASIONS)
+    s_night = bool(s_occ & _NIGHT_OCCASIONS)
+    c_day = bool(c_occ & _DAY_OCCASIONS)
+    c_night = bool(c_occ & _NIGHT_OCCASIONS)
+    if (s_day and c_day) or (s_night and c_night):
+        time_score = 1.0
+    elif (s_day and c_night and not s_night) or (s_night and c_day and not c_night):
+        time_score = 0.50
+    else:
+        time_score = 0.60  # unknown / mixed
+
+    return 0.55 * form_score + 0.30 * occ_score + 0.15 * time_score
+
+
+# ---------------------------------------------------------------------------
+# DIM 2: Style (adjacency matrix + strength + bridge)
+# ---------------------------------------------------------------------------
+
+# 15 style tags from our DB, mapped to adjacency tiers:
+# 1.0 = same, 0.75 = neighbor, 0.40 = weak neighbor, 0.10 = clash
+_STYLE_NEIGHBORS: Dict[str, Set[str]] = {
+    "casual":     {"minimalist", "streetwear", "sporty", "trendy", "chic"},
+    "minimalist": {"casual", "classic", "chic", "modern"},
+    "classic":    {"minimalist", "chic", "preppy", "modern"},
+    "chic":       {"classic", "minimalist", "modern", "romantic", "glamorous"},
+    "modern":     {"minimalist", "chic", "trendy", "classic"},
+    "trendy":     {"modern", "streetwear", "casual", "edgy", "party"},
+    "streetwear": {"casual", "trendy", "edgy", "sporty"},
+    "edgy":       {"streetwear", "trendy", "glamorous", "party"},
+    "romantic":   {"chic", "bohemian", "glamorous", "vintage"},
+    "glamorous":  {"romantic", "chic", "party", "edgy"},
+    "bohemian":   {"romantic", "vintage", "casual"},
+    "sporty":     {"casual", "streetwear"},
+    "party":      {"glamorous", "edgy", "trendy"},
+    "vintage":    {"romantic", "bohemian", "classic", "preppy"},
+    "preppy":     {"classic", "vintage", "chic"},
+}
+
+_STYLE_WEAK_NEIGHBORS: Dict[str, Set[str]] = {
+    "casual":     {"classic", "bohemian", "vintage"},
+    "minimalist": {"trendy"},
+    "classic":    {"glamorous", "romantic"},
+    "streetwear": {"bohemian"},
+    "romantic":   {"classic", "party"},
+    "glamorous":  {"classic", "modern"},
+    "edgy":       {"sporty", "bohemian"},
+    "sporty":     {"trendy", "edgy"},
+    "trendy":     {"glamorous", "romantic"},
+    "party":      {"casual", "streetwear"},
+}
+
+# Explicit clashes (score 0.10)
+_STYLE_CLASHES: Dict[str, Set[str]] = {
+    "romantic":   {"streetwear", "sporty"},
+    "preppy":     {"edgy", "streetwear"},
+    "sporty":     {"romantic", "glamorous", "preppy"},
+    "glamorous":  {"sporty", "casual"},
+    "bohemian":   {"preppy", "glamorous"},
+}
+
+# Style bridge items that reduce mismatch penalties
+_STYLE_BRIDGE_TAGS = {"casual", "minimalist", "classic", "chic", "modern"}
+
+
+def _style_adjacency(s1: str, s2: str) -> float:
+    """Score two style tags using the adjacency matrix."""
+    if s1 == s2:
         return 1.0
-    elif distance == 1:
+    if s2 in _STYLE_NEIGHBORS.get(s1, set()) or s1 in _STYLE_NEIGHBORS.get(s2, set()):
         return 0.75
-    elif distance == 2:
-        return 0.45
+    if s2 in _STYLE_WEAK_NEIGHBORS.get(s1, set()) or s1 in _STYLE_WEAK_NEIGHBORS.get(s2, set()):
+        return 0.40
+    if s2 in _STYLE_CLASHES.get(s1, set()) or s1 in _STYLE_CLASHES.get(s2, set()):
+        return 0.10
+    return 0.35  # unrelated but not clashing
+
+
+def _score_style(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Style compatibility: adjacency matrix + strength balance + bridge boost."""
+    s_tags = [t.lower().strip() for t in source.style_tags if t]
+    c_tags = [t.lower().strip() for t in cand.style_tags if t]
+    if not s_tags or not c_tags:
+        return 0.40  # unknown
+
+    # Sub-score A: Best adjacency score between primary styles (weight 0.60)
+    # Compare primary vs primary, and check secondary crossovers
+    best_adj = 0.0
+    for st in s_tags[:3]:
+        for ct in c_tags[:3]:
+            best_adj = max(best_adj, _style_adjacency(st, ct))
+    adj_score = best_adj
+
+    # Sub-score B: Style strength balance (weight 0.25)
+    ss = source.style_strength
+    cs = cand.style_strength
+    if ss >= 0.7 and cs >= 0.7:
+        strength_score = 0.30  # two statement pieces — too busy
+    elif (ss >= 0.6 and cs <= 0.35) or (cs >= 0.6 and ss <= 0.35):
+        strength_score = 0.90  # one statement + one supporting — ideal
+    elif ss <= 0.3 and cs <= 0.3:
+        strength_score = 0.70  # both basic — safe but bland
     else:
-        return 0.15
+        strength_score = 0.65  # moderate mix
 
-
-def _pattern_compatibility(p1: Optional[str], p2: Optional[str]) -> float:
-    if not p1 or not p2:
-        return 0.5
-    p1_l, p2_l = p1.lower().strip(), p2.lower().strip()
-    solids = {"solid", "plain", "none"}
-    subtle = {
-        "pinstripe", "herringbone", "tweed", "textured", "tonal", "ribbed",
-        "knit", "lace", "crochet", "cable knit", "quilted", "embroidered",
-        "woven", "mesh", "broderie", "eyelet", "ruched",
-    }
-    bold = {
-        "floral", "tropical", "graphic", "geometric", "abstract", "animal",
-        "leopard", "zebra", "paisley", "tie-dye", "camouflage", "plaid",
-        "checked", "polka dot", "striped", "gingham",
-    }
-    p1_solid = p1_l in solids
-    p2_solid = p2_l in solids
-    p1_subtle = p1_l in subtle
-    p2_subtle = p2_l in subtle
-    p1_bold = p1_l in bold or (not p1_solid and not p1_subtle)
-    p2_bold = p2_l in bold or (not p2_solid and not p2_subtle)
-
-    if p1_solid and p2_solid:
-        return 0.8
-    if p1_solid or p2_solid:
-        return 0.85
-    if p1_subtle and p2_subtle:
-        return 0.65
-    if p1_bold and p2_bold:
-        return 0.45 if p1_l == p2_l else 0.2
-    return 0.55
-
-
-def _price_coherence(price1: float, price2: float) -> float:
-    if price1 <= 0 or price2 <= 0:
-        return 0.5
-    ratio = max(price1, price2) / min(price1, price2)
-    if ratio <= 1.5:
-        return 1.0
-    elif ratio <= 2.0:
-        return 0.85
-    elif ratio <= 3.0:
-        return 0.6
-    elif ratio <= 4.0:
-        return 0.4
+    # Sub-score C: Style bridge boost (weight 0.15)
+    s_bridge = bool(set(s_tags) & _STYLE_BRIDGE_TAGS) or source.is_bridge
+    c_bridge = bool(set(c_tags) & _STYLE_BRIDGE_TAGS) or cand.is_bridge
+    if adj_score < 0.50 and (s_bridge or c_bridge):
+        bridge_score = min(1.0, adj_score + 0.30)  # bridge softens clash
     else:
-        return 0.2
+        bridge_score = adj_score  # no help needed
+
+    return 0.60 * adj_score + 0.25 * strength_score + 0.15 * bridge_score
 
 
-# --- Material / Texture (TATTOO dimension 5) ---
+# ---------------------------------------------------------------------------
+# DIM 3: Fabric (contrast + pair table + weight)
+# ---------------------------------------------------------------------------
 
 _FABRIC_FAMILIES: Dict[str, Set[str]] = {
     "cotton": {"cotton", "cotton blend", "100% cotton", "organic cotton", "cotton jersey",
@@ -483,30 +757,7 @@ def _get_fabric_family(fabric: Optional[str]) -> Optional[str]:
     return None
 
 
-_TEXTURE_COMPAT: Dict[Tuple[str, str], float] = {
-    ("smooth", "smooth"): 0.75, ("smooth", "textured"): 0.85,
-    ("smooth", "ribbed"): 0.85, ("smooth", "pleated"): 0.80,
-    ("smooth", "cable knit"): 0.80, ("smooth", "waffle"): 0.75,
-    ("smooth", "quilted"): 0.75, ("smooth", "terry"): 0.65,
-    ("textured", "textured"): 0.55, ("textured", "ribbed"): 0.50,
-    ("textured", "pleated"): 0.45, ("textured", "cable knit"): 0.45,
-    ("textured", "waffle"): 0.50, ("textured", "quilted"): 0.50,
-    ("textured", "terry"): 0.45,
-    ("ribbed", "ribbed"): 0.55, ("ribbed", "pleated"): 0.50,
-    ("ribbed", "cable knit"): 0.60, ("ribbed", "waffle"): 0.60,
-    ("ribbed", "quilted"): 0.55, ("ribbed", "terry"): 0.55,
-    ("pleated", "pleated"): 0.40, ("pleated", "cable knit"): 0.45,
-    ("pleated", "waffle"): 0.45, ("pleated", "quilted"): 0.40,
-    ("pleated", "terry"): 0.40,
-    ("cable knit", "cable knit"): 0.50, ("cable knit", "waffle"): 0.55,
-    ("cable knit", "quilted"): 0.60, ("cable knit", "terry"): 0.50,
-    ("waffle", "waffle"): 0.50, ("waffle", "quilted"): 0.55,
-    ("waffle", "terry"): 0.55,
-    ("quilted", "quilted"): 0.40, ("quilted", "terry"): 0.45,
-    ("terry", "terry"): 0.55,
-}
-
-# Fabric family compatibility (major pairings only for brevity -- full matrix)
+# Fabric family pair compatibility (full 16x16 matrix)
 _FABRIC_FAMILY_COMPAT: Dict[Tuple[str, str], float] = {
     ("cotton", "denim"): 0.85, ("cotton", "silk"): 0.70, ("cotton", "linen"): 0.80,
     ("cotton", "wool"): 0.75, ("cotton", "knit"): 0.80, ("cotton", "synthetic_woven"): 0.75,
@@ -515,7 +766,7 @@ _FABRIC_FAMILY_COMPAT: Dict[Tuple[str, str], float] = {
     ("cotton", "corduroy"): 0.80, ("cotton", "technical"): 0.55,
     ("cotton", "crochet"): 0.70, ("cotton", "sequin"): 0.45,
     ("denim", "silk"): 0.75, ("denim", "linen"): 0.70, ("denim", "wool"): 0.70,
-    ("denim", "knit"): 0.80, ("denim", "synthetic_woven"): 0.70,
+    ("denim", "knit"): 0.85, ("denim", "synthetic_woven"): 0.70,
     ("denim", "synthetic_stretch"): 0.65, ("denim", "sheer"): 0.65,
     ("denim", "leather"): 0.80, ("denim", "satin"): 0.60, ("denim", "velvet"): 0.55,
     ("denim", "corduroy"): 0.60, ("denim", "technical"): 0.50,
@@ -536,7 +787,7 @@ _FABRIC_FAMILY_COMPAT: Dict[Tuple[str, str], float] = {
     ("wool", "corduroy"): 0.75, ("wool", "technical"): 0.55,
     ("wool", "crochet"): 0.60, ("wool", "sequin"): 0.40,
     ("knit", "synthetic_woven"): 0.65, ("knit", "synthetic_stretch"): 0.65,
-    ("knit", "sheer"): 0.45, ("knit", "leather"): 0.75, ("knit", "satin"): 0.45,
+    ("knit", "sheer"): 0.45, ("knit", "leather"): 0.75, ("knit", "satin"): 0.80,
     ("knit", "velvet"): 0.55, ("knit", "corduroy"): 0.70, ("knit", "technical"): 0.50,
     ("knit", "crochet"): 0.70, ("knit", "sequin"): 0.35,
     ("synthetic_woven", "synthetic_stretch"): 0.70, ("synthetic_woven", "sheer"): 0.65,
@@ -563,8 +814,12 @@ _FABRIC_FAMILY_COMPAT: Dict[Tuple[str, str], float] = {
     ("technical", "crochet"): 0.20, ("technical", "sequin"): 0.20,
     ("crochet", "sequin"): 0.30,
 }
+# Same-family default
 for _fam in _FABRIC_FAMILIES:
     _FABRIC_FAMILY_COMPAT[(_fam, _fam)] = 0.75
+
+# Same-material penalties (denim+denim, leather+leather → bad default)
+_SAME_MATERIAL_PENALTY = {"denim": 0.25, "leather": 0.25, "sequin": 0.30}
 
 
 def _lookup_symmetric(
@@ -579,40 +834,73 @@ def _lookup_symmetric(
     return default
 
 
-def _material_compatibility(source: AestheticProfile, candidate: AestheticProfile) -> float:
-    """Score material/texture compatibility (TATTOO dim 5). Returns 0.0-1.0."""
-    tex_score = None
-    fab_score = None
+def _score_fabric(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Fabric compatibility: contrast principle + pair table + weight."""
+    fam1 = source.material_family
+    fam2 = cand.material_family
 
-    t1 = (source.texture or "").strip().lower()
-    t2 = (candidate.texture or "").strip().lower()
-    if t1 and t2:
-        tex_score = _lookup_symmetric(_TEXTURE_COMPAT, t1, t2, 0.55)
+    # Sub-score A: Contrast principle (weight 0.40)
+    contrast_score = 0.60  # neutral default
+    ti1 = source.texture_intensity
+    ti2 = cand.texture_intensity
+    sh1 = source.shine_level
+    sh2 = cand.shine_level
+    if ti1 and ti2:
+        if ti1 == "strong" and ti2 == "smooth":
+            contrast_score = 0.85
+        elif ti1 == "smooth" and ti2 == "strong":
+            contrast_score = 0.85
+        elif ti1 == "strong" and ti2 == "strong":
+            contrast_score = 0.40
+        elif ti1 == "smooth" and ti2 == "smooth":
+            contrast_score = 0.70
+        else:
+            contrast_score = 0.65  # medium + anything
+    if sh1 and sh2:
+        if sh1 == "shiny" and sh2 == "matte":
+            contrast_score = max(contrast_score, 0.80)
+        elif sh1 == "matte" and sh2 == "shiny":
+            contrast_score = max(contrast_score, 0.80)
+        elif sh1 == "shiny" and sh2 == "shiny":
+            contrast_score = min(contrast_score, 0.30)  # both shiny = bad
 
-    fam1 = _get_fabric_family(source.apparent_fabric)
-    fam2 = _get_fabric_family(candidate.apparent_fabric)
+    # Sub-score B: Fabric pair table (weight 0.45)
     if fam1 and fam2:
-        fab_score = _lookup_symmetric(_FABRIC_FAMILY_COMPAT, fam1, fam2, 0.55)
+        if fam1 == fam2 and fam1 in _SAME_MATERIAL_PENALTY:
+            pair_score = _SAME_MATERIAL_PENALTY[fam1]
+        else:
+            pair_score = _lookup_symmetric(_FABRIC_FAMILY_COMPAT, fam1, fam2, 0.55)
+    else:
+        pair_score = 0.50
 
-    if tex_score is not None and fab_score is not None:
-        return 0.40 * tex_score + 0.60 * fab_score
-    elif fab_score is not None:
-        return fab_score
-    elif tex_score is not None:
-        return tex_score
-    return 0.50
+    # Sub-score C: Weight compatibility (weight 0.15)
+    w1 = source.fabric_weight
+    w2 = cand.fabric_weight
+    if w1 and w2:
+        if w1 == w2:
+            weight_score = 0.80 if w1 == "mid" else 0.70 if w1 == "light" else 0.50
+        elif {w1, w2} == {"light", "mid"} or {w1, w2} == {"mid", "heavy"}:
+            weight_score = 0.75
+        else:  # light + heavy
+            weight_score = 0.45
+    else:
+        weight_score = 0.55
+
+    return 0.40 * contrast_score + 0.45 * pair_score + 0.15 * weight_score
 
 
-# --- Balance / Proportion (TATTOO dimension 6) ---
+# ---------------------------------------------------------------------------
+# DIM 4: Silhouette (category-aware balance rules)
+# ---------------------------------------------------------------------------
 
 _SILHOUETTE_COMPAT: Dict[Tuple[str, str], float] = {
     ("fitted", "relaxed"): 0.85, ("fitted", "oversized"): 0.85,
-    ("fitted", "wide leg"): 0.85, ("fitted", "a-line"): 0.80,
-    ("fitted", "flared"): 0.80, ("fitted", "straight"): 0.80,
+    ("fitted", "wide leg"): 0.90, ("fitted", "a-line"): 0.80,
+    ("fitted", "flared"): 0.85, ("fitted", "straight"): 0.80,
     ("fitted", "regular"): 0.75, ("fitted", "slim"): 0.60,
     ("fitted", "bodycon"): 0.55, ("fitted", "fitted"): 0.55,
     ("slim", "relaxed"): 0.85, ("slim", "oversized"): 0.85,
-    ("slim", "wide leg"): 0.80, ("slim", "a-line"): 0.80,
+    ("slim", "wide leg"): 0.85, ("slim", "a-line"): 0.80,
     ("slim", "flared"): 0.80, ("slim", "straight"): 0.75,
     ("slim", "regular"): 0.75, ("slim", "bodycon"): 0.55, ("slim", "slim"): 0.60,
     ("bodycon", "relaxed"): 0.80, ("bodycon", "oversized"): 0.80,
@@ -624,7 +912,7 @@ _SILHOUETTE_COMPAT: Dict[Tuple[str, str], float] = {
     ("relaxed", "straight"): 0.70, ("relaxed", "regular"): 0.70,
     ("relaxed", "relaxed"): 0.45,
     ("oversized", "a-line"): 0.55, ("oversized", "flared"): 0.50,
-    ("oversized", "wide leg"): 0.30, ("oversized", "straight"): 0.65,
+    ("oversized", "wide leg"): 0.25, ("oversized", "straight"): 0.65,
     ("oversized", "regular"): 0.65, ("oversized", "oversized"): 0.25,
     ("a-line", "straight"): 0.70, ("a-line", "regular"): 0.70,
     ("a-line", "wide leg"): 0.50, ("a-line", "flared"): 0.50, ("a-line", "a-line"): 0.55,
@@ -663,28 +951,97 @@ _LENGTH_BALANCE: Dict[Tuple[str, str], float] = {
     ("floor-length", "floor-length"): 0.25,
 }
 
+# Volume categories for the balance rule
+_WIDE_BOTTOM_SILS = {"wide leg", "flared", "a-line"}
+_FITTED_TOP_SILS = {"fitted", "slim", "bodycon"}
+_SKINNY_BOTTOM_SILS = {"slim", "skinny", "fitted", "bodycon", "straight"}
+_RELAXED_TOP_SILS = {"relaxed", "oversized", "regular"}
 
-def _balance_compatibility(source: AestheticProfile, candidate: AestheticProfile) -> float:
-    """Score balance/proportion compatibility (TATTOO dim 6). Returns 0.0-1.0."""
+
+def _score_silhouette(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Category-aware silhouette scoring with balance rules."""
+    s_sil = (source.silhouette or "").strip().lower()
+    c_sil = (cand.silhouette or "").strip().lower()
+    s_len = (source.length or "").strip().lower()
+    c_len = (cand.length or "").strip().lower()
+    s_cov = (source.coverage_level or "").strip().lower()
+    c_cov = (cand.coverage_level or "").strip().lower()
+    s_rise = (cand.rise or "").strip().lower()   # candidate bottom rise
+
+    s_broad = (source.broad_category or "").lower()
+    c_broad = (cand.broad_category or "").lower()
+
     scores: List[float] = []
     weights: List[float] = []
 
-    s1 = (source.silhouette or "").strip().lower()
-    s2 = (candidate.silhouette or "").strip().lower()
-    if s1 and s2:
-        scores.append(_lookup_symmetric(_SILHOUETTE_COMPAT, s1, s2, 0.55))
-        weights.append(0.45)
+    # --- Silhouette balance (weight 0.50) ---
+    if s_sil and c_sil:
+        # Category-aware overrides
+        is_top_bottom = (s_broad == "tops" and c_broad == "bottoms") or \
+                        (s_broad == "bottoms" and c_broad == "tops")
+        is_outerwear = s_broad == "outerwear" or c_broad == "outerwear"
 
-    c1 = (source.coverage_level or "").strip().lower()
-    c2 = (candidate.coverage_level or "").strip().lower()
-    if c1 and c2:
-        scores.append(_lookup_symmetric(_COVERAGE_COMPAT, c1, c2, 0.60))
-        weights.append(0.25)
+        if is_top_bottom:
+            top_sil = s_sil if s_broad == "tops" else c_sil
+            bot_sil = c_sil if s_broad == "tops" else s_sil
+            top_len = s_len if s_broad == "tops" else c_len
+            bot_rise = s_rise if s_broad == "bottoms" else (source.rise or "").strip().lower()
 
-    l1 = (source.length or "").strip().lower()
-    l2 = (candidate.length or "").strip().lower()
-    if l1 and l2:
-        scores.append(_lookup_symmetric(_LENGTH_BALANCE, l1, l2, 0.60))
+            # Balance rule: wide bottom → fitted top
+            if bot_sil in _WIDE_BOTTOM_SILS and top_sil in _FITTED_TOP_SILS:
+                sil_score = 0.90
+            elif bot_sil in _SKINNY_BOTTOM_SILS and top_sil in _RELAXED_TOP_SILS:
+                sil_score = 0.85
+            elif top_sil == "oversized" and bot_sil in _WIDE_BOTTOM_SILS:
+                # Oversized top + wide bottom = bad (unless streetwear)
+                s_tags = {t.lower() for t in source.style_tags}
+                c_tags = {t.lower() for t in cand.style_tags}
+                if "streetwear" in s_tags or "streetwear" in c_tags:
+                    sil_score = 0.60
+                else:
+                    sil_score = 0.25
+            else:
+                sil_score = _lookup_symmetric(_SILHOUETTE_COMPAT, top_sil, bot_sil, 0.55)
+
+            # Waist logic: cropped top + high-rise = boost
+            if top_len == "cropped" and bot_rise == "high":
+                sil_score = max(sil_score, 0.90)
+            elif top_len == "cropped" and bot_rise == "low":
+                s_tags = {t.lower() for t in source.style_tags}
+                c_tags = {t.lower() for t in cand.style_tags}
+                if "trendy" in s_tags or "trendy" in c_tags:
+                    sil_score = max(sil_score, 0.60)
+                else:
+                    sil_score = min(sil_score, 0.40)
+
+        elif is_outerwear:
+            outer_sil = s_sil if s_broad == "outerwear" else c_sil
+            inner_sil = c_sil if s_broad == "outerwear" else s_sil
+            outer_len = s_len if s_broad == "outerwear" else c_len
+
+            # Outerwear balance rules
+            if outer_len == "cropped" and inner_sil in _WIDE_BOTTOM_SILS:
+                sil_score = 0.90
+            elif outer_len in {"regular", "midi", "maxi"} and inner_sil in _SKINNY_BOTTOM_SILS:
+                sil_score = 0.85
+            elif outer_sil == "oversized" and inner_sil == "oversized":
+                sil_score = 0.30
+            else:
+                sil_score = _lookup_symmetric(_SILHOUETTE_COMPAT, outer_sil, inner_sil, 0.55)
+        else:
+            sil_score = _lookup_symmetric(_SILHOUETTE_COMPAT, s_sil, c_sil, 0.55)
+
+        scores.append(sil_score)
+        weights.append(0.50)
+
+    # --- Coverage compat (weight 0.20) ---
+    if s_cov and c_cov:
+        scores.append(_lookup_symmetric(_COVERAGE_COMPAT, s_cov, c_cov, 0.60))
+        weights.append(0.20)
+
+    # --- Length balance (weight 0.30) ---
+    if s_len and c_len:
+        scores.append(_lookup_symmetric(_LENGTH_BALANCE, s_len, c_len, 0.60))
         weights.append(0.30)
 
     if not scores:
@@ -693,12 +1050,187 @@ def _balance_compatibility(source: AestheticProfile, candidate: AestheticProfile
     return sum(s * w for s, w in zip(scores, weights)) / total_w
 
 
-# --- Main scorer ---
+# ---------------------------------------------------------------------------
+# DIM 5: Color Harmony (upgraded with saturation + same-mat + denim rules)
+# ---------------------------------------------------------------------------
+
+def _score_color(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Full color scoring: base harmony + saturation + same-material penalty + denim."""
+    sc = source.color_family or source.primary_color
+    cc = cand.color_family or cand.primary_color
+    base = _base_color_harmony(sc, cc)
+
+    # Saturation adjustment
+    s_sat = source.color_saturation
+    c_sat = cand.color_saturation
+    if s_sat == "bright" and c_sat == "bright":
+        sc_norm = _normalize_color(sc)
+        cc_norm = _normalize_color(cc)
+        # Two different bright colors fighting for attention
+        if sc_norm != cc_norm and base < 0.70:
+            base -= 0.10
+
+    # Same-family + same-material penalty (denim-on-denim, leather-on-leather)
+    sc_norm = _normalize_color(sc)
+    cc_norm = _normalize_color(cc)
+    fam1 = source.material_family
+    fam2 = cand.material_family
+    if fam1 and fam2 and fam1 == fam2 and fam1 in _SAME_MATERIAL_PENALTY:
+        sc_fam = _normalize_color(source.color_family)
+        cc_fam = _normalize_color(cand.color_family)
+        if sc_fam and cc_fam:
+            sc_nt = _neutral_type(sc_fam)
+            cc_nt = _neutral_type(cc_fam)
+            # Same neutral type + same material = bad (e.g. blue denim + blue denim)
+            if not sc_nt and not cc_nt:
+                # Both chromatic same-family same-material → strong penalty
+                for group in ANALOGOUS_GROUPS:
+                    if any(c in sc_fam for c in group) and any(c in cc_fam for c in group):
+                        base = min(base, 0.30)
+                        break
+
+    # Denim best practice: blue denim + white/cream/black/grey/navy/camel = boost
+    if fam1 == "denim" or fam2 == "denim":
+        other_color = cc_norm if fam1 == "denim" else sc_norm
+        if any(bc in other_color for bc in _DENIM_BOOST_COLORS):
+            base = max(base, 0.80)
+
+    return max(0.0, min(1.0, base))
+
+
+# ---------------------------------------------------------------------------
+# DIM 6: Seasonality (temp band + layer role + seasonal fabric)
+# ---------------------------------------------------------------------------
+
+_SUMMER_FABRICS = {"linen", "cotton", "sheer", "crochet", "satin", "silk"}
+_WINTER_FABRICS = {"wool", "leather", "velvet", "corduroy", "technical", "knit"}
+
+_LAYER_COMPAT: Dict[Tuple[str, str], float] = {
+    ("base", "midlayer"): 0.85, ("base", "outer"): 0.80,
+    ("midlayer", "outer"): 0.75, ("midlayer", "base"): 0.85,
+    ("outer", "base"): 0.80, ("outer", "midlayer"): 0.75,
+    ("base", "base"): 0.60, ("midlayer", "midlayer"): 0.50,
+    ("outer", "outer"): 0.30,
+}
+
+
+def _score_seasonality(source: AestheticProfile, cand: AestheticProfile) -> float:
+    """Seasonality: temperature + layering + seasonal fabric compatibility."""
+    # Sub-score A: Temperature compatibility (weight 0.45)
+    t1 = source.temp_band
+    t2 = cand.temp_band
+    if t1 and t2:
+        if t1 == t2 or "any" in (t1, t2):
+            temp_score = 1.0
+        elif {t1, t2} in [{"hot", "mild"}, {"mild", "cold"}]:
+            temp_score = 0.70
+        elif {t1, t2} == {"hot", "cold"}:
+            # Check if layering makes sense (outer + base = ok)
+            roles = {source.layer_role, cand.layer_role}
+            temp_score = 0.35 if "outer" in roles else 0.15
+        else:
+            temp_score = 0.60
+    else:
+        temp_score = 0.55  # unknown
+
+    # Sub-score B: Layer role compatibility (weight 0.30)
+    r1 = source.layer_role
+    r2 = cand.layer_role
+    if r1 and r2:
+        layer_score = _LAYER_COMPAT.get((r1, r2), 0.55)
+    else:
+        layer_score = 0.55
+
+    # Sub-score C: Seasonal fabric logic (weight 0.25)
+    fam1 = source.material_family
+    fam2 = cand.material_family
+    fab_score = 0.55  # default
+    if fam1 and fam2:
+        s1_summer = fam1 in _SUMMER_FABRICS
+        s2_summer = fam2 in _SUMMER_FABRICS
+        s1_winter = fam1 in _WINTER_FABRICS
+        s2_winter = fam2 in _WINTER_FABRICS
+        if s1_summer and s2_summer:
+            fab_score = 0.80
+        elif s1_winter and s2_winter:
+            fab_score = 0.80
+        elif (s1_summer and s2_winter) or (s1_winter and s2_summer):
+            # Cross-season fabric — bad unless layering
+            roles = {source.layer_role, cand.layer_role}
+            fab_score = 0.45 if "outer" in roles else 0.20
+        else:
+            fab_score = 0.65  # mid-weight fabrics are versatile
+
+    return 0.45 * temp_score + 0.30 * layer_score + 0.25 * fab_score
+
+
+# ---------------------------------------------------------------------------
+# DIM 7: Pattern (kept from v1 — solid/subtle/bold)
+# ---------------------------------------------------------------------------
+
+def _pattern_compatibility(p1: Optional[str], p2: Optional[str]) -> float:
+    if not p1 or not p2:
+        return 0.5
+    p1_l, p2_l = p1.lower().strip(), p2.lower().strip()
+    solids = {"solid", "plain", "none"}
+    subtle = {
+        "pinstripe", "herringbone", "tweed", "textured", "tonal", "ribbed",
+        "knit", "lace", "crochet", "cable knit", "quilted", "embroidered",
+        "woven", "mesh", "broderie", "eyelet", "ruched",
+    }
+    bold = {
+        "floral", "tropical", "graphic", "geometric", "abstract", "animal",
+        "leopard", "zebra", "paisley", "tie-dye", "camouflage", "plaid",
+        "checked", "polka dot", "striped", "gingham",
+    }
+    p1_solid = p1_l in solids
+    p2_solid = p2_l in solids
+    p1_subtle = p1_l in subtle
+    p2_subtle = p2_l in subtle
+    p1_bold = p1_l in bold or (not p1_solid and not p1_subtle)
+    p2_bold = p2_l in bold or (not p2_solid and not p2_subtle)
+
+    if p1_solid and p2_solid:
+        return 0.8
+    if p1_solid or p2_solid:
+        return 0.85
+    if p1_subtle and p2_subtle:
+        return 0.65
+    if p1_bold and p2_bold:
+        return 0.45 if p1_l == p2_l else 0.2
+    return 0.55
+
+
+# ---------------------------------------------------------------------------
+# DIM 8: Price (kept from v1)
+# ---------------------------------------------------------------------------
+
+def _price_coherence(price1: float, price2: float) -> float:
+    if price1 <= 0 or price2 <= 0:
+        return 0.5
+    ratio = max(price1, price2) / min(price1, price2)
+    if ratio <= 1.5:
+        return 1.0
+    elif ratio <= 2.0:
+        return 0.85
+    elif ratio <= 3.0:
+        return 0.6
+    elif ratio <= 4.0:
+        return 0.4
+    else:
+        return 0.2
+
+
+# ---------------------------------------------------------------------------
+# MAIN SCORER + CROSS-DIMENSION GATES
+# ---------------------------------------------------------------------------
 
 def compute_compatibility_score(
     source: AestheticProfile, candidate: AestheticProfile,
 ) -> Tuple[float, Dict[str, float]]:
-    """Compute 9-dimension TATTOO compatibility score. Returns (total, dim_scores)."""
+    """Compute 8-dimension compatibility score with cross-dimension gates.
+    Returns (total, dim_scores).
+    """
     pair_key = (
         (source.broad_category or "").lower(),
         (candidate.broad_category or "").lower(),
@@ -706,58 +1238,241 @@ def compute_compatibility_score(
     weights = CATEGORY_PAIR_WEIGHTS.get(pair_key, DEFAULT_WEIGHTS)
     dim_scores: Dict[str, float] = {}
 
-    # 1. Formality
-    dim_scores["formality"] = _formality_distance(source.formality, candidate.formality)
+    # 1. Occasion & Formality (merged)
+    dim_scores["occasion_formality"] = _score_occasion_formality(source, candidate)
 
-    # 2. Occasion
-    raw_occ = _jaccard(source.occasions, candidate.occasions)
-    if raw_occ > 0:
-        dim_scores["occasion"] = 0.4 + raw_occ * 0.6
-    elif source.occasions and candidate.occasions:
-        dim_scores["occasion"] = 0.15
-    else:
-        dim_scores["occasion"] = 0.35
+    # 2. Style
+    dim_scores["style"] = _score_style(source, candidate)
 
-    # 3. Color
-    dim_scores["color"] = score_color_harmony(
-        source.color_family or source.primary_color,
-        candidate.color_family or candidate.primary_color,
-    )
+    # 3. Fabric
+    dim_scores["fabric"] = _score_fabric(source, candidate)
 
-    # 4. Style
-    raw_style = _jaccard(source.style_tags, candidate.style_tags)
-    if raw_style > 0:
-        dim_scores["style"] = 0.3 + raw_style * 0.7
-    elif source.style_tags and candidate.style_tags:
-        dim_scores["style"] = 0.10
-    else:
-        dim_scores["style"] = 0.35
+    # 4. Silhouette
+    dim_scores["silhouette"] = _score_silhouette(source, candidate)
 
-    # 5. Season
-    raw_season = _jaccard(source.seasons, candidate.seasons)
-    if raw_season > 0:
-        dim_scores["season"] = 0.4 + raw_season * 0.6
-    elif source.seasons and candidate.seasons:
-        dim_scores["season"] = 0.10
-    elif not source.seasons and not candidate.seasons:
-        dim_scores["season"] = 0.5
-    else:
-        dim_scores["season"] = 0.40
+    # 5. Color
+    dim_scores["color"] = _score_color(source, candidate)
 
-    # 6. Price
-    dim_scores["price"] = _price_coherence(source.price, candidate.price)
+    # 6. Seasonality
+    dim_scores["seasonality"] = _score_seasonality(source, candidate)
 
     # 7. Pattern
     dim_scores["pattern"] = _pattern_compatibility(source.pattern, candidate.pattern)
 
-    # 8. Material (TATTOO dim 5)
-    dim_scores["material"] = _material_compatibility(source, candidate)
+    # 8. Price
+    dim_scores["price"] = _price_coherence(source.price, candidate.price)
 
-    # 9. Balance (TATTOO dim 6)
-    dim_scores["balance"] = _balance_compatibility(source, candidate)
-
+    # Weighted sum
     total = sum(weights.get(dim, 0) * score for dim, score in dim_scores.items())
-    return total, dim_scores
+
+    # --- Cross-dimension gates (post-hoc penalties) ---
+
+    # Gate 1: Formality hard gate — if occasion_formality < 0.25, cap total
+    if dim_scores["occasion_formality"] < 0.25:
+        total = min(total, 0.35)
+
+    # Gate 2: Color contribution halved when formality clashes
+    if dim_scores["occasion_formality"] < 0.50:
+        color_w = weights.get("color", 0)
+        # Reduce effective color contribution by 50%
+        excess = color_w * dim_scores["color"] * 0.50
+        total = max(0.0, total - excess)
+
+    # Gate 3: Oversized + oversized hard cap
+    if dim_scores["silhouette"] < 0.30:
+        total = min(total, 0.40)
+
+    # Gate 4: Same-material same-color cross-penalty
+    fam1 = source.material_family
+    fam2 = candidate.material_family
+    if fam1 and fam2 and fam1 == fam2 and fam1 in _SAME_MATERIAL_PENALTY:
+        sc = _normalize_color(source.color_family)
+        cc = _normalize_color(candidate.color_family)
+        if sc and cc:
+            sc_nt = _neutral_type(sc)
+            cc_nt = _neutral_type(cc)
+            if not sc_nt and not cc_nt:
+                # Both chromatic + same material → extra penalty
+                total = max(0.0, total - 0.12)
+
+    return max(0.0, min(1.0, total)), dim_scores
+
+
+# ---------------------------------------------------------------------------
+# NOVELTY / CONTRAST SCORE  (used only for complement search, not similar)
+# ---------------------------------------------------------------------------
+
+def compute_novelty_score(
+    source: AestheticProfile, candidate: AestheticProfile,
+) -> float:
+    """Reward candidates that bring something *new* to the outfit.
+
+    High novelty = different color family, different fabric, different pattern
+    tier, different visual feel.  This is NOT random difference — it's the
+    kind of contrast that ChatGPT's rules describe as good outfit building
+    (fabric contrast, color harmony through difference, visual interest).
+
+    Returns 0.0-1.0 where 1.0 = maximally novel complement.
+    """
+    signals = []
+
+    # 1. Color family difference (biggest driver of visual novelty)
+    sc = _normalize_color(source.color_family)
+    cc = _normalize_color(candidate.color_family)
+    if sc and cc:
+        if sc == cc:
+            signals.append(0.1)   # same color = no novelty
+        elif _neutral_type(sc) or _neutral_type(cc):
+            signals.append(0.5)   # neutral + chromatic = moderate novelty
+        else:
+            # Check if same analogous group
+            in_same_group = False
+            for group in ANALOGOUS_GROUPS:
+                if sc in group and cc in group:
+                    in_same_group = True
+                    break
+            signals.append(0.55 if in_same_group else 0.85)
+    else:
+        signals.append(0.4)
+
+    # 2. Fabric family difference
+    sf = (source.material_family or "").lower()
+    cf = (candidate.material_family or "").lower()
+    if sf and cf:
+        if sf == cf:
+            signals.append(0.05)  # same fabric = no novelty
+        else:
+            # Different fabric families = good contrast
+            signals.append(0.80)
+    else:
+        signals.append(0.4)
+
+    # 3. Texture intensity contrast
+    st = source.texture_intensity
+    ct = candidate.texture_intensity
+    if st and ct:
+        if st == ct:
+            signals.append(0.2)
+        elif {st, ct} == {"smooth", "strong"}:
+            signals.append(0.90)  # best contrast
+        else:
+            signals.append(0.55)
+    else:
+        signals.append(0.4)
+
+    # 4. Pattern tier difference
+    sp = (source.pattern or "").lower()
+    cp = (candidate.pattern or "").lower()
+    _SOLIDS = {"solid", "plain", "none", ""}
+    sp_solid = sp in _SOLIDS
+    cp_solid = cp in _SOLIDS
+    if sp_solid and cp_solid:
+        signals.append(0.15)  # both solid = no pattern interest
+    elif sp_solid != cp_solid:
+        signals.append(0.75)  # one print + one solid = good
+    elif sp == cp:
+        signals.append(0.10)  # same pattern = low novelty
+    else:
+        signals.append(0.50)  # different prints
+
+    # 5. Silhouette contrast (volume difference = visual interest)
+    _VOLUME = {"oversized": 3, "relaxed": 2, "regular": 1, "fitted": 0, "slim": 0, "bodycon": 0}
+    sv = _VOLUME.get((source.silhouette or "").lower(), 1)
+    cv = _VOLUME.get((candidate.silhouette or "").lower(), 1)
+    vol_diff = abs(sv - cv)
+    if vol_diff >= 2:
+        signals.append(0.80)
+    elif vol_diff == 1:
+        signals.append(0.55)
+    else:
+        signals.append(0.15)
+
+    return sum(signals) / len(signals) if signals else 0.4
+
+
+# ---------------------------------------------------------------------------
+# GREEDY DIVERSE SELECTION (MMR-style)
+# ---------------------------------------------------------------------------
+
+def _item_signature(entry: Dict) -> Dict[str, Optional[str]]:
+    """Extract key visual attributes for diversity comparison."""
+    p: AestheticProfile = entry["profile"]
+    return {
+        "color": _normalize_color(p.color_family) or _normalize_color(p.primary_color),
+        "fabric": (p.material_family or "").lower() or None,
+        "pattern": (p.pattern or "").lower() or None,
+        "silhouette": (p.silhouette or "").lower() or None,
+        "brand": (p.brand or "").lower() or None,
+    }
+
+
+def _sig_overlap(a: Dict[str, Optional[str]], b: Dict[str, Optional[str]]) -> float:
+    """Fraction of shared attributes between two signatures (0-1).
+    Higher = more similar = less diverse.
+    """
+    keys = ["color", "fabric", "pattern", "silhouette", "brand"]
+    matches = 0
+    compared = 0
+    for k in keys:
+        va, vb = a.get(k), b.get(k)
+        if va and vb:
+            compared += 1
+            if va == vb:
+                matches += 1
+    if compared == 0:
+        return 0.0
+    return matches / compared
+
+
+def _diverse_select(
+    scored: List[Dict],
+    diversity_lambda: float = 0.25,
+) -> List[Dict]:
+    """Greedy MMR-style reranking for intra-result diversity.
+
+    Picks items one-by-one.  For each slot after the first, the score is:
+        adjusted = (1 - λ) * tattoo  -  λ * max_overlap_with_selected
+
+    where max_overlap is the worst-case attribute overlap with any item
+    already in the result list.  This pushes each next pick to be
+    different in color, fabric, pattern, silhouette, and brand.
+
+    With λ=0.40, a candidate with 0.65 tattoo but 0.0 overlap beats
+    a candidate with 0.70 tattoo but 0.60 overlap:
+      0.60*0.65 - 0.40*0.0 = 0.39  vs  0.60*0.70 - 0.40*0.60 = 0.18
+    """
+    if len(scored) <= 1:
+        return scored
+
+    selected: List[Dict] = []
+    selected_sigs: List[Dict[str, Optional[str]]] = []
+    remaining = list(scored)
+
+    # First pick: highest tattoo score (no diversity penalty)
+    selected.append(remaining.pop(0))
+    selected_sigs.append(_item_signature(selected[0]))
+
+    while remaining:
+        best_idx = 0
+        best_adjusted = -999.0
+
+        for i, cand in enumerate(remaining):
+            cand_sig = _item_signature(cand)
+            # Max overlap with any already-selected item
+            max_overlap = max(
+                _sig_overlap(cand_sig, sel_sig)
+                for sel_sig in selected_sigs
+            )
+            adjusted = (1.0 - diversity_lambda) * cand["tattoo"] - diversity_lambda * max_overlap
+            if adjusted > best_adjusted:
+                best_adjusted = adjusted
+                best_idx = i
+
+        picked = remaining.pop(best_idx)
+        selected.append(picked)
+        selected_sigs.append(_item_signature(picked))
+
+    return selected
 
 
 # =============================================================================
@@ -1037,7 +1752,8 @@ _ATTRS_SELECT = (
     "sku_id, category_l1, category_l2, "
     "occasions, style_tags, pattern, formality, fit_type, "
     "color_family, primary_color, secondary_colors, seasons, silhouette, "
-    "construction, apparent_fabric, texture, coverage_level"
+    "construction, apparent_fabric, texture, coverage_level, "
+    "sheen, rise, leg_shape, stretch"
 )
 
 _PRODUCT_SELECT = (
@@ -1055,6 +1771,207 @@ class OutfitEngine:
 
     def __init__(self, supabase: Client):
         self.supabase = supabase
+        self._clip_model = None
+        self._clip_processor = None
+        self._clip_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # FashionCLIP text encoder (lazy-loaded)
+    # ------------------------------------------------------------------
+
+    def _load_clip(self):
+        """Lazy-load FashionCLIP for text prompt encoding (thread-safe)."""
+        if self._clip_model is None:
+            with self._clip_lock:
+                if self._clip_model is None:
+                    import torch
+                    from transformers import CLIPProcessor, CLIPModel
+                    logger.info("OutfitEngine: loading FashionCLIP model...")
+                    model = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip")
+                    processor = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
+                    if torch.cuda.is_available():
+                        model = model.cuda()
+                    model.eval()
+                    self._clip_processor = processor
+                    self._clip_model = model
+                    logger.info("OutfitEngine: FashionCLIP model loaded")
+
+    def _encode_text(self, text: str) -> str:
+        """Encode text to a pgvector-compatible embedding string."""
+        import torch
+        self._load_clip()
+        with torch.no_grad():
+            inputs = self._clip_processor(
+                text=[text], return_tensors="pt",
+                padding=True, truncation=True, max_length=77,
+            )
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            emb = self._clip_model.get_text_features(**inputs)
+            if isinstance(emb, torch.Tensor):
+                pass
+            elif hasattr(emb, "pooler_output") and emb.pooler_output is not None:
+                emb = emb.pooler_output
+            elif hasattr(emb, "text_embeds") and emb.text_embeds is not None:
+                emb = emb.text_embeds
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            vec = emb.cpu().numpy().flatten().astype("float32").tolist()
+        return f"[{','.join(map(str, vec))}]"
+
+    # ------------------------------------------------------------------
+    # Diverse prompt generation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _generate_complement_prompts(
+        source: "AestheticProfile",
+        source_broad: str,
+        target_broad: str,
+    ) -> List[str]:
+        """
+        Generate 3-5 diverse text prompts that describe complementary items
+        for the source product in the target category.  Each prompt targets
+        a different style / fabric / formality neighborhood so pgvector
+        returns candidates from distinct regions of the embedding space.
+        """
+        src_color = source.primary_color or source.color_family or ""
+        src_fabric = source.material_family or source.apparent_fabric or ""
+        src_style = source.primary_style or ""
+        src_formality = source.formality or ""
+        src_pattern = source.pattern or ""
+        src_name = (source.name or "").lower()
+
+        # Target garment noun for prompts
+        _TARGET_NOUNS = {
+            "tops":      ["top", "blouse", "shirt", "sweater", "tee"],
+            "bottoms":   ["trousers", "jeans", "skirt", "pants", "shorts"],
+            "dresses":   ["dress", "midi dress", "mini dress", "maxi dress"],
+            "outerwear": ["jacket", "blazer", "coat", "cardigan"],
+        }
+        nouns = _TARGET_NOUNS.get(target_broad, [target_broad])
+
+        # Contrasting fabric families for texture play
+        _FABRIC_CONTRAST = {
+            "denim":  ["silk", "knit", "cotton", "leather"],
+            "knit":   ["denim", "leather", "satin", "cotton"],
+            "silk":   ["denim", "knit", "wool", "cotton"],
+            "satin":  ["knit", "cotton", "wool", "denim"],
+            "leather": ["silk", "chiffon", "knit", "cotton"],
+            "linen":  ["silk", "denim", "knit", "cotton"],
+            "wool":   ["silk", "satin", "cotton", "leather"],
+            "cotton": ["silk", "leather", "satin", "denim"],
+        }
+
+        # Complementary color suggestions
+        _COLOR_COMPLEMENTS = {
+            "blue":   ["white", "camel", "black", "cream"],
+            "black":  ["white", "red", "cream", "camel"],
+            "white":  ["navy", "black", "beige", "denim blue"],
+            "red":    ["black", "white", "navy", "cream"],
+            "pink":   ["grey", "black", "navy", "cream"],
+            "green":  ["white", "beige", "brown", "cream"],
+            "navy":   ["white", "cream", "camel", "blush"],
+            "brown":  ["cream", "white", "navy", "olive"],
+            "beige":  ["navy", "black", "white", "burgundy"],
+            "cream":  ["navy", "black", "brown", "burgundy"],
+            "grey":   ["pink", "white", "black", "navy"],
+        }
+
+        # Style neighbors to suggest variety
+        _STYLE_VARIETY = {
+            "casual":     ["classic", "minimalist", "streetwear"],
+            "classic":    ["minimalist", "chic", "preppy"],
+            "minimalist": ["classic", "modern", "casual"],
+            "trendy":     ["modern", "streetwear", "edgy"],
+            "streetwear": ["casual", "edgy", "sporty"],
+            "romantic":   ["chic", "bohemian", "classic"],
+            "chic":       ["classic", "modern", "romantic"],
+            "edgy":       ["streetwear", "trendy", "modern"],
+            "bohemian":   ["romantic", "casual", "vintage"],
+            "glamorous":  ["chic", "romantic", "party"],
+            "sporty":     ["casual", "streetwear", "modern"],
+        }
+
+        prompts = []
+
+        # --- Prompt 1: Neutral safe complement (always included) ---
+        safe_noun = nouns[0]
+        prompts.append(f"women's {safe_noun} to wear with {src_color} {src_fabric}".strip())
+
+        # --- Prompt 2: Fabric contrast ---
+        contrast_fabrics = _FABRIC_CONTRAST.get(
+            (src_fabric or "").lower().split()[0] if src_fabric else "",
+            ["cotton", "knit", "silk"],
+        )
+        prompts.append(
+            f"women's {contrast_fabrics[0]} {nouns[1 % len(nouns)]} "
+            f"{src_formality.lower() if src_formality else 'casual'}".strip()
+        )
+
+        # --- Prompt 3: Color complement ---
+        color_key = (src_color or "").lower().split()[0] if src_color else ""
+        comp_colors = _COLOR_COMPLEMENTS.get(color_key, ["white", "black", "cream"])
+        prompts.append(
+            f"{comp_colors[0]} {nouns[2 % len(nouns)]} "
+            f"{contrast_fabrics[1] if len(contrast_fabrics) > 1 else 'cotton'}"
+        )
+
+        # --- Prompt 4: Style neighbor (different vibe) ---
+        style_key = (src_style or "").lower()
+        alt_styles = _STYLE_VARIETY.get(style_key, ["classic", "casual", "modern"])
+        prompts.append(
+            f"{alt_styles[0]} {nouns[3 % len(nouns)]} for women "
+            f"{'solid' if src_pattern and src_pattern.lower() not in ('solid', 'plain', 'none', '') else 'print'}"
+        )
+
+        # --- Prompt 5: Elevated / dressy version (if source is casual) ---
+        if source.formality_level <= 2:
+            prompts.append(
+                f"elegant {comp_colors[1] if len(comp_colors) > 1 else 'black'} "
+                f"{nouns[0]} smart casual women"
+            )
+        # --- Prompt 5 alt: Relaxed version (if source is formal) ---
+        elif source.formality_level >= 4:
+            prompts.append(
+                f"relaxed {contrast_fabrics[0]} {nouns[1 % len(nouns)]} casual women"
+            )
+
+        return prompts[:5]
+
+    # ------------------------------------------------------------------
+    # Text-based candidate retrieval
+    # ------------------------------------------------------------------
+
+    def _retrieve_text_candidates(
+        self,
+        prompts: List[str],
+        target_category: str,
+        per_prompt: int = 15,
+    ) -> List[Dict]:
+        """
+        Run each prompt through FashionCLIP → text_search_products and
+        merge results.  Deduplicates by product_id across prompts.
+        """
+        seen_ids: Set[str] = set()
+        all_results: List[Dict] = []
+
+        for prompt in prompts:
+            try:
+                vec_str = self._encode_text(prompt)
+                result = self.supabase.rpc("text_search_products", {
+                    "query_embedding": vec_str,
+                    "match_count": per_prompt,
+                    "match_offset": 0,
+                    "filter_category": target_category,
+                }).execute()
+                for row in (result.data or []):
+                    pid = str(row.get("product_id", ""))
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        all_results.append(row)
+            except Exception as e:
+                logger.warning("Text search prompt failed (%s): %s", prompt[:40], e)
+        return all_results
 
     # ------------------------------------------------------------------
     # Public API
@@ -1156,9 +2073,9 @@ class OutfitEngine:
             "recommendations": recommendations,
             "status": status,
             "scoring_info": {
-                "dimensions": 9,
-                "fusion_weight": fusion_weight,
-                "engine": "tattoo_v1",
+                "dimensions": 8,
+                "fusion": "0.70*compat + 0.08*novelty + 0.22*cosine",
+                "engine": "tattoo_v2.1",
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -1327,9 +2244,41 @@ class OutfitEngine:
         status: str,
         fusion_weight: float,
     ) -> List[Dict]:
-        """Retrieve, filter, score candidates for one target category."""
+        """Retrieve, filter, score candidates for one target category.
+
+        Uses two retrieval strategies merged together:
+        1. Product-to-product pgvector similarity (original pool)
+        2. FashionCLIP text prompts describing diverse complements (diversity pool)
+        Deduplicates by product_id before scoring.
+        """
         target_db_cats = BROAD_TO_CATEGORIES.get(target_broad, [target_broad])
+
+        # --- Pool 1: product-to-product pgvector similarity ---
         raw = self._retrieve_candidates(source.product_id, target_db_cats, limit=60)
+
+        # --- Pool 2: diverse text prompt retrieval ---
+        try:
+            prompts = self._generate_complement_prompts(source, source_broad, target_broad)
+            text_raw = self._retrieve_text_candidates(
+                prompts, target_category=target_db_cats[0], per_prompt=15,
+            )
+            # Merge: deduplicate by product_id
+            existing_ids = {
+                str(r.get("product_id") or r.get("id", ""))
+                for r in raw
+            }
+            for row in text_raw:
+                pid = str(row.get("product_id", ""))
+                if pid and pid not in existing_ids:
+                    existing_ids.add(pid)
+                    raw.append(row)
+            logger.info(
+                "Diverse retrieval for %s: %d pgvector + %d text-prompt = %d merged",
+                target_broad, len(raw) - len(text_raw), len(text_raw), len(raw),
+            )
+        except Exception as e:
+            logger.warning("Text-prompt retrieval failed for %s, using pgvector only: %s", target_broad, e)
+
         if not raw:
             return []
 
@@ -1341,17 +2290,42 @@ class OutfitEngine:
         if status == "activewear":
             profiles = _filter_activewear(profiles)
 
+        # --- Complement fusion ---
+        # For outfit building the scoring favors TATTOO rules + novelty over
+        # raw cosine similarity.  Cosine rewards items that *look like* the
+        # source — the opposite of what we want for complementary outfits.
+        #
+        # Formula:  tattoo = 0.70 * compat + 0.15 * novelty + 0.15 * cosine
+        #
+        # The TATTOO dimensions already encode contrast rules (fabric contrast
+        # principle, color harmony, silhouette balance) so giving them 70%
+        # weight lets the fashion rules decide.  The novelty bonus (15%)
+        # explicitly rewards items that bring something visually different
+        # (different color, fabric, texture, pattern).  Cosine (15%) is kept
+        # as a light tie-breaker for visual coherence.
+        W_COMPAT = 0.70
+        W_NOVELTY = 0.08
+        W_COSINE = 0.22
+
         scored = []
         for cand in profiles:
             cand.broad_category = _gemini_broad(cand.gemini_category_l1) or target_broad
             compat, dims = compute_compatibility_score(source, cand)
-            tattoo = fusion_weight * compat + (1 - fusion_weight) * cand.similarity
+            novelty = compute_novelty_score(source, cand)
+            cosine = cand.similarity
+            tattoo = W_COMPAT * compat + W_NOVELTY * novelty + W_COSINE * cosine
             scored.append({
                 "profile": cand, "compat": compat, "tattoo": tattoo,
-                "cosine": cand.similarity, "dims": dims,
+                "cosine": cosine, "novelty": novelty, "dims": dims,
             })
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
+
+        # --- Greedy diverse selection (MMR-style) ---
+        # Ensures the final list has visual variety: each next pick must
+        # be sufficiently different from items already selected.
+        scored = _diverse_select(scored)
+
         return scored
 
     # ------------------------------------------------------------------
@@ -1372,7 +2346,7 @@ class OutfitEngine:
 
     def _format_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
         p = entry["profile"]
-        return {
+        result = {
             "product_id": p.product_id,
             "name": p.name,
             "brand": p.brand,
@@ -1386,6 +2360,9 @@ class OutfitEngine:
             "cosine_similarity": round(entry["cosine"], 4),
             "dimension_scores": {k: round(v, 4) for k, v in entry["dims"].items()},
         }
+        if "novelty" in entry:
+            result["novelty_score"] = round(entry["novelty"], 4)
+        return result
 
     def _format_similar_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
         p = entry["profile"]
