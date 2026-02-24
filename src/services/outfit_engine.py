@@ -1803,6 +1803,8 @@ class OutfitEngine:
             or "Resource temporarily" in msg
             or "[Errno 104]" in msg    # Connection reset by peer
             or "ConnectionReset" in type(exc).__name__
+            or "Server disconnected" in msg  # Supabase connection drop
+            or "RemoteProtocolError" in type(exc).__name__
         )
 
     def _supabase_retry(self, fn, *args, max_retries: int = 3, **kwargs):
@@ -2041,7 +2043,7 @@ class OutfitEngine:
                 f"relaxed {contrast_fabrics[0]} {nouns[1 % len(nouns)]} casual women"
             )
 
-        return prompts[:5]
+        return prompts[:3]
 
     # ------------------------------------------------------------------
     # Text-based candidate retrieval
@@ -2391,6 +2393,54 @@ class OutfitEngine:
         return profiles
 
     # ------------------------------------------------------------------
+    # Internal: build profiles from batch RPC rows (joined attrs)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_profiles_from_batch_rows(rows: List[Dict]) -> List["AestheticProfile"]:
+        """Convert rows from batch_complement_search (or updated RPCs with
+        joined gemini_ columns) directly into AestheticProfile objects.
+
+        Skips the separate _enrich_candidates DB call since attrs are inline.
+        """
+        profiles = []
+        for c in rows:
+            pid = c.get("product_id") or c.get("id")
+            product_row = {
+                "id": pid, "name": c.get("name", ""), "brand": c.get("brand", ""),
+                "category": c.get("category", ""), "broad_category": c.get("broad_category", ""),
+                "price": c.get("price", 0), "primary_image_url": c.get("primary_image_url", ""),
+                "base_color": c.get("base_color", ""), "style_tags": c.get("style_tags"),
+                "fit": c.get("fit"),
+            }
+            # Gemini attrs come with gemini_ prefix from the batch RPC
+            attrs = {}
+            for key in (
+                "category_l1", "category_l2", "occasions", "style_tags",
+                "pattern", "formality", "fit_type", "color_family",
+                "primary_color", "secondary_colors", "seasons", "silhouette",
+                "construction", "apparent_fabric", "texture", "coverage_level",
+                "sheen", "rise", "leg_shape", "stretch",
+            ):
+                val = c.get(f"gemini_{key}")
+                if val is not None:
+                    attrs[key] = val
+            # Also check non-prefixed keys (for old RPCs / backwards compat)
+            if not attrs.get("category_l1") and c.get("category_l1"):
+                for key in ("category_l1", "category_l2", "occasions", "style_tags",
+                            "pattern", "formality", "fit_type", "color_family",
+                            "primary_color", "secondary_colors", "seasons", "silhouette",
+                            "construction", "apparent_fabric", "texture", "coverage_level",
+                            "sheen", "rise", "leg_shape", "stretch"):
+                    if c.get(key) is not None:
+                        attrs[key] = c[key]
+
+            profile = AestheticProfile.from_product_and_attrs(product_row, attrs)
+            profile.similarity = float(c.get("similarity", 0))
+            profiles.append(profile)
+        return profiles
+
+    # ------------------------------------------------------------------
     # Internal: scoring pipeline for one category
     # ------------------------------------------------------------------
 
@@ -2404,55 +2454,96 @@ class OutfitEngine:
     ) -> List[Dict]:
         """Retrieve, filter, score candidates for one target category.
 
-        Uses two retrieval strategies merged together:
-        1. Product-to-product pgvector similarity (original pool)
-        2. FashionCLIP text prompts describing diverse complements (diversity pool)
-        Deduplicates by product_id before scoring.
+        Strategy A (preferred): single batch_complement_search RPC that
+        returns pgvector pool + all text-prompt pools + joined attrs in one call.
+
+        Strategy B (fallback): separate RPCs for pgvector + text prompts,
+        then a separate enrichment call. Used if batch RPC is unavailable.
         """
         target_db_cats = BROAD_TO_CATEGORIES.get(target_broad, [target_broad])
-
-        # Phase 3: Run both retrieval pools concurrently.
-        # Generate prompts first (in-memory, instant) so text encoding can
-        # start while pgvector RPC is in flight.
         prompts = self._generate_complement_prompts(source, source_broad, target_broad)
 
-        pgvec_future = self._io_pool.submit(
-            self._retrieve_candidates, source.product_id, target_db_cats, 60,
-        )
-        text_future = self._io_pool.submit(
-            self._retrieve_text_candidates, prompts, target_db_cats[0], 8,
-        )
+        raw = None
 
-        # Collect pgvector results
+        # --- Strategy A: single batch RPC ---
         try:
-            raw = pgvec_future.result(timeout=30)
-        except Exception as e:
-            logger.warning("pgvector retrieval failed for %s: %s", target_broad, e)
-            raw = []
+            # Batch encode all prompts in one GPU forward pass
+            vec_strs = self._encode_texts_batch(prompts)
+            # Build JSON array of embedding arrays for the RPC
+            import json as _json
+            embeddings_list = [
+                [float(x) for x in vs.strip("[]").split(",")]
+                for vs in vec_strs
+            ]
+            embeddings_json = _json.dumps(embeddings_list)
 
-        # Collect text-prompt results and merge
-        try:
-            text_raw = text_future.result(timeout=30)
-            existing_ids = {
-                str(r.get("product_id") or r.get("id", ""))
-                for r in raw
-            }
-            for row in text_raw:
-                pid = str(row.get("product_id", ""))
-                if pid and pid not in existing_ids:
-                    existing_ids.add(pid)
-                    raw.append(row)
-            logger.info(
-                "Diverse retrieval for %s: %d pgvector + %d text-prompt = %d merged",
-                target_broad, len(raw) - len(text_raw), len(text_raw), len(raw),
+            result = self._supabase_retry(
+                lambda: self.supabase.rpc("batch_complement_search", {
+                    "source_product_id": source.product_id,
+                    "prompt_embeddings_json": embeddings_json,
+                    "match_per_prompt": 8,
+                    "filter_category": target_db_cats[0],
+                }).execute()
             )
+            rows = result.data or []
+            if rows:
+                # Deduplicate by product_id (batch RPC may return dupes across pools)
+                seen_ids: Set[str] = set()
+                deduped = []
+                for row in rows:
+                    pid = str(row.get("product_id", ""))
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        deduped.append(row)
+                logger.info(
+                    "Batch retrieval for %s: %d rows, %d unique products",
+                    target_broad, len(rows), len(deduped),
+                )
+                # Build profiles directly (attrs are already joined)
+                profiles = self._build_profiles_from_batch_rows(deduped)
+                raw = "batch"  # signal that we used batch path
         except Exception as e:
-            logger.warning("Text-prompt retrieval failed for %s, using pgvector only: %s", target_broad, e)
+            logger.warning(
+                "batch_complement_search failed for %s, falling back to multi-RPC: %s",
+                target_broad, e,
+            )
 
-        if not raw:
-            return []
+        # --- Strategy B: fallback multi-RPC path ---
+        if raw is None:
+            pgvec_future = self._io_pool.submit(
+                self._retrieve_candidates, source.product_id, target_db_cats, 60,
+            )
+            text_future = self._io_pool.submit(
+                self._retrieve_text_candidates, prompts, target_db_cats[0], 8,
+            )
+            try:
+                raw_list = pgvec_future.result(timeout=30)
+            except Exception as e:
+                logger.warning("pgvector retrieval failed for %s: %s", target_broad, e)
+                raw_list = []
+            try:
+                text_raw = text_future.result(timeout=30)
+                existing_ids = {
+                    str(r.get("product_id") or r.get("id", ""))
+                    for r in raw_list
+                }
+                for row in text_raw:
+                    pid = str(row.get("product_id", ""))
+                    if pid and pid not in existing_ids:
+                        existing_ids.add(pid)
+                        raw_list.append(row)
+            except Exception as e:
+                logger.warning("Text-prompt retrieval failed for %s: %s", target_broad, e)
+            if not raw_list:
+                return []
 
-        profiles = self._enrich_candidates(raw)
+            # Check if rows have joined attrs (updated RPCs)
+            sample = raw_list[0] if raw_list else {}
+            if sample.get("gemini_category_l1") or sample.get("category_l1"):
+                profiles = self._build_profiles_from_batch_rows(raw_list)
+            else:
+                profiles = self._enrich_candidates(raw_list)
+
         profiles = _filter_by_gemini_category(source, profiles, target_broad)
         profiles = _deduplicate(profiles)
         profiles = _remove_sets_and_non_outfit(source, profiles)

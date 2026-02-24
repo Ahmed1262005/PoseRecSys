@@ -67,17 +67,17 @@ RETURNS TABLE (
   -- Gemini attributes (joined)
   gemini_category_l1 text,
   gemini_category_l2 text,
-  gemini_occasions text,
-  gemini_style_tags text,
+  gemini_occasions text[],
+  gemini_style_tags text[],
   gemini_pattern text,
   gemini_formality text,
   gemini_fit_type text,
   gemini_color_family text,
   gemini_primary_color text,
-  gemini_secondary_colors text,
-  gemini_seasons text,
+  gemini_secondary_colors text[],
+  gemini_seasons text[],
   gemini_silhouette text,
-  gemini_construction text,
+  gemini_construction jsonb,
   gemini_apparent_fabric text,
   gemini_texture text,
   gemini_coverage_level text,
@@ -130,7 +130,7 @@ BEGIN
       pa.stretch       AS gemini_stretch
     FROM products p
     INNER JOIN image_embeddings ie ON ie.sku_id::uuid = p.id
-    LEFT JOIN product_attributes pa ON pa.sku_id = p.id::text
+    LEFT JOIN product_attributes pa ON pa.sku_id = p.id
     WHERE
       ie.sku_id IS NOT NULL
       AND (filter_category IS NULL OR p.category = filter_category)
@@ -172,17 +172,17 @@ RETURNS TABLE (
   -- Gemini attributes (joined)
   gemini_category_l1 text,
   gemini_category_l2 text,
-  gemini_occasions text,
-  gemini_style_tags text,
+  gemini_occasions text[],
+  gemini_style_tags text[],
   gemini_pattern text,
   gemini_formality text,
   gemini_fit_type text,
   gemini_color_family text,
   gemini_primary_color text,
-  gemini_secondary_colors text,
-  gemini_seasons text,
+  gemini_secondary_colors text[],
+  gemini_seasons text[],
   gemini_silhouette text,
-  gemini_construction text,
+  gemini_construction jsonb,
   gemini_apparent_fabric text,
   gemini_texture text,
   gemini_coverage_level text,
@@ -245,7 +245,7 @@ BEGIN
       pa.stretch       AS gemini_stretch
     FROM products p
     INNER JOIN image_embeddings ie ON ie.sku_id::uuid = p.id
-    LEFT JOIN product_attributes pa ON pa.sku_id = p.id::text
+    LEFT JOIN product_attributes pa ON pa.sku_id = p.id
     WHERE
       ie.sku_id IS NOT NULL
       AND p.id != source_product_id
@@ -302,17 +302,17 @@ RETURNS TABLE (
   -- Gemini attributes
   gemini_category_l1 text,
   gemini_category_l2 text,
-  gemini_occasions text,
-  gemini_style_tags text,
+  gemini_occasions text[],
+  gemini_style_tags text[],
   gemini_pattern text,
   gemini_formality text,
   gemini_fit_type text,
   gemini_color_family text,
   gemini_primary_color text,
-  gemini_secondary_colors text,
-  gemini_seasons text,
+  gemini_secondary_colors text[],
+  gemini_seasons text[],
   gemini_silhouette text,
-  gemini_construction text,
+  gemini_construction jsonb,
   gemini_apparent_fabric text,
   gemini_texture text,
   gemini_coverage_level text,
@@ -356,7 +356,7 @@ BEGIN
         pa.sheen, pa.rise, pa.leg_shape, pa.stretch
       FROM products p
       INNER JOIN image_embeddings ie ON ie.sku_id::uuid = p.id
-      LEFT JOIN product_attributes pa ON pa.sku_id = p.id::text
+      LEFT JOIN product_attributes pa ON pa.sku_id = p.id
       WHERE ie.sku_id IS NOT NULL
         AND p.id != source_product_id
         AND (filter_category IS NULL OR p.category = filter_category)
@@ -391,7 +391,7 @@ BEGIN
         pa.sheen, pa.rise, pa.leg_shape, pa.stretch
       FROM products p
       INNER JOIN image_embeddings ie ON ie.sku_id::uuid = p.id
-      LEFT JOIN product_attributes pa ON pa.sku_id = p.id::text
+      LEFT JOIN product_attributes pa ON pa.sku_id = p.id
       WHERE ie.sku_id IS NOT NULL
         AND p.id != source_product_id
         AND (filter_category IS NULL OR p.category = filter_category)
