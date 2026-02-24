@@ -2469,18 +2469,16 @@ class OutfitEngine:
         try:
             # Batch encode all prompts in one GPU forward pass
             vec_strs = self._encode_texts_batch(prompts)
-            # Build JSON array of embedding arrays for the RPC
-            import json as _json
+            # Build list of embedding arrays for the RPC (pass as list, not JSON string)
             embeddings_list = [
                 [float(x) for x in vs.strip("[]").split(",")]
                 for vs in vec_strs
             ]
-            embeddings_json = _json.dumps(embeddings_list)
 
             result = self._supabase_retry(
                 lambda: self.supabase.rpc("batch_complement_search", {
                     "source_product_id": source.product_id,
-                    "prompt_embeddings_json": embeddings_json,
+                    "prompt_embeddings_json": embeddings_list,
                     "match_per_prompt": 8,
                     "filter_category": target_db_cats[0],
                 }).execute()
