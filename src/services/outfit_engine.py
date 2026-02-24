@@ -2237,16 +2237,14 @@ class OutfitEngine:
         product_id: str,
         limit: int = 20,
         offset: int = 0,
-        cosine_weight: float = 0.70,
-        min_cosine: float = 0.45,
-        l2_boost: float = 0.05,
         brand_cap: int = 3,
     ) -> Dict[str, Any]:
         """
-        Same-category similar items with visual-similarity-first scoring.
+        Same-category similar items ranked by pure visual similarity.
 
-        Scoring: cosine_weight * cosine + (1 - cosine_weight) * compat + L2 boost.
-        Visual similarity dominates; compat is a tiebreaker for style coherence.
+        Ranking is driven by FashionCLIP cosine similarity (pgvector).
+        Compat scores are computed for display only, not used in ranking.
+        This gives "items that look like this" from different brands/prices.
 
         Returns dict with: product_id, results, pagination.
         """
@@ -2256,15 +2254,13 @@ class OutfitEngine:
 
         source_broad = _gemini_broad(source.gemini_category_l1) or (source.category or "").lower()
         source.broad_category = source_broad
-        source_l2 = (source.gemini_category_l2 or "").lower().strip()
 
-        # Retrieve same-category candidates via pgvector + Gemini L1 post-filter
-        fetch_limit = offset + limit + 80  # Extra headroom for dedup/filtering
+        # Retrieve same-category candidates — full dataset scan for quality
         try:
             result = self._supabase_retry(
                 lambda: self.supabase.rpc("get_similar_products_v2", {
                     "source_product_id": product_id,
-                    "match_count": fetch_limit,
+                    "match_count": 500,
                     "match_offset": 0,
                     "filter_category": source_broad,
                 }).execute()
@@ -2284,28 +2280,19 @@ class OutfitEngine:
         # Build profiles from joined attrs (updated RPC includes gemini_ columns)
         profiles = self._build_profiles_from_batch_rows(raw)
 
-        # Post-filter: same Gemini L1, cosine floor, dedup
+        # Post-filter: same Gemini L1, dedup
         profiles = _filter_by_gemini_category(source, profiles, source_broad)
-        profiles = [p for p in profiles if p.similarity >= min_cosine]
         profiles = _deduplicate(profiles)
 
-        # Score: visual similarity first, compat as tiebreaker, L2 boost
-        compat_weight = 1.0 - cosine_weight
+        # Rank by pure cosine similarity — compat computed for display only
         scored = []
         for cand in profiles:
             cand.broad_category = _gemini_broad(cand.gemini_category_l1) or source_broad
             compat, dims = compute_compatibility_score(source, cand)
-            base = cosine_weight * cand.similarity + compat_weight * compat
-
-            # Boost items in the same subcategory (e.g., blouse->blouse)
-            cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
-            if source_l2 and cand_l2 and cand_l2 == source_l2:
-                base += l2_boost
-
-            scored.append({"profile": cand, "compat": compat, "tattoo": round(base, 4),
+            scored.append({"profile": cand, "compat": compat, "tattoo": round(cand.similarity, 4),
                            "cosine": cand.similarity, "dims": dims})
 
-        scored.sort(key=lambda x: x["tattoo"], reverse=True)
+        scored.sort(key=lambda x: x["cosine"], reverse=True)
 
         # Brand diversity cap
         if brand_cap:
