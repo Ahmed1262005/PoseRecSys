@@ -1783,8 +1783,20 @@ class OutfitEngine:
         # Phase 4: LRU prompt embedding cache  {prompt_text -> pgvector_str}
         self._embedding_cache: Dict[str, str] = {}
         self._embedding_cache_order: List[str] = []  # insertion order for eviction
-        # Thread pool for parallel I/O (Supabase RPCs)
-        self._io_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="outfit_io")
+        # Thread pool — large enough to avoid deadlock from nested submissions
+        # (build_outfit -> _score_category -> _retrieve_text_candidates all submit here)
+        self._io_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="outfit_io")
+        # Semaphore to cap concurrent Supabase connections (prevents EAGAIN)
+        self._supabase_sem = threading.Semaphore(6)
+
+    # ------------------------------------------------------------------
+    # Throttled Supabase I/O (prevents EAGAIN from too many connections)
+    # ------------------------------------------------------------------
+
+    def _supabase_call(self, fn, *args, **kwargs):
+        """Execute a Supabase call under the connection semaphore."""
+        with self._supabase_sem:
+            return fn(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # FashionCLIP text encoder (lazy-loaded, batched, cached)
@@ -2029,14 +2041,15 @@ class OutfitEngine:
         # Phase 1: Batch encode ALL prompts in one forward pass
         vec_strs = self._encode_texts_batch(prompts)
 
-        # Phase 3: Fire all Supabase RPCs concurrently
+        # Phase 3: Fire all Supabase RPCs concurrently (throttled by semaphore)
         def _run_rpc(vec_str: str) -> List[Dict]:
-            result = self.supabase.rpc("text_search_products", {
-                "query_embedding": vec_str,
-                "match_count": per_prompt,
-                "match_offset": 0,
-                "filter_category": target_category,
-            }).execute()
+            with self._supabase_sem:
+                result = self.supabase.rpc("text_search_products", {
+                    "query_embedding": vec_str,
+                    "match_count": per_prompt,
+                    "match_offset": 0,
+                    "filter_category": target_category,
+                }).execute()
             return result.data or []
 
         seen_ids: Set[str] = set()
@@ -2265,14 +2278,16 @@ class OutfitEngine:
         try:
             # Fetch product row and Gemini attributes concurrently
             def _get_product():
-                return self.supabase.table("products").select(
-                    _PRODUCT_SELECT
-                ).eq("id", product_id).limit(1).execute()
+                with self._supabase_sem:
+                    return self.supabase.table("products").select(
+                        _PRODUCT_SELECT
+                    ).eq("id", product_id).limit(1).execute()
 
             def _get_attrs():
-                return self.supabase.table("product_attributes").select(
-                    _ATTRS_SELECT
-                ).eq("sku_id", product_id).limit(1).execute()
+                with self._supabase_sem:
+                    return self.supabase.table("product_attributes").select(
+                        _ATTRS_SELECT
+                    ).eq("sku_id", product_id).limit(1).execute()
 
             prod_future = self._io_pool.submit(_get_product)
             attrs_future = self._io_pool.submit(_get_attrs)
@@ -2300,12 +2315,13 @@ class OutfitEngine:
         per_cat = max(10, limit // len(target_categories)) if target_categories else limit
         for cat in target_categories:
             try:
-                result = self.supabase.rpc("get_similar_products_v2", {
-                    "source_product_id": source_id,
-                    "match_count": per_cat,
-                    "match_offset": 0,
-                    "filter_category": cat,
-                }).execute()
+                with self._supabase_sem:
+                    result = self.supabase.rpc("get_similar_products_v2", {
+                        "source_product_id": source_id,
+                        "match_count": per_cat,
+                        "match_offset": 0,
+                        "filter_category": cat,
+                    }).execute()
                 all_results.extend(result.data or [])
             except Exception as e:
                 logger.warning("pgvector retrieval failed for %s: %s", cat, e)
@@ -2321,9 +2337,10 @@ class OutfitEngine:
         for i in range(0, len(ids), 500):
             batch = ids[i: i + 500]
             try:
-                result = self.supabase.table("product_attributes").select(
-                    _ATTRS_SELECT
-                ).in_("sku_id", batch).execute()
+                with self._supabase_sem:
+                    result = self.supabase.table("product_attributes").select(
+                        _ATTRS_SELECT
+                    ).in_("sku_id", batch).execute()
                 for row in (result.data or []):
                     attrs_by_id[row["sku_id"]] = row
             except Exception as e:
