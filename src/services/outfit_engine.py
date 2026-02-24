@@ -2258,16 +2258,15 @@ class OutfitEngine:
         source.broad_category = source_broad
         source_l2 = (source.gemini_category_l2 or "").lower().strip()
 
-        # Retrieve candidates WITHOUT category filter — let pgvector find true
-        # nearest neighbors, then post-filter by Gemini L1 (authoritative).
-        fetch_limit = offset + limit + 80  # Extra headroom for post-filtering
+        # Retrieve same-category candidates via pgvector + Gemini L1 post-filter
+        fetch_limit = offset + limit + 80  # Extra headroom for dedup/filtering
         try:
             result = self._supabase_retry(
                 lambda: self.supabase.rpc("get_similar_products_v2", {
                     "source_product_id": product_id,
                     "match_count": fetch_limit,
                     "match_offset": 0,
-                    "filter_category": None,  # No DB filter — post-filter by Gemini L1
+                    "filter_category": source_broad,
                 }).execute()
             )
             raw = result.data or []
