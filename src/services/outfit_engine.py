@@ -1666,7 +1666,7 @@ def _filter_by_gemini_category(
     similarity_ceiling: float = 0.92,
 ) -> List[AestheticProfile]:
     """Hard-gate candidates using Gemini category_l1."""
-    source_gemini_broad = _gemini_broad(source.gemini_category_l1) or (source.category or "").lower()
+    source_gemini_broad = _gemini_broad(source.gemini_category_l1)
     filtered = []
     for cand in candidates:
         if cand.product_id == source.product_id:
@@ -2130,15 +2130,23 @@ class OutfitEngine:
                 "recommendations": {},
             }
 
-        # 2. Determine broad category from Gemini
-        source_broad = _gemini_broad(source.gemini_category_l1) or (source.category or "").lower()
+        # 2. Determine broad category from Gemini L1 (source of truth)
+        source_broad = _gemini_broad(source.gemini_category_l1)
+        if not source_broad:
+            l1 = source.gemini_category_l1 or source.category or "unknown"
+            return {
+                "error": f"No Gemini category for this product ({l1}). Cannot build outfit.",
+                "source_product": self._format_source(source),
+                "status": "blocked",
+                "recommendations": {},
+            }
         source.broad_category = source_broad
 
         # 3. State machine
         all_targets, status = get_complementary_targets(source_broad, source)
 
         if status == "blocked":
-            l1 = source.gemini_category_l1 or source.category or "unknown"
+            l1 = source.gemini_category_l1 or "unknown"
             return {
                 "error": f"Complete the Fit is not available for {l1} products.",
                 "source_product": self._format_source(source),
@@ -2237,14 +2245,14 @@ class OutfitEngine:
         product_id: str,
         limit: int = 20,
         offset: int = 0,
-        brand_cap: int = 3,
     ) -> Dict[str, Any]:
         """
         Same-category similar items ranked by pure visual similarity.
 
         Ranking is driven by FashionCLIP cosine similarity (pgvector).
         Compat scores are computed for display only, not used in ranking.
-        This gives "items that look like this" from different brands/prices.
+        No brand cap — if the most similar items are all from one brand,
+        that's the correct answer for "items that look like this".
 
         Returns dict with: product_id, results, pagination.
         """
@@ -2252,23 +2260,38 @@ class OutfitEngine:
         if not source:
             return None  # Let caller handle 404
 
-        source_broad = _gemini_broad(source.gemini_category_l1) or (source.category or "").lower()
-        source.broad_category = source_broad
+        source_broad = _gemini_broad(source.gemini_category_l1)
+        source.broad_category = source_broad or (source.category or "").lower()
+        db_category = (source.category or "").lower() or source_broad
 
-        # Retrieve same-category candidates — full dataset scan for quality
+        # Retrieve via original get_similar_products (HNSW-friendly, in_stock,
+        # no DISTINCT ON).  Falls back to get_similar_products_v2 if v1 absent.
+        fetch_count = offset + limit + 60  # headroom for dedup
         try:
             result = self._supabase_retry(
-                lambda: self.supabase.rpc("get_similar_products_v2", {
+                lambda: self.supabase.rpc("get_similar_products", {
                     "source_product_id": product_id,
-                    "match_count": 500,
-                    "match_offset": 0,
-                    "filter_category": source_broad,
+                    "match_count": fetch_count,
+                    "filter_gender": "female",
+                    "filter_category": db_category,
                 }).execute()
             )
             raw = result.data or []
-        except Exception as e:
-            logger.warning("Similar items retrieval failed: %s", e)
-            raw = []
+        except Exception:
+            # Fallback to v2 if v1 RPC not available
+            try:
+                result = self._supabase_retry(
+                    lambda: self.supabase.rpc("get_similar_products_v2", {
+                        "source_product_id": product_id,
+                        "match_count": fetch_count,
+                        "match_offset": 0,
+                        "filter_category": db_category,
+                    }).execute()
+                )
+                raw = result.data or []
+            except Exception as e:
+                logger.warning("Similar items retrieval failed: %s", e)
+                raw = []
 
         if not raw:
             return {
@@ -2277,8 +2300,8 @@ class OutfitEngine:
                 "pagination": {"offset": offset, "limit": limit, "returned": 0, "has_more": False},
             }
 
-        # Build profiles from joined attrs (updated RPC includes gemini_ columns)
-        profiles = self._build_profiles_from_batch_rows(raw)
+        # Enrich with Gemini attrs (v1 RPC doesn't join product_attributes)
+        profiles = self._enrich_candidates(raw)
 
         # Post-filter: same Gemini L1, dedup
         profiles = _filter_by_gemini_category(source, profiles, source_broad)
@@ -2293,17 +2316,6 @@ class OutfitEngine:
                            "cosine": cand.similarity, "dims": dims})
 
         scored.sort(key=lambda x: x["cosine"], reverse=True)
-
-        # Brand diversity cap
-        if brand_cap:
-            brand_counts: Dict[str, int] = {}
-            diverse = []
-            for entry in scored:
-                b = _canon_brand(entry["profile"].brand or "")
-                if brand_counts.get(b, 0) < brand_cap:
-                    diverse.append(entry)
-                    brand_counts[b] = brand_counts.get(b, 0) + 1
-            scored = diverse
 
         # Paginate
         page = scored[offset: offset + limit]
@@ -2488,7 +2500,6 @@ class OutfitEngine:
         Strategy B (fallback): separate RPCs for pgvector + text prompts,
         then a separate enrichment call. Used if batch RPC is unavailable.
         """
-        target_db_cats = BROAD_TO_CATEGORIES.get(target_broad, [target_broad])
         prompts = self._generate_complement_prompts(source, source_broad, target_broad)
 
         raw = None
@@ -2508,7 +2519,7 @@ class OutfitEngine:
                     "source_product_id": source.product_id,
                     "prompt_embeddings_json": embeddings_list,
                     "match_per_prompt": 8,
-                    "filter_category": target_db_cats[0],
+                    "filter_category": target_broad,
                 }).execute()
             )
             rows = result.data or []
@@ -2537,10 +2548,10 @@ class OutfitEngine:
         # --- Strategy B: fallback multi-RPC path ---
         if raw is None:
             pgvec_future = self._io_pool.submit(
-                self._retrieve_candidates, source.product_id, target_db_cats, 60,
+                self._retrieve_candidates, source.product_id, [target_broad], 60,
             )
             text_future = self._io_pool.submit(
-                self._retrieve_text_candidates, prompts, target_db_cats[0], 8,
+                self._retrieve_text_candidates, prompts, target_broad, 8,
             )
             try:
                 raw_list = pgvec_future.result(timeout=30)
