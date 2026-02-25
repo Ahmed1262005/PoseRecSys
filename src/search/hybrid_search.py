@@ -183,20 +183,23 @@ class HybridSearchService:
             # Get RRF weights for the intent
             algolia_weight, semantic_weight = get_rrf_weights(intent_str)
 
-            # Extract name exclusions before applying to request
-            # (not a real request field — internal to the pipeline)
+            # Extract internal pipeline keys (not real request fields)
             name_exclusions = plan_updates.pop("_name_exclusions", [])
+            mode_excl_keys = plan_updates.pop("_mode_excl_keys", [])
 
             # ---------------------------------------------------------
-            # VAGUE queries: do NOT apply planner attribute filters.
-            # The semantic queries already target the right visual
-            # space, and hard filters on a vague query (e.g. adding
-            # category_l1, occasions, style_tags) make the result set
-            # too narrow or empty.  Follow-up answers via /refine are
-            # the mechanism to add hard filters.
+            # VAGUE queries: skip ALL planner attribute filters.
             #
-            # SPECIFIC / EXACT: apply filters normally — the user
-            # stated concrete requirements.
+            # SPECIFIC with modes: strip mode-derived exclude_* fields.
+            # Composite modes like "modest" generate 20+ exclusion
+            # filters that together eliminate nearly all products on
+            # fast-fashion catalogs.  The semantic queries already
+            # encode the intent ("modest midi dress with long sleeves")
+            # so hard-excluding V-Neck/Mini/Fitted/etc is redundant
+            # and destructive.  Name exclusions still catch egregious
+            # violations (e.g. "backless" in product name).
+            #
+            # EXACT: apply filters normally.
             # ---------------------------------------------------------
             if intent_str == "vague":
                 updates = {}
@@ -207,7 +210,20 @@ class HybridSearchService:
                     semantic_queries=semantic_queries,
                 )
             else:
-                # Apply planner filters (only fields the user hasn't set explicitly)
+                # For SPECIFIC intent, strip mode-derived exclusion filters
+                if intent_str == "specific" and mode_excl_keys:
+                    stripped = {}
+                    for key in mode_excl_keys:
+                        if key in plan_updates:
+                            stripped[key] = plan_updates.pop(key)
+                    if stripped:
+                        logger.info(
+                            "SPECIFIC intent: stripped mode exclusion filters",
+                            query=request.query,
+                            stripped_filters=list(stripped.keys()),
+                        )
+
+                # Apply remaining planner filters
                 updates = {}
                 for field, values in plan_updates.items():
                     if not getattr(request, field, None):
@@ -1094,10 +1110,14 @@ class HybridSearchService:
     ) -> List[dict]:
         """Search using multimodal embeddings (combined image + text vectors)."""
         try:
-            # Use category_l1 as the categories filter for pgvector if the
-            # old-style categories field is empty. category_l1 is the primary
-            # structural filter set by the planner / refine endpoint.
-            categories = request.categories or request.category_l1
+            # Skip category filter at RPC level — the search_multimodal SQL
+            # function filters on p.broad_category which is NULL for all
+            # products.  The actual category data lives in p.category
+            # (lowercase).  Until the SQL is fixed, category filtering is
+            # handled by _post_filter_semantic() using enriched Gemini
+            # attributes (category_l1).  We pass None here so the RPC
+            # returns results across all categories.
+            categories = None
 
             resp = self.semantic_engine.search_multimodal(
                 query=query,
@@ -1174,6 +1194,8 @@ class HybridSearchService:
         """Search using FashionCLIP image-only embeddings (original path)."""
         try:
             categories = request.categories or request.category_l1
+            if categories:
+                categories = [c.lower() for c in categories]
             resp = self.semantic_engine.search_with_filters(
                 query=query,
                 page=1,

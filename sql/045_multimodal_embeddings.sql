@@ -107,11 +107,12 @@ BEGIN
         p.sleeve
     FROM products p
     INNER JOIN product_multimodal_embeddings pme ON pme.product_id = p.id
+    LEFT JOIN product_attributes pa ON pa.sku_id = p.id
     WHERE
         pme.version = embedding_version
         AND p.in_stock = true
-        -- Category filter
-        AND (filter_categories IS NULL OR p.broad_category = ANY(filter_categories))
+        -- Category filter via Gemini category_l1 (broad_category is unpopulated)
+        AND (filter_categories IS NULL OR LOWER(pa.category_l1) = ANY(filter_categories))
         -- Brand filters
         AND (exclude_brands IS NULL OR NOT (LOWER(p.brand) = ANY(SELECT LOWER(unnest(exclude_brands)))))
         AND (include_brands IS NULL OR LOWER(p.brand) = ANY(SELECT LOWER(unnest(include_brands))))

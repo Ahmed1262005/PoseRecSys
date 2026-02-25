@@ -931,7 +931,20 @@ class QueryPlanner:
                 request_updates[req_field] = values
 
         # -----------------------------------------------------------
-        # Step 3b: Name exclusions (product-name substring drops)
+        # Step 3b: Stash mode-only exclusion keys so the pipeline
+        #          can strip them for SPECIFIC intent (Option A).
+        # -----------------------------------------------------------
+        if mode_exclusions:
+            mode_excl_keys = set()
+            for field in mode_exclusions:
+                req_field = self._EXCLUDE_FIELD_MAP.get(field)
+                if req_field:
+                    mode_excl_keys.add(req_field)
+            if mode_excl_keys:
+                request_updates["_mode_excl_keys"] = list(mode_excl_keys)
+
+        # -----------------------------------------------------------
+        # Step 3c: Name exclusions (product-name substring drops)
         # -----------------------------------------------------------
         # Stash name_exclusions in request_updates with a special key.
         # The hybrid search service reads this and applies name-based
