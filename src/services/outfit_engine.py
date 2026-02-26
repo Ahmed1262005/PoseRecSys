@@ -480,52 +480,56 @@ def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[s
 # Dimension keys: occasion_formality, style, fabric, silhouette,
 #                 color, seasonality, pattern, price
 
+# Category-pair weights: shifted toward similarity dimensions (occasion, style,
+# color, seasonality) so complement items share attributes with the source.
+# Contrast dims (fabric, silhouette) are kept but reduced — fashion "rules"
+# like volume balance still contribute, just don't dominate.
 CATEGORY_PAIR_WEIGHTS: Dict[Tuple[str, str], Dict[str, float]] = {
     ("tops", "bottoms"): {
-        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.18, "color": 0.12, "seasonality": 0.10,
+        "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
         "pattern": 0.06, "price": 0.06,
     },
     ("bottoms", "tops"): {
-        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.18, "color": 0.12, "seasonality": 0.10,
+        "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
         "pattern": 0.06, "price": 0.06,
     },
     ("dresses", "outerwear"): {
-        "occasion_formality": 0.18, "style": 0.12, "fabric": 0.16,
-        "silhouette": 0.12, "color": 0.12, "seasonality": 0.16,
-        "pattern": 0.06, "price": 0.06,
+        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.12,
+        "silhouette": 0.10, "color": 0.14, "seasonality": 0.16,
+        "pattern": 0.06, "price": 0.08,
     },
     ("outerwear", "tops"): {
-        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
         "pattern": 0.06, "price": 0.08,
     },
     ("outerwear", "bottoms"): {
-        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
         "pattern": 0.06, "price": 0.08,
     },
     ("outerwear", "dresses"): {
-        "occasion_formality": 0.18, "style": 0.12, "fabric": 0.16,
-        "silhouette": 0.12, "color": 0.12, "seasonality": 0.16,
-        "pattern": 0.06, "price": 0.06,
+        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.12,
+        "silhouette": 0.10, "color": 0.14, "seasonality": 0.16,
+        "pattern": 0.06, "price": 0.08,
     },
     ("tops", "outerwear"): {
-        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
         "pattern": 0.06, "price": 0.08,
     },
     ("bottoms", "outerwear"): {
-        "occasion_formality": 0.18, "style": 0.14, "fabric": 0.14,
-        "silhouette": 0.14, "color": 0.12, "seasonality": 0.14,
+        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
+        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
         "pattern": 0.06, "price": 0.08,
     },
 }
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "occasion_formality": 0.22, "style": 0.14, "fabric": 0.14,
-    "silhouette": 0.16, "color": 0.12, "seasonality": 0.10,
+    "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
+    "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
     "pattern": 0.06, "price": 0.06,
 }
 
@@ -1427,7 +1431,7 @@ def _sig_overlap(a: Dict[str, Optional[str]], b: Dict[str, Optional[str]]) -> fl
 
 def _diverse_select(
     scored: List[Dict],
-    diversity_lambda: float = 0.15,
+    diversity_lambda: float = 0.08,
 ) -> List[Dict]:
     """Greedy MMR-style reranking for intra-result diversity.
 
@@ -2107,7 +2111,6 @@ class OutfitEngine:
         self,
         product_id: str,
         items_per_category: int = 4,
-        fusion_weight: float = 0.55,
         target_category: Optional[str] = None,
         offset: int = 0,
         limit: Optional[int] = None,
@@ -2172,7 +2175,7 @@ class OutfitEngine:
             futures = {
                 self._io_pool.submit(
                     self._score_category,
-                    source, source_broad, tb, status, fusion_weight,
+                    source, source_broad, tb, status,
                 ): tb
                 for tb in target_broads
             }
@@ -2186,7 +2189,7 @@ class OutfitEngine:
         else:
             for tb in target_broads:
                 scored_by_cat[tb] = self._score_category(
-                    source, source_broad, tb, status, fusion_weight,
+                    source, source_broad, tb, status,
                 )
 
         # Assemble results (preserve target_broads order)
@@ -2230,7 +2233,7 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.65*compat + 0.35*cosine",
+                "fusion": "0.55*compat + 0.45*cosine",
                 "engine": "tattoo_v2.1",
             },
             "complete_outfit": {
@@ -2490,7 +2493,6 @@ class OutfitEngine:
         source_broad: str,
         target_broad: str,
         status: str,
-        fusion_weight: float,
     ) -> List[Dict]:
         """Retrieve, filter, score candidates for one target category.
 
@@ -2518,7 +2520,7 @@ class OutfitEngine:
                 lambda: self.supabase.rpc("batch_complement_search", {
                     "source_product_id": source.product_id,
                     "prompt_embeddings_json": embeddings_list,
-                    "match_per_prompt": 8,
+                    "match_per_prompt": 12,
                     "filter_category": target_broad,
                 }).execute()
             )
@@ -2548,10 +2550,10 @@ class OutfitEngine:
         # --- Strategy B: fallback multi-RPC path ---
         if raw is None:
             pgvec_future = self._io_pool.submit(
-                self._retrieve_candidates, source.product_id, [target_broad], 60,
+                self._retrieve_candidates, source.product_id, [target_broad], 120,
             )
             text_future = self._io_pool.submit(
-                self._retrieve_text_candidates, prompts, target_broad, 8,
+                self._retrieve_text_candidates, prompts, target_broad, 12,
             )
             try:
                 raw_list = pgvec_future.result(timeout=30)
@@ -2589,14 +2591,14 @@ class OutfitEngine:
             profiles = _filter_activewear(profiles)
 
         # --- Complement fusion ---
-        # Formula:  tattoo = 0.65 * compat + 0.35 * cosine
-        #
-        # TATTOO rules at 65% encode contrast/complement logic (fabric contrast,
-        # silhouette balance, color harmony).  Cosine at 35% ensures items
-        # visually belong together and the outfit feels coherent.
-        # Novelty is computed for display/debugging but not part of the fusion.
-        W_COMPAT = 0.65
-        W_COSINE = 0.35
+        # Formula:  tattoo = 0.55 * compat + 0.45 * cosine
+        # Balanced fusion: compat rules provide style-aware complement logic
+        # (pattern contrast, fabric contrast, formality match) while cosine
+        # ensures visual cohesion.  Cosine can't dominate because product
+        # images include styling (model wearing a top with a skirt) and high
+        # cosine just copies whatever the photographer paired.
+        W_COMPAT = 0.55
+        W_COSINE = 0.45
 
         scored = []
         for cand in profiles:
