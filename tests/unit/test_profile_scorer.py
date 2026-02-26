@@ -237,8 +237,8 @@ class TestBrandScoring:
         assert breakdown["brand"] == pytest.approx(0.25, abs=0.01)
 
     def test_cluster_adjacent_boost(self):
-        """Mango is in cluster G with Zara -> +0.10."""
-        item = _make_item(brand="Mango")
+        """H&M is in cluster G with Zara -> +0.10."""
+        item = _make_item(brand="H&M")
         profile = _make_profile(preferred_brands=["Zara"])
         breakdown = self.scorer.explain_item(item, profile)
         assert breakdown["brand"] == pytest.approx(0.10, abs=0.01)

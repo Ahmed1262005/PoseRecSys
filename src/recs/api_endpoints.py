@@ -354,6 +354,7 @@ def get_similar(
         product_id=product_id,
         limit=limit,
         offset=offset,
+        user_id=user.id,
     )
 
     if result is None:

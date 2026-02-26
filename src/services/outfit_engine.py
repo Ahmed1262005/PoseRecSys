@@ -1,12 +1,19 @@
 """
-TATTOO-Inspired Outfit Engine  v2
-==================================
+TATTOO-Inspired Outfit Engine  v2.2
+====================================
 
 Production service for "Complete the Fit" outfit recommendations and
 TATTOO-scored similar items.  8-dimension rule-based compatibility
 scoring inspired by the TATTOO paper (arXiv:2509.23242) with
 fashion-expert rules for occasion, style, fabric, silhouette, color,
 seasonality, pattern, and price.
+
+Profile-aware retrieval (v2.2):
+  - Cluster complement prompts inject the user's style-cluster aesthetic
+    into the FashionCLIP retrieval phase, pulling candidates from the
+    user's style neighborhood instead of only the source product's.
+  - ProfileScorer adjusts fusion scores for brand, style, price, and
+    coverage preferences post-scoring.
 
 Dimensions (8):
   1. Occasion & Formality  - formality ladder + occasion overlap + conflict penalties
@@ -23,6 +30,8 @@ import json
 import logging
 import re
 import threading
+import time as _time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -31,6 +40,53 @@ import numpy as np
 from supabase import Client
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# 0. PROFILE-AWARE SCORING CONFIG
+# =============================================================================
+
+def _profile_to_scoring_dict(p: "AestheticProfile") -> dict:
+    """Convert an AestheticProfile to the flat dict ProfileScorer expects."""
+    return {
+        "brand": p.brand,
+        "style_tags": p.style_tags or [],
+        "formality": p.formality,
+        "fit_type": p.fit_type,
+        "sleeve_type": p.sleeve_type,
+        "length": p.length,
+        "neckline": p.neckline,
+        "rise": p.rise,
+        "article_type": p.gemini_category_l2,
+        "broad_category": p.broad_category or p.category,
+        "category": p.broad_category or p.category,
+        "pattern": p.pattern,
+        "occasions": p.occasions or [],
+        "color_family": p.color_family,
+        "primary_color": p.primary_color,
+        "price": p.price,
+    }
+
+
+def _get_cluster_prompts(
+    cluster_ids: List[str],
+    target_broad: str,
+) -> List[str]:
+    """Pick 1 prompt from each of the user's top-2 clusters for the target category.
+
+    Returns 0-2 prompts.  Uses alternating prompt index so the two
+    clusters produce diverse queries.
+    """
+    from recs.brand_clusters import CLUSTER_COMPLEMENT_PROMPTS
+
+    prompts: List[str] = []
+    for i, cid in enumerate(cluster_ids[:2]):
+        cat_prompts = CLUSTER_COMPLEMENT_PROMPTS.get(cid, {}).get(target_broad, [])
+        if cat_prompts:
+            # First cluster gets prompt[0], second gets prompt[1] (if available)
+            idx = min(i, len(cat_prompts) - 1)
+            prompts.append(cat_prompts[idx])
+    return prompts
 
 
 # =============================================================================
@@ -1779,6 +1835,10 @@ class OutfitEngine:
     # Maximum cached prompt embeddings (bounded to avoid memory growth)
     _EMBEDDING_CACHE_SIZE = 512
 
+    # Profile cache TTL in seconds.  The demo pre-loads 6 cards in parallel
+    # so without caching the same profile would be fetched 6+ times.
+    _PROFILE_CACHE_TTL = 60
+
     def __init__(self, supabase: Client):
         self.supabase = supabase
         self._clip_model = None
@@ -1793,6 +1853,233 @@ class OutfitEngine:
         # Semaphore to cap concurrent Supabase connections (prevents EAGAIN).
         # 4 concurrent is safe for most OS socket limits under rapid fire.
         self._supabase_sem = threading.Semaphore(4)
+        # User profile cache: {user_id: (profile_dict, timestamp)}
+        self._profile_cache: Dict[str, Tuple[dict, float]] = {}
+        self._profile_cache_lock = threading.Lock()
+        # Lazy-init: ProfileScorer instances (created once, thread-safe)
+        self._outfit_scorer: Optional[Any] = None
+        self._similar_scorer: Optional[Any] = None
+
+    # ------------------------------------------------------------------
+    # User profile loading (cached)
+    # ------------------------------------------------------------------
+
+    def _load_user_profile(self, user_id: Optional[str]) -> Optional[dict]:
+        """Load onboarding profile from Supabase with TTL cache.
+
+        Returns the same flat dict format as WomenSearchEngine.load_user_profile()
+        so it's directly compatible with ProfileScorer.score_item().
+        Returns None if no user_id or no profile found.
+        """
+        if not user_id:
+            return None
+
+        # Check cache
+        with self._profile_cache_lock:
+            cached = self._profile_cache.get(user_id)
+            if cached:
+                profile, ts = cached
+                if _time.monotonic() - ts < self._PROFILE_CACHE_TTL:
+                    return profile
+                # Expired — will re-fetch below
+
+        try:
+            result = self._supabase_retry(
+                lambda: self.supabase.table("user_onboarding_profiles").select(
+                    "preferred_brands, brand_openness, style_persona, "
+                    "preferred_fits, preferred_sleeves, preferred_lengths, "
+                    "preferred_lengths_dresses, preferred_rises, "
+                    "fit_category_mapping, sleeve_category_mapping, "
+                    "length_category_mapping, "
+                    "top_types, bottom_types, dress_types, outerwear_types, "
+                    "patterns_liked, patterns_avoided, "
+                    "occasions, colors_to_avoid, styles_to_avoid, "
+                    "global_min_price, global_max_price, birthdate, "
+                    "taste_vector"
+                ).eq("user_id", user_id).limit(1).execute()
+            )
+            if not result.data:
+                return None
+
+            row = result.data[0]
+            profile: Dict[str, Any] = {
+                # Brand
+                "preferred_brands": row.get("preferred_brands") or [],
+                "brand_openness": row.get("brand_openness"),
+                # Style
+                "style_persona": row.get("style_persona") or [],
+                # Attribute preferences
+                "preferred_fits": row.get("preferred_fits") or [],
+                "fit_category_mapping": row.get("fit_category_mapping") or [],
+                "preferred_sleeves": row.get("preferred_sleeves") or [],
+                "sleeve_category_mapping": row.get("sleeve_category_mapping") or [],
+                "preferred_lengths": row.get("preferred_lengths") or [],
+                "length_category_mapping": row.get("length_category_mapping") or [],
+                "preferred_lengths_dresses": row.get("preferred_lengths_dresses") or [],
+                "preferred_necklines": [],
+                "preferred_rises": row.get("preferred_rises") or [],
+                # Type preferences
+                "top_types": row.get("top_types") or [],
+                "bottom_types": row.get("bottom_types") or [],
+                "dress_types": row.get("dress_types") or [],
+                "outerwear_types": row.get("outerwear_types") or [],
+                # Patterns
+                "patterns_liked": row.get("patterns_liked") or [],
+                "patterns_avoided": row.get("patterns_avoided") or [],
+                # Occasions
+                "occasions": row.get("occasions") or [],
+                # Avoidances
+                "colors_to_avoid": row.get("colors_to_avoid") or [],
+                "styles_to_avoid": row.get("styles_to_avoid") or [],
+                # Coverage flags (ProfileScorer derives from styles_to_avoid)
+                "no_crop": False,
+                "no_revealing": False,
+                "no_sleeveless": False,
+                "no_deep_necklines": False,
+                "no_tanks": False,
+                # Price
+                "global_min_price": row.get("global_min_price"),
+                "global_max_price": row.get("global_max_price"),
+                # Identity
+                "birthdate": row.get("birthdate"),
+                # Taste vector (for potential future use)
+                "taste_vector": row.get("taste_vector"),
+            }
+
+            # Store in cache
+            with self._profile_cache_lock:
+                self._profile_cache[user_id] = (profile, _time.monotonic())
+
+            return profile
+
+        except Exception as e:
+            logger.warning("Failed to load user profile for %s: %s", user_id, e)
+            return None
+
+    def _resolve_user_clusters(self, profile: dict) -> List[str]:
+        """Resolve top-2 cluster IDs from user profile.
+
+        Priority: preferred_brands (via BRAND_CLUSTER_MAP) -> style_persona
+        (via PERSONA_TO_CLUSTERS) -> empty list.
+        """
+        from recs.brand_clusters import BRAND_CLUSTER_MAP, PERSONA_TO_CLUSTERS
+
+        # Try brands first
+        brands = profile.get("preferred_brands") or []
+        if brands:
+            cluster_counts: Counter = Counter()
+            for brand in brands:
+                entry = BRAND_CLUSTER_MAP.get(brand.lower().strip())
+                if entry:
+                    cluster_counts[entry[0]] += 1
+            if cluster_counts:
+                return [cid for cid, _ in cluster_counts.most_common(2)]
+
+        # Fallback: style_persona
+        personas = profile.get("style_persona") or []
+        if personas:
+            seen: List[str] = []
+            for p in personas:
+                for cid in PERSONA_TO_CLUSTERS.get(p.lower().strip(), []):
+                    if cid not in seen:
+                        seen.append(cid)
+                    if len(seen) >= 2:
+                        break
+                if len(seen) >= 2:
+                    break
+            return seen[:2]
+
+        return []
+
+    def _get_outfit_scorer(self):
+        """Lazy-init ProfileScorer for complete-fit (moderate strength).
+
+        All weights are deliberately low so the raw score has room to
+        spread before hitting the cap.  A "great match" should land
+        around 0.15-0.20, a "decent match" around 0.05-0.10, and a
+        "no match" near 0.  This creates real rank differentiation
+        instead of everything clamping to max_positive.
+        """
+        if self._outfit_scorer is None:
+            from scoring.profile_scorer import ProfileScorer, ProfileScoringConfig
+            self._outfit_scorer = ProfileScorer(config=ProfileScoringConfig(
+                max_positive=0.25,
+                max_negative=-0.50,
+                coverage_kill_penalty=-0.50,
+                # Brand — preferred brand is the strongest signal
+                brand_preferred=0.08,
+                brand_cluster_adjacent=0.04,
+                brand_unrelated_penalty=0.0,
+                # Style — main personalization dimension
+                style_match=0.05,           # per hit (default 0.15 is too strong)
+                style_match_cap=0.10,       # max from all style hits
+                style_mismatch_penalty=-0.02,
+                # Formality alignment
+                formality_match=0.03,       # default 0.10 too strong
+                # Attribute preferences (all lowered from defaults)
+                fit_match=0.03,             # default 0.10
+                sleeve_match=0.02,          # default 0.08
+                length_match=0.02,          # default 0.08
+                neckline_match=0.02,        # default 0.08
+                rise_match=0.02,            # default 0.08
+                # Type preferences
+                type_match=0.04,            # default 0.15
+                # Pattern
+                pattern_match=0.03,         # default 0.10
+                pattern_avoid_penalty=-0.06,  # default -0.15
+                # Occasion
+                occasion_match=0.03,        # default 0.10
+                occasion_multi_bonus=0.02,  # default 0.05
+                # Color
+                color_avoid_penalty=-0.08,  # default -0.15
+                # Price
+                price_in_range=0.03,
+                price_over_penalty=-0.03,
+                price_way_over_penalty=-0.06,
+                # Category boosts (disable for outfit — TATTOO handles category logic)
+                category_boosts={},
+            ))
+        return self._outfit_scorer
+
+    def _get_similar_scorer(self):
+        """Lazy-init ProfileScorer for similar items (light — cosine dominates).
+
+        Even lighter than outfit scorer.  Brand cluster + price are the
+        main signals.  A "great match" should be ~0.08-0.10.
+        """
+        if self._similar_scorer is None:
+            from scoring.profile_scorer import ProfileScorer, ProfileScoringConfig
+            self._similar_scorer = ProfileScorer(config=ProfileScoringConfig(
+                max_positive=0.15,
+                max_negative=-0.50,
+                coverage_kill_penalty=-0.50,
+                # Brand cluster + price are the key signals
+                brand_preferred=0.06,
+                brand_cluster_adjacent=0.03,
+                brand_unrelated_penalty=0.0,
+                # Style very light (visual similarity is primary)
+                style_match=0.03,
+                style_match_cap=0.06,
+                style_mismatch_penalty=0.0,
+                # All others minimal
+                formality_match=0.02,
+                fit_match=0.02,
+                sleeve_match=0.01,
+                length_match=0.01,
+                neckline_match=0.01,
+                rise_match=0.01,
+                type_match=0.02,
+                pattern_match=0.02,
+                pattern_avoid_penalty=-0.04,
+                occasion_match=0.02,
+                occasion_multi_bonus=0.01,
+                color_avoid_penalty=-0.06,
+                price_in_range=0.03,
+                price_over_penalty=-0.03,
+                price_way_over_penalty=-0.06,
+                category_boosts={},
+            ))
+        return self._similar_scorer
 
     # ------------------------------------------------------------------
     # Throttled Supabase I/O with retry (prevents EAGAIN)
@@ -2114,12 +2401,17 @@ class OutfitEngine:
         target_category: Optional[str] = None,
         offset: int = 0,
         limit: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Build a complete outfit from a source product.
 
         Carousel mode (default): returns top N items per complementary category.
         Feed mode: set target_category for paginated single-category results.
+
+        Profile-aware (v2.2): when user_id is provided, loads the user's
+        onboarding profile and (a) injects cluster complement prompts into
+        retrieval and (b) applies ProfileScorer to the fusion scoring.
 
         Returns dict with: source_product, recommendations, status,
         scoring_info, complete_outfit.
@@ -2144,6 +2436,22 @@ class OutfitEngine:
                 "recommendations": {},
             }
         source.broad_category = source_broad
+
+        # 2b. Load user profile and resolve clusters (v2.2)
+        user_profile = self._load_user_profile(user_id)
+        user_clusters: List[str] = []
+        profile_scorer = None
+        if user_profile:
+            user_clusters = self._resolve_user_clusters(user_profile)
+            profile_scorer = self._get_outfit_scorer()
+            # Inject resolved clusters so ProfileScorer uses the same
+            # 22-cluster IDs as the outfit engine (avoids brand_data.py
+            # vs brand_clusters.py mismatch).
+            user_profile["_resolved_clusters"] = user_clusters
+            logger.info(
+                "Profile-aware outfit for user %s: clusters=%s",
+                user_id, user_clusters,
+            )
 
         # 3. State machine
         all_targets, status = get_complementary_targets(source_broad, source)
@@ -2176,6 +2484,7 @@ class OutfitEngine:
                 self._io_pool.submit(
                     self._score_category,
                     source, source_broad, tb, status,
+                    user_clusters, user_profile, profile_scorer,
                 ): tb
                 for tb in target_broads
             }
@@ -2190,6 +2499,7 @@ class OutfitEngine:
             for tb in target_broads:
                 scored_by_cat[tb] = self._score_category(
                     source, source_broad, tb, status,
+                    user_clusters, user_profile, profile_scorer,
                 )
 
         # Assemble results (preserve target_broads order)
@@ -2222,6 +2532,7 @@ class OutfitEngine:
                 all_top_picks.append(items[0])
 
         # 5. Build response
+        personalized = bool(user_profile)
         source_fmt = self._format_source(source)
         total_price = source.price + sum(
             float(p.get("price", 0) or 0) for p in all_top_picks
@@ -2233,8 +2544,11 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.55*compat + 0.45*cosine",
-                "engine": "tattoo_v2.1",
+                "fusion": "0.55*compat + 0.45*cosine + profile" if personalized
+                          else "0.55*compat + 0.45*cosine",
+                "engine": "tattoo_v2.2" if personalized else "tattoo_v2.1",
+                "personalized": personalized,
+                "clusters": user_clusters if personalized else [],
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -2248,14 +2562,15 @@ class OutfitEngine:
         product_id: str,
         limit: int = 20,
         offset: int = 0,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Same-category similar items ranked by pure visual similarity.
+        Same-category similar items ranked by visual similarity.
 
-        Ranking is driven by FashionCLIP cosine similarity (pgvector).
-        Compat scores are computed for display only, not used in ranking.
-        No brand cap — if the most similar items are all from one brand,
-        that's the correct answer for "items that look like this".
+        Primary ranking: FashionCLIP cosine similarity (pgvector).
+        Profile boost (v2.2): when user_id is provided, applies a light
+        additive adjustment for brand-cluster match and price-range fit,
+        then re-sorts by cosine + profile_adj.
 
         Returns dict with: product_id, results, pagination.
         """
@@ -2266,6 +2581,17 @@ class OutfitEngine:
         source_broad = _gemini_broad(source.gemini_category_l1)
         source.broad_category = source_broad or (source.category or "").lower()
         db_category = (source.category or "").lower() or source_broad
+
+        # Load user profile for personalization (v2.2)
+        user_profile = self._load_user_profile(user_id)
+        similar_scorer = None
+        personalized = bool(user_profile)
+        if user_profile:
+            similar_scorer = self._get_similar_scorer()
+            # Inject resolved clusters so ProfileScorer uses the same
+            # 22-cluster IDs as the outfit engine.
+            user_clusters = self._resolve_user_clusters(user_profile)
+            user_profile["_resolved_clusters"] = user_clusters
 
         # Retrieve via original get_similar_products (HNSW-friendly, in_stock,
         # no DISTINCT ON).  Falls back to get_similar_products_v2 if v1 absent.
@@ -2310,15 +2636,26 @@ class OutfitEngine:
         profiles = _filter_by_gemini_category(source, profiles, source_broad)
         profiles = _deduplicate(profiles)
 
-        # Rank by pure cosine similarity — compat computed for display only
+        # Rank: cosine primary + optional profile boost
         scored = []
         for cand in profiles:
             cand.broad_category = _gemini_broad(cand.gemini_category_l1) or source_broad
             compat, dims = compute_compatibility_score(source, cand)
-            scored.append({"profile": cand, "compat": compat, "tattoo": round(cand.similarity, 4),
-                           "cosine": cand.similarity, "dims": dims})
 
-        scored.sort(key=lambda x: x["cosine"], reverse=True)
+            profile_adj = 0.0
+            if similar_scorer and user_profile:
+                cand_dict = _profile_to_scoring_dict(cand)
+                profile_adj = similar_scorer.score_item(cand_dict, user_profile)
+
+            score = cand.similarity + profile_adj
+            scored.append({
+                "profile": cand, "compat": compat,
+                "tattoo": round(score, 4),
+                "cosine": cand.similarity, "dims": dims,
+                "profile_adjustment": round(profile_adj, 4),
+            })
+
+        scored.sort(key=lambda x: x["tattoo"], reverse=True)
 
         # Paginate
         page = scored[offset: offset + limit]
@@ -2337,6 +2674,7 @@ class OutfitEngine:
                 "returned": len(results),
                 "has_more": has_more,
             },
+            "personalized": personalized,
         }
 
     # ------------------------------------------------------------------
@@ -2493,6 +2831,9 @@ class OutfitEngine:
         source_broad: str,
         target_broad: str,
         status: str,
+        user_clusters: Optional[List[str]] = None,
+        user_profile: Optional[dict] = None,
+        profile_scorer: Optional[Any] = None,
     ) -> List[Dict]:
         """Retrieve, filter, score candidates for one target category.
 
@@ -2501,8 +2842,22 @@ class OutfitEngine:
 
         Strategy B (fallback): separate RPCs for pgvector + text prompts,
         then a separate enrichment call. Used if batch RPC is unavailable.
+
+        Profile-aware (v2.2):
+          - user_clusters: top-2 cluster IDs -> inject premade cluster prompts
+          - user_profile / profile_scorer: apply ProfileScorer post-scoring
         """
         prompts = self._generate_complement_prompts(source, source_broad, target_broad)
+
+        # Inject cluster complement prompts (1 from each of user's top-2 clusters)
+        if user_clusters:
+            cluster_prompts = _get_cluster_prompts(user_clusters, target_broad)
+            if cluster_prompts:
+                prompts.extend(cluster_prompts)
+                logger.info(
+                    "Added %d cluster prompts for %s (clusters %s)",
+                    len(cluster_prompts), target_broad, user_clusters,
+                )
 
         raw = None
 
@@ -2591,12 +2946,15 @@ class OutfitEngine:
             profiles = _filter_activewear(profiles)
 
         # --- Complement fusion ---
-        # Formula:  tattoo = 0.55 * compat + 0.45 * cosine
+        # Formula:  tattoo = 0.55 * compat + 0.45 * cosine + profile_adj
         # Balanced fusion: compat rules provide style-aware complement logic
         # (pattern contrast, fabric contrast, formality match) while cosine
         # ensures visual cohesion.  Cosine can't dominate because product
         # images include styling (model wearing a top with a skirt) and high
         # cosine just copies whatever the photographer paired.
+        # Profile adjustment (v2.2): additive term from ProfileScorer that
+        # nudges items matching user preferences (brand, style, price) up
+        # and coverage violations down.
         W_COMPAT = 0.55
         W_COSINE = 0.45
 
@@ -2607,9 +2965,18 @@ class OutfitEngine:
             novelty = compute_novelty_score(source, cand)
             cosine = cand.similarity
             tattoo = W_COMPAT * compat + W_COSINE * cosine
+
+            # Profile-aware adjustment (v2.2)
+            profile_adj = 0.0
+            if profile_scorer and user_profile:
+                cand_dict = _profile_to_scoring_dict(cand)
+                profile_adj = profile_scorer.score_item(cand_dict, user_profile)
+                tattoo += profile_adj
+
             scored.append({
                 "profile": cand, "compat": compat, "tattoo": tattoo,
                 "cosine": cosine, "novelty": novelty, "dims": dims,
+                "profile_adjustment": round(profile_adj, 4),
             })
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
@@ -2655,11 +3022,13 @@ class OutfitEngine:
         }
         if "novelty" in entry:
             result["novelty_score"] = round(entry["novelty"], 4)
+        if entry.get("profile_adjustment"):
+            result["profile_adjustment"] = entry["profile_adjustment"]
         return result
 
     def _format_similar_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
         p = entry["profile"]
-        return {
+        result = {
             "product_id": p.product_id,
             "name": p.name,
             "brand": p.brand,
@@ -2673,6 +3042,9 @@ class OutfitEngine:
             "compatibility_score": round(entry["compat"], 4),
             "dimension_scores": {k: round(v, 4) for k, v in entry["dims"].items()},
         }
+        if entry.get("profile_adjustment"):
+            result["profile_adjustment"] = entry["profile_adjustment"]
+        return result
 
 
 # =============================================================================

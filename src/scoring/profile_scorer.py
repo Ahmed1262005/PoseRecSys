@@ -49,6 +49,29 @@ from scoring.constants.brand_data import (
     get_user_brand_clusters,
 )
 
+# Extended cluster map from brand_clusters.py (authoritative 20-cluster system).
+# Falls back gracefully if the module is unavailable.
+try:
+    from recs.brand_clusters import BRAND_CLUSTER_MAP as _EXTENDED_CLUSTER_MAP
+except ImportError:
+    _EXTENDED_CLUSTER_MAP = {}
+
+
+def _get_item_cluster(brand_lower: str) -> str:
+    """Look up the cluster for an item's brand.
+
+    Tries the scoring-local BRAND_TO_CLUSTER first (fast), then falls
+    back to the richer BRAND_CLUSTER_MAP from brand_clusters.py which
+    covers ~90 brands across 20 clusters.
+    """
+    cid = BRAND_TO_CLUSTER.get(brand_lower)
+    if cid:
+        return cid
+    entry = _EXTENDED_CLUSTER_MAP.get(brand_lower)
+    if entry:
+        return entry[0]  # (cluster_id, confidence)
+    return ""
+
 
 # ── Occasion expansion (frontend names -> DB values) ──────────────
 OCCASION_MAP: Dict[str, List[str]] = {
@@ -353,8 +376,8 @@ class ProfileScorer:
             base = cfg.brand_preferred
             return base * pf.brand_openness_mult
 
-        # Cluster-adjacent
-        item_cluster = BRAND_TO_CLUSTER.get(brand_lower, "")
+        # Cluster-adjacent (uses extended map for full brand coverage)
+        item_cluster = _get_item_cluster(brand_lower)
         if item_cluster and item_cluster in pf.user_clusters:
             return cfg.brand_cluster_adjacent
 
@@ -659,9 +682,22 @@ class _ProfileFields:
         self.preferred_brands_lower: Set[str] = {
             b.lower() for b in pref_brands
         } if pref_brands else set()
-        self.user_clusters: Set[str] = (
-            get_user_brand_clusters(pref_brands) if pref_brands else set()
-        )
+        # Accept pre-resolved clusters (from outfit engine which uses the
+        # authoritative 20-cluster BRAND_CLUSTER_MAP).  Falls back to the
+        # scoring-local get_user_brand_clusters + extended map.
+        resolved = g("_resolved_clusters", None)
+        if resolved:
+            self.user_clusters: Set[str] = set(resolved)
+        elif pref_brands:
+            base = get_user_brand_clusters(pref_brands)
+            # Augment with extended cluster map for brands missing from brand_data
+            for b in pref_brands:
+                cid = _get_item_cluster(b.lower())
+                if cid:
+                    base.add(cid)
+            self.user_clusters: Set[str] = base
+        else:
+            self.user_clusters: Set[str] = set()
         openness = (g("brand_openness", None) or "").lower()
         self.brand_openness_mult: float = ProfileScoringConfig().brand_openness_multipliers.get(
             openness, 1.0

@@ -526,6 +526,454 @@ for _btype, _cids in BRAND_TYPE_TO_CLUSTERS.items():
 
 
 # =============================================================================
+# Cluster Complement Prompts (FashionCLIP)
+#
+# Premade text prompts per cluster x target category for profile-aware
+# complement retrieval.  Each prompt is a short visual description tuned
+# for FashionCLIP's text-image embedding space (5-12 words, concrete
+# garment terms + aesthetic modifiers).  Two prompts per slot — the first
+# captures the cluster's core aesthetic, the second broadens it.
+#
+# Used by OutfitEngine._score_category() to inject 1-2 user-style prompts
+# into the complement search alongside the 3 source-derived prompts.
+# =============================================================================
+
+CLUSTER_COMPLEMENT_PROMPTS: Dict[str, Dict[str, List[str]]] = {
+
+    # A: Modern Classics / Elevated Everyday
+    "A": {
+        "tops": [
+            "tailored feminine blouse clean lines neutral knitwear women",
+            "polished elevated knit top cream navy smart casual women",
+        ],
+        "bottoms": [
+            "tailored trousers clean silhouette neutral women elevated denim",
+            "feminine high-waist pants smart casual cream navy classic women",
+        ],
+        "dresses": [
+            "feminine wearable midi dress clean silhouette tailored neutral women",
+            "elevated everyday wrap dress smart casual knit women",
+        ],
+        "outerwear": [
+            "polished blazer tailored neutral clean silhouette women",
+            "feminine cardigan knitwear elevated cream camel smart casual women",
+        ],
+    },
+
+    # B: Premium Denim / Casual Americana
+    "B": {
+        "tops": [
+            "off-duty cool tee women relaxed basics earth tones quality",
+            "casual leather jacket friendly top women premium denim style",
+        ],
+        "bottoms": [
+            "premium straight-leg jeans women dark wash quality denim",
+            "relaxed wide-leg denim women earth tones off-duty cool",
+        ],
+        "dresses": [
+            "casual shirt dress women denim-friendly earth tones relaxed",
+            "off-duty cool midi dress women leather-trim casual americana",
+        ],
+        "outerwear": [
+            "leather jacket women premium quality off-duty cool black",
+            "denim jacket women relaxed fit earth tones casual americana",
+        ],
+    },
+
+    # C: Mass Casual / Teen Mainstream
+    "C": {
+        "tops": [
+            "casual graphic tee women logo basics relaxed everyday",
+            "simple hoodie women campus casual comfortable basics",
+        ],
+        "bottoms": [
+            "casual denim jeans women everyday basics comfortable fit",
+            "simple joggers women campus casual relaxed everyday",
+        ],
+        "dresses": [
+            "simple casual dress women everyday basics comfortable",
+            "cute basic mini dress women campus casual relaxed",
+        ],
+        "outerwear": [
+            "casual hoodie jacket women basics comfortable everyday",
+            "simple denim jacket women relaxed casual basics",
+        ],
+    },
+
+    # D: Premium Athleisure / Wellness
+    "D": {
+        "tops": [
+            "premium sports bra women matching set muted neutral performance",
+            "soft lounge top women athleisure neutral pastel comfortable",
+        ],
+        "bottoms": [
+            "high-waist leggings women performance neutral body-contouring",
+            "matching set joggers women premium athleisure muted pastel",
+        ],
+        "dresses": [
+            "athletic midi dress women soft neutral athleisure comfortable",
+            "sporty casual dress women performance fabric muted neutral",
+        ],
+        "outerwear": [
+            "performance zip jacket women athleisure neutral premium",
+            "soft cropped hoodie women lounge neutral pastel comfortable",
+        ],
+    },
+
+    # E: Athletic Heritage / Sportswear
+    "E": {
+        "tops": [
+            "sporty heritage tee women logo athletic black white",
+            "athletic crop top women performance sporty bold primary colors",
+        ],
+        "bottoms": [
+            "sporty joggers women athletic heritage black grey logo",
+            "track pants women sporty performance bold primary colors",
+        ],
+        "dresses": [
+            "sporty casual dress women athletic comfortable everyday",
+            "athletic heritage dress women minimal sporty black white",
+        ],
+        "outerwear": [
+            "sporty windbreaker women athletic heritage logo bold",
+            "athletic zip-up jacket women sporty performance black grey",
+        ],
+    },
+
+    # G: Affordable Essentials / Core Wardrobe
+    "G": {
+        "tops": [
+            "simple tee women basics capsule wardrobe neutral clean",
+            "everyday knit top women muted colors minimal effort basic",
+        ],
+        "bottoms": [
+            "simple trousers women basics capsule neutral everyday",
+            "basic denim women muted tones clean everyday wardrobe",
+        ],
+        "dresses": [
+            "simple everyday dress women basics muted neutral capsule",
+            "easy casual dress women minimal basics clean wardrobe",
+        ],
+        "outerwear": [
+            "workhorse jacket women basics neutral capsule practical",
+            "simple coat women muted tones everyday essential clean",
+        ],
+    },
+
+    # H: Ultra-Fast Fashion / High-Trend
+    "H": {
+        "tops": [
+            "trendy crop top women cutouts bodycon going-out bold colors",
+            "party top women micro-trend loud print high-contrast sexy",
+        ],
+        "bottoms": [
+            "trendy mini skirt women bodycon going-out loud bold colors",
+            "low-rise pants women micro-trend party high-contrast fitted",
+        ],
+        "dresses": [
+            "bodycon mini dress women party cutouts going-out bold",
+            "trendy going-out dress women loud print sexy fitted",
+        ],
+        "outerwear": [
+            "cropped jacket women trendy bold going-out statement",
+            "faux fur coat women party loud high-contrast glamour",
+        ],
+    },
+
+    # I: Outdoor / Technical Performance
+    "I": {
+        "tops": [
+            "technical base layer women outdoor performance earth tones",
+            "fleece pullover women hiking practical navy grey functional",
+        ],
+        "bottoms": [
+            "hiking pants women technical outdoor earth tones practical",
+            "performance cargo pants women outdoor functional durable",
+        ],
+        "dresses": [
+            "technical outdoor dress women practical earth tones functional",
+            "trail-friendly dress women performance durable comfortable",
+        ],
+        "outerwear": [
+            "technical shell jacket women outdoor waterproof earth tones",
+            "puffer vest women hiking practical performance black navy",
+        ],
+    },
+
+    # J: Youth Mall Trend
+    "J": {
+        "tops": [
+            "cute trend top women fitted going-out playful prints",
+            "going-out crop top women denim-friendly mini cute seasonal",
+        ],
+        "bottoms": [
+            "denim mini skirt women cute trend playful fitted",
+            "trendy fitted jeans women going-out cute seasonal",
+        ],
+        "dresses": [
+            "cute mini dress women trend going-out playful prints",
+            "flirty casual dress women fitted seasonal fun young",
+        ],
+        "outerwear": [
+            "cute cropped jacket women trend denim playful fun",
+            "trendy oversized blazer women going-out seasonal cute",
+        ],
+    },
+
+    # K: Premium Contemporary Staples / Quiet-Lux
+    "K": {
+        "tops": [
+            "premium knit top women clean lines neutral minimal elevated tee",
+            "sleek tailored blouse women understated cream black quiet luxury",
+        ],
+        "bottoms": [
+            "tailored wide-leg trousers women premium neutral minimal clean",
+            "sleek structured pants women black cream quiet luxury elevated",
+        ],
+        "dresses": [
+            "minimal tailored dress women premium neutral clean silhouette",
+            "sleek midi dress women elevated understated quiet luxury black",
+        ],
+        "outerwear": [
+            "structured blazer women premium neutral minimal tailored coat",
+            "oversized wool coat women quiet luxury elevated black camel",
+        ],
+    },
+
+    # L: Premium Contemporary Designer
+    "L": {
+        "tops": [
+            "structured designer blouse women tailored sophisticated neutral",
+            "elevated fashion top women statement refined polished city",
+        ],
+        "bottoms": [
+            "tailored designer trousers women structured sophisticated neutral",
+            "elevated denim women refined polished premium dark wash",
+        ],
+        "dresses": [
+            "refined designer dress women structured sophisticated neutral",
+            "elevated midi dress women polished fashion statement city",
+        ],
+        "outerwear": [
+            "statement coat women structured designer sophisticated neutral",
+            "tailored designer blazer women elevated polished premium",
+        ],
+    },
+
+    # M: Boho / Indie / Festival
+    "M": {
+        "tops": [
+            "boho oversized knit women earthy prints layered textured",
+            "flowy bohemian blouse women western festival vintage artsy",
+        ],
+        "bottoms": [
+            "boho wide-leg pants women earthy prints flowy textured",
+            "vintage denim shorts women festival western bohemian artsy",
+        ],
+        "dresses": [
+            "boho maxi dress women flowy prints earthy vintage festival",
+            "bohemian midi dress women western layered textured artsy",
+        ],
+        "outerwear": [
+            "boho oversized cardigan women earthy knit layered textured",
+            "vintage denim jacket women festival western bohemian artsy",
+        ],
+    },
+
+    # P: Department-Store Mainstream / Logo-Lifestyle
+    "P": {
+        "tops": [
+            "classic logo tee women recognizable brand casual neutral",
+            "safe casual blouse women preppy navy red white basic",
+        ],
+        "bottoms": [
+            "classic straight jeans women safe casual neutral everyday",
+            "casual chinos women preppy neutral classic mainstream",
+        ],
+        "dresses": [
+            "casual classic dress women safe styling neutral everyday",
+            "simple wrap dress women mainstream preppy navy red basic",
+        ],
+        "outerwear": [
+            "classic trench coat women mainstream safe neutral logo",
+            "casual blazer women preppy neutral classic safe everyday",
+        ],
+    },
+
+    # Q: Modern Feminine Eco-Chic
+    "Q": {
+        "tops": [
+            "flattering feminine top women romantic minimal soft neutral",
+            "fitted bodice top women sustainable silhouette warm floral",
+        ],
+        "bottoms": [
+            "flattering midi skirt women feminine romantic neutral warm",
+            "sustainable wide-leg pants women minimal feminine soft flowy",
+        ],
+        "dresses": [
+            "flattering feminine dress women romantic minimal soft floral",
+            "sustainable midi dress women fitted bodice silhouette warm",
+        ],
+        "outerwear": [
+            "feminine structured blazer women romantic neutral warm tones",
+            "soft knit cardigan women minimal sustainable eco-chic warm",
+        ],
+    },
+
+    # R: Trendy Feminine / Going-Out Elevated
+    "R": {
+        "tops": [
+            "corset top women cute photo-ready going-out prints fitted",
+            "trendy feminine crop top women sets mini vacation night-out",
+        ],
+        "bottoms": [
+            "trendy mini skirt women cute photo-ready prints fitted",
+            "going-out pants women feminine sets night-out bodycon",
+        ],
+        "dresses": [
+            "cute mini dress women photo-ready prints going-out fitted",
+            "trendy feminine dress women vacation night-out sets corset",
+        ],
+        "outerwear": [
+            "cropped blazer women trendy feminine going-out cute sets",
+            "statement jacket women photo-ready night-out prints fitted",
+        ],
+    },
+
+    # S: Resort / Coastal Minimal
+    "S": {
+        "tops": [
+            "linen camisole women resort minimal clean white cream",
+            "slip-style top women coastal curated slinky black pastel",
+        ],
+        "bottoms": [
+            "linen wide-leg pants women resort minimal white cream tan",
+            "clean tailored shorts women coastal curated neutral pastel",
+        ],
+        "dresses": [
+            "slip dress women resort minimal slinky cream black pastel",
+            "linen midi dress women coastal curated clean vacation white",
+        ],
+        "outerwear": [
+            "linen blazer women resort minimal clean white cream neutral",
+            "lightweight cover-up women coastal curated pastel vacation",
+        ],
+    },
+
+    # T: Designer Occasion / Eventwear
+    "T": {
+        "tops": [
+            "statement cocktail top women structured bold jewel tones",
+            "sculpted occasion blouse women elegant evening black event",
+        ],
+        "bottoms": [
+            "structured wide-leg trousers women event elegant jewel tones",
+            "evening tailored pants women cocktail sophisticated black",
+        ],
+        "dresses": [
+            "cocktail dress women statement structured bold jewel tones",
+            "event gown women elegant sculpted evening sophisticated black",
+        ],
+        "outerwear": [
+            "statement evening coat women structured bold jewel tones",
+            "elegant tailored jacket women cocktail event sophisticated",
+        ],
+    },
+
+    # V: Luxury Designer / Quiet Luxury
+    "V": {
+        "tops": [
+            "impeccable cashmere top women luxury tailored neutral subdued",
+            "investment blouse women refined silhouette quiet minimal cream",
+        ],
+        "bottoms": [
+            "impeccable tailored trousers women luxury neutral subdued",
+            "investment wide-leg pants women refined quiet luxury black",
+        ],
+        "dresses": [
+            "impeccable tailored dress women luxury neutral refined subdued",
+            "investment midi dress women quiet luxury silhouette cream black",
+        ],
+        "outerwear": [
+            "impeccable wool coat women luxury tailored neutral investment",
+            "refined cashmere jacket women quiet luxury subdued cream camel",
+        ],
+    },
+
+    # W: Resort Statement / Artsy Vacation
+    "W": {
+        "tops": [
+            "artful printed top women resort bold saturated airy vacation",
+            "statement set top women vacation colorful flowy photograph-ready",
+        ],
+        "bottoms": [
+            "artful printed pants women resort bold saturated airy flowy",
+            "vacation wide-leg trousers women colorful statement prints",
+        ],
+        "dresses": [
+            "artful printed dress women resort bold saturated airy vacation",
+            "statement maxi dress women vacation colorful flowy photograph",
+        ],
+        "outerwear": [
+            "artful printed kimono women resort bold saturated airy vacation",
+            "statement lightweight jacket women vacation colorful prints",
+        ],
+    },
+
+    # X: Y2K / Statement Denim / Edgy
+    "X": {
+        "tops": [
+            "edgy graphic tee women y2k streetwear bold black statement",
+            "distressed crop top women loud logo attitude high-contrast",
+        ],
+        "bottoms": [
+            "statement jeans women distressed low-rise bold wash y2k edgy",
+            "edgy cargo pants women streetwear loud black high-contrast",
+        ],
+        "dresses": [
+            "edgy mini dress women y2k streetwear bold black statement",
+            "distressed denim dress women loud attitude high-contrast",
+        ],
+        "outerwear": [
+            "edgy leather jacket women y2k streetwear bold black distressed",
+            "statement denim jacket women loud graphic y2k high-contrast",
+        ],
+    },
+}
+
+
+# =============================================================================
+# Style Persona -> Cluster Fallback Mapping
+#
+# When a user has style_persona set but few/no preferred_brands, map their
+# stated style to the most representative brand clusters.  Two clusters
+# per persona — first is primary match, second broadens the aesthetic.
+# =============================================================================
+
+PERSONA_TO_CLUSTERS: Dict[str, List[str]] = {
+    "classic":          ["A", "K"],     # Modern Classics, Quiet-Lux
+    "minimal":          ["K", "G"],     # Quiet-Lux, Essentials
+    "minimalist":       ["K", "G"],     # alias
+    "elegant":          ["L", "T"],     # Premium Designer, Eventwear
+    "trendy":           ["H", "J"],     # Ultra-Fast, Youth Mall
+    "casual":           ["C", "G"],     # Mass Casual, Essentials
+    "streetwear":       ["X", "E"],     # Y2K/Edgy, Athletic Heritage
+    "sporty":           ["D", "E"],     # Premium Athleisure, Athletic
+    "bohemian":         ["M", "W"],     # Boho/Indie, Resort Statement
+    "boho":             ["M", "W"],     # alias
+    "romantic":         ["Q", "R"],     # Eco-Chic, Going-Out Elevated
+    "edgy":             ["X", "B"],     # Y2K/Edgy, Premium Denim
+    "preppy":           ["A", "P"],     # Modern Classics, Mainstream
+    "glamorous":        ["T", "R"],     # Eventwear, Going-Out
+    "glam":             ["T", "R"],     # alias
+    "athleisure":       ["D", "E"],     # Premium Athleisure, Athletic
+    "vintage":          ["M", "C"],     # Boho/Indie, Mass Casual
+    "business casual":  ["A", "K"],     # Modern Classics, Quiet-Lux
+    "business-casual":  ["A", "K"],     # alias
+}
+
+
+# =============================================================================
 # Reverse Mapping: cluster_id -> set of lowercase brand names
 # Built at import time from BRAND_CLUSTER_MAP + BRAND_SECONDARY_CLUSTER.
 # =============================================================================

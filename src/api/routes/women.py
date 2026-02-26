@@ -432,6 +432,7 @@ def complete_fit(
         target_category=request.category,
         offset=request.offset,
         limit=request.limit,
+        user_id=user.id,
     )
 
     if result.get("error") and result.get("source_product") is None:
