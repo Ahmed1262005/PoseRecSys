@@ -66,23 +66,24 @@ PERSONA_CHOICES = [
     "preppy", "glamorous", "athleisure", "vintage",
 ]
 
-# Popular brands from the catalog (sorted)
-DB_BRANDS = sorted([
-    "Zara", "Mango", "H&M", "Reformation", "Ba&sh", "COS",
-    "Anine Bing", "AllSaints", "Theory", "Vince", "Reiss",
-    "Boohoo", "Missguided", "PrettyLittleThing", "Princess Polly",
-    "Free People", "Urban Outfitters", "Levi's", "Gap",
-    "Abercrombie & Fitch", "American Eagle Outfitters",
-    "Nike", "Adidas", "Lululemon", "Alo Yoga",
-    "J.Crew", "Ann Taylor", "Everlane", "Uniqlo",
-    "Sandro", "Maje", "& Other Stories", "Aritzia",
-    "Good American", "Agolde", "Citizens of Humanity",
-    "The North Face", "Patagonia",
-    "Alice + Olivia", "Zimmermann", "Staud",
-    "Skims", "Diesel", "True Religion",
-    "Forever 21", "Shein", "Fashion Nova", "Nasty Gal",
-    "Oak + Fort", "Rails", "Club Monaco",
-])
+# ── Cluster choices for the dropdown ────────────────────────────────
+# Label format: "A: Modern Classics (Ann Taylor, COS, ...)"
+_CLUSTER_CHOICES: List[str] = []
+_CLUSTER_ID_FROM_LABEL: Dict[str, str] = {}   # label -> cluster_id
+_CLUSTER_BRANDS: Dict[str, List[str]] = {}     # cluster_id -> [brand, ...]
+
+_cids: List[str] = sorted(CLUSTER_TRAITS.keys())
+for _cid in _cids:
+    _trait = CLUSTER_TRAITS[_cid]
+    _brands_list = sorted(
+        [b for b, (c, _) in BRAND_CLUSTER_MAP.items() if c == _cid],
+        key=str.lower,
+    )
+    _CLUSTER_BRANDS[_cid] = _brands_list
+    _sample = ", ".join(b.title() for b in _brands_list[:3])
+    _label = f"{_cid}: {_trait.name}  ({_sample}, ...)"
+    _CLUSTER_CHOICES.append(_label)
+    _CLUSTER_ID_FROM_LABEL[_label] = _cid
 
 # Some good test product IDs (mix of categories)
 SAMPLE_PRODUCTS = [
@@ -555,12 +556,31 @@ def render_profile_summary(
     """Render profile summary with cluster info."""
     parts = []
 
+    if clusters:
+        cluster_html = ""
+        for cid in clusters:
+            traits = CLUSTER_TRAITS.get(cid)
+            if traits:
+                tags = ", ".join(traits.style_tags[:4])
+                cluster_html += (
+                    f'<div style="display:inline-block;margin:3px;padding:6px 12px;'
+                    f'border-radius:10px;background:#ede9fe;border:1px solid #c4b5fd;">'
+                    f'<b style="color:#6d28d9;">{cid}: {html.escape(traits.name)}</b>'
+                    f'<br><span style="font-size:10px;color:#7c3aed;">{tags}</span>'
+                    f'<br><span style="font-size:10px;color:#9ca3af;">'
+                    f'{traits.formality} | {traits.price_tier} | '
+                    f'${traits.typical_price_range[0]}-${traits.typical_price_range[1]}</span>'
+                    f'</div> '
+                )
+        parts.append(f"<b>Clusters:</b><br>{cluster_html}")
+
     if brands:
         brand_badges = " ".join(
-            f'<span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;background:#dcfce7;color:#166534;margin:2px;">{html.escape(b)}</span>'
-            for b in brands
+            f'<span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:10px;background:#f3f4f6;color:#374151;margin:1px;">{html.escape(b)}</span>'
+            for b in brands[:8]
         )
-        parts.append(f"<b>Brands:</b> {brand_badges}")
+        more = f" <span style='font-size:10px;color:#9ca3af;'>+{len(brands)-8} more</span>" if len(brands) > 8 else ""
+        parts.append(f"<b style='font-size:12px;'>Derived brands:</b> {brand_badges}{more}")
 
     if personas:
         persona_badges = " ".join(
@@ -569,14 +589,6 @@ def render_profile_summary(
         )
         parts.append(f"<b>Style:</b> {persona_badges}")
 
-    if clusters:
-        cluster_html = ""
-        for cid in clusters:
-            traits = CLUSTER_TRAITS.get(cid)
-            name = traits.name if traits else cid
-            cluster_html += f'<span class="cluster-badge">{cid}: {html.escape(name)}</span> '
-        parts.append(f"<b>Clusters:</b> {cluster_html}")
-
     return '<div class="info-box">' + "<br>".join(parts) + '</div>' if parts else ""
 
 
@@ -584,17 +596,39 @@ def render_profile_summary(
 # Fake profile builder (simulates what _load_user_profile returns)
 # =============================================================================
 
+def _resolve_cluster_labels(labels: List[str]) -> List[str]:
+    """Convert cluster dropdown labels to cluster IDs."""
+    return [_CLUSTER_ID_FROM_LABEL[lbl] for lbl in (labels or []) if lbl in _CLUSTER_ID_FROM_LABEL]
+
+
+def _brands_for_clusters(cluster_ids: List[str], max_per: int = 4) -> List[str]:
+    """Pick representative brands from selected clusters for ProfileScorer."""
+    brands: List[str] = []
+    for cid in cluster_ids:
+        for b in _CLUSTER_BRANDS.get(cid, [])[:max_per]:
+            brands.append(b.title())
+    return brands
+
+
 def build_fake_profile(
-    brands: List[str],
+    cluster_labels: List[str],
     personas: List[str],
     min_price: float = 0,
     max_price: float = 500,
 ) -> dict:
-    """Build a profile dict matching the format _load_user_profile returns."""
+    """Build a profile dict from cluster selections.
+
+    Derives preferred_brands from the selected clusters and injects
+    _resolved_clusters so ProfileScorer uses them directly.
+    """
+    cluster_ids = _resolve_cluster_labels(cluster_labels)
+    brands = _brands_for_clusters(cluster_ids)
+
     return {
-        "preferred_brands": brands or [],
+        "preferred_brands": brands,
         "brand_openness": "open",
         "style_persona": personas or [],
+        "_resolved_clusters": cluster_ids,
         "preferred_fits": [],
         "fit_category_mapping": [],
         "preferred_sleeves": [],
@@ -631,7 +665,7 @@ def build_fake_profile(
 
 def run_outfit_comparison(
     product_id: str,
-    brands: List[str],
+    cluster_labels: List[str],
     personas: List[str],
     min_price: float,
     max_price: float,
@@ -642,8 +676,9 @@ def run_outfit_comparison(
     if not product_id:
         return '<div class="warn-box">Enter a product ID</div>', "", ""
 
-    profile = build_fake_profile(brands, personas, min_price, max_price)
-    clusters = ENGINE._resolve_user_clusters(profile)
+    profile = build_fake_profile(cluster_labels, personas, min_price, max_price)
+    clusters = _resolve_cluster_labels(cluster_labels)
+    brands = profile.get("preferred_brands", [])
     profile_summary = render_profile_summary(brands, personas, clusters)
 
     # Baseline (no profile) — inject None user_id so _load_user_profile returns None
@@ -696,7 +731,7 @@ def run_outfit_comparison(
 
 def run_similar_comparison(
     product_id: str,
-    brands: List[str],
+    cluster_labels: List[str],
     personas: List[str],
     min_price: float,
     max_price: float,
@@ -707,8 +742,9 @@ def run_similar_comparison(
     if not product_id:
         return '<div class="warn-box">Enter a product ID</div>', "", ""
 
-    profile = build_fake_profile(brands, personas, min_price, max_price)
-    clusters = ENGINE._resolve_user_clusters(profile)
+    profile = build_fake_profile(cluster_labels, personas, min_price, max_price)
+    clusters = _resolve_cluster_labels(cluster_labels)
+    brands = profile.get("preferred_brands", [])
     profile_summary = render_profile_summary(brands, personas, clusters)
 
     # Baseline
@@ -773,13 +809,13 @@ def run_similar_comparison(
 
 
 def explore_clusters(
-    brands: List[str],
+    cluster_labels: List[str],
     personas: List[str],
     target_category: str,
 ) -> str:
     """Show cluster resolution and the prompts that would be injected."""
-    profile = build_fake_profile(brands, personas)
-    clusters = ENGINE._resolve_user_clusters(profile)
+    clusters = _resolve_cluster_labels(cluster_labels)
+    brands = _brands_for_clusters(clusters)
 
     parts = []
     parts.append(render_profile_summary(brands, personas, clusters))
@@ -893,7 +929,7 @@ def search_products(query: str) -> str:
 # =============================================================================
 
 def _random_and_compare_outfit(
-    category: str, brands: List[str], personas: List[str],
+    category: str, cluster_labels: List[str], personas: List[str],
     min_price: float, max_price: float, items_per_cat: int,
 ) -> Tuple[str, str, str, str]:
     """Pick a random product, then run outfit comparison."""
@@ -901,12 +937,12 @@ def _random_and_compare_outfit(
     if not pid:
         msg = '<div class="warn-box">Could not find a random product. Try a different category.</div>'
         return pid, msg, "", ""
-    b, p, info = run_outfit_comparison(pid, brands, personas, min_price, max_price, items_per_cat)
+    b, p, info = run_outfit_comparison(pid, cluster_labels, personas, min_price, max_price, items_per_cat)
     return pid, b, p, info
 
 
 def _random_and_compare_similar(
-    category: str, brands: List[str], personas: List[str],
+    category: str, cluster_labels: List[str], personas: List[str],
     min_price: float, max_price: float, limit: int,
 ) -> Tuple[str, str, str, str]:
     """Pick a random product, then run similar comparison."""
@@ -914,7 +950,7 @@ def _random_and_compare_similar(
     if not pid:
         msg = '<div class="warn-box">Could not find a random product. Try a different category.</div>'
         return pid, msg, "", ""
-    b, p, info = run_similar_comparison(pid, brands, personas, min_price, max_price, limit)
+    b, p, info = run_similar_comparison(pid, cluster_labels, personas, min_price, max_price, limit)
     return pid, b, p, info
 
 
@@ -930,19 +966,19 @@ def build_ui() -> gr.Blocks:
         # ---- Shared profile controls ----
         with gr.Accordion("User Profile", open=True):
             with gr.Row():
-                brand_input = gr.Dropdown(
-                    choices=DB_BRANDS,
-                    value=["Alo Yoga", "Ann Taylor", "Aritzia", "Everlane"],
+                cluster_input = gr.Dropdown(
+                    choices=_CLUSTER_CHOICES,
+                    value=[_CLUSTER_CHOICES[_cids.index("A")], _CLUSTER_CHOICES[_cids.index("D")]],
                     multiselect=True,
-                    label="Preferred Brands",
-                    info="Select brands to determine style clusters",
+                    label="Style Clusters",
+                    info="Select 1-3 clusters that define user taste",
                 )
                 persona_input = gr.Dropdown(
                     choices=PERSONA_CHOICES,
                     value=["classic", "minimal"],
                     multiselect=True,
-                    label="Style Personas (fallback if no brands)",
-                    info="Used only if no brands are selected",
+                    label="Style Personas (optional)",
+                    info="Additional style signal for scoring",
                 )
             with gr.Row():
                 min_price = gr.Slider(0, 500, value=0, step=10, label="Min Price ($)")
@@ -988,12 +1024,12 @@ def build_ui() -> gr.Blocks:
 
                 outfit_random_btn.click(
                     _random_and_compare_outfit,
-                    inputs=[outfit_cat, brand_input, persona_input, min_price, max_price, outfit_n],
+                    inputs=[outfit_cat, cluster_input, persona_input, min_price, max_price, outfit_n],
                     outputs=[outfit_pid, outfit_baseline, outfit_personal, outfit_info],
                 )
                 outfit_btn.click(
                     run_outfit_comparison,
-                    inputs=[outfit_pid, brand_input, persona_input, min_price, max_price, outfit_n],
+                    inputs=[outfit_pid, cluster_input, persona_input, min_price, max_price, outfit_n],
                     outputs=[outfit_baseline, outfit_personal, outfit_info],
                 )
 
@@ -1026,12 +1062,12 @@ def build_ui() -> gr.Blocks:
 
                 similar_random_btn.click(
                     _random_and_compare_similar,
-                    inputs=[similar_cat, brand_input, persona_input, min_price, max_price, similar_n],
+                    inputs=[similar_cat, cluster_input, persona_input, min_price, max_price, similar_n],
                     outputs=[similar_pid, similar_baseline, similar_personal, similar_info],
                 )
                 similar_btn.click(
                     run_similar_comparison,
-                    inputs=[similar_pid, brand_input, persona_input, min_price, max_price, similar_n],
+                    inputs=[similar_pid, cluster_input, persona_input, min_price, max_price, similar_n],
                     outputs=[similar_baseline, similar_personal, similar_info],
                 )
 
@@ -1052,7 +1088,7 @@ def build_ui() -> gr.Blocks:
                 explore_html = gr.HTML()
                 explore_btn.click(
                     explore_clusters,
-                    inputs=[brand_input, persona_input, explore_cat],
+                    inputs=[cluster_input, persona_input, explore_cat],
                     outputs=[explore_html],
                 )
 
