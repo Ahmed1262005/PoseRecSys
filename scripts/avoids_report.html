@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Outfit Avoids Edge Case Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:#fafafa;color:#222;padding:32px;max-width:1460px;margin:auto}
+h1{font-size:28px;margin-bottom:4px}
+.sub{color:#666;font-size:14px;margin-bottom:32px}
+.sbar{display:flex;gap:24px;margin-bottom:36px;padding:16px 20px;
+  background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.sstat{text-align:center}.sstat .v{font-size:28px;font-weight:700}.sstat .l{font-size:12px;color:#888}
+.cs{background:#fff;border-radius:12px;margin-bottom:32px;
+  box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
+.ch{padding:20px 24px;border-bottom:1px solid #eee}
+.ch h2{font-size:18px}.ch .d{color:#666;font-size:13px;margin-top:4px}
+.ch .t{color:#999;font-size:12px;font-family:monospace;margin-top:2px}
+.sb{display:flex;align-items:flex-start;gap:16px;padding:16px 24px;
+  background:#f8f8ff;border-bottom:1px solid #eee}
+.sa{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.attr-chip{background:#e8eaf6;color:#333;font-size:11px;padding:2px 8px;
+  border-radius:10px;white-space:nowrap}
+.catsec{padding:16px 24px}
+.catsec h3{font-size:14px;text-transform:uppercase;letter-spacing:.5px;color:#666;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;
+  font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:#888}
+td{padding:8px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+tr.hf{background:#fce4ec}tr.pen{background:#fff8e1}tr.ok{background:#fff}
+.rc{font-weight:700;font-size:14px;width:40px;text-align:center}
+.sc{font-family:monospace;font-size:12px}
+.pb{display:inline-block;padding:2px 8px;border-radius:10px;color:#fff;font-size:11px;font-weight:600}
+.rule-chip{background:#ffecb3;color:#795548;font-size:10px;padding:1px 6px;
+  border-radius:6px;margin:1px;display:inline-block}
+.rule-chip-hard{background:#ef9a9a;color:#b71c1c;font-size:10px;padding:1px 6px;
+  border-radius:6px;margin:1px;display:inline-block;font-weight:700}
+.ru{color:#2e7d32;font-size:11px}.rd{color:#d32f2f;font-size:11px}.rs{color:#999;font-size:11px}
+.in{font-weight:500;font-size:12px;max-width:180px}.ib{color:#888;font-size:11px}
+.err{padding:24px;color:#d32f2f}
+.leg{padding:12px 24px;background:#f5f5f5;border-top:1px solid #eee;font-size:12px;color:#666}
+.leg span{margin-right:16px}
+</style></head><body>
+<h1>Outfit Avoids &mdash; Edge Case Report</h1>
+<p class="sub">Generated 2026-02-27 19:04 &middot; 10 edge-case products &middot; avoids v1.0</p>
+<div class="sbar">
+  <div class="sstat"><div class="v">68</div><div class="l">Total Recs</div></div>
+  <div class="sstat"><div class="v" style="color:#d32f2f">0</div><div class="l">Hard-Filtered</div></div>
+  <div class="sstat"><div class="v" style="color:#e65100">15</div><div class="l">Soft-Penalized</div></div>
+  <div class="sstat"><div class="v" style="color:#2e7d32">53</div><div class="l">Clean</div></div>
+</div>
+<div class="cs"><div class="ch">
+  <h2>A) Hoodie</h2>
+  <div class="d">Casual hoodie should NOT get silk/satin skirts, sequin pieces, or very dressy blouses</div>
+  <div class="t">Tests: I1 delicate/dressy, F2 satin+sweats, B1 formality gap</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_a23babcf8c69/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">LIVI French Terry Short-Sleeve Hoodie</div>
+  <div style="color:#666;font-size:12px">Lane Bryant &middot; $18</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Hoodie</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>knit</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>midlayer</b></span>
+<span class="attr-chip">Temp: <b>hot</b></span>
+<span class="attr-chip">Style: <b>Casual, Sporty, Trendy</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Relaxed</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_029c8d969900/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">LIVI Ribbed Journey Capri Relaxed Straight Pant</div>
+      <div class="ib">Lane Bryant &middot; $30</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.779</td>
+  <td class="sc">0.869</td>
+  <td class="sc">0.670</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.700</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_16cc8209e56e/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Plus Size Speckled Print Biker Shorts</div>
+      <div class="ib">Forever 21 &middot; $9</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.776</td>
+  <td class="sc">0.863</td>
+  <td class="sc">0.671</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.776</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="pen">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/universal-standard/universal_standard_04c22f2bff76/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">UltimateS Lorelai Lounge Shorts</div>
+      <div class="ib">Universal Standard &middot; $20</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.770</td>
+  <td class="sc">0.827</td>
+  <td class="sc">0.699</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.690</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="pen">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/splendid/splendid_c942aa18ca0c/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Indigo Lounge Short</div>
+      <div class="ib">Splendid &middot; $49</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.772</td>
+  <td class="sc">0.821</td>
+  <td class="sc">0.713</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.692</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>B) Formal Gown</h2>
+  <div class="d">Formal gown should NOT get denim jacket, hoodie, or bomber as outerwear</div>
+  <div class="t">Tests: I3 formal+casual-outer, G3 formal+denim-jacket, HF1</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_ee17a68a32a5/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Sleeveless Mock Neck Blouson Gown Hunter</div>
+  <div style="color:#666;font-size:12px">Forever 21 &middot; $36</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Gown</b></span>
+<span class="attr-chip">Formality: <b>Formal (5)</b></span>
+<span class="attr-chip">Fabric: <b>velvet</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>cold</b></span>
+<span class="attr-chip">Style: <b>Glamorous, Modern, Chic</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>A-Line</b></span>
+<span class="attr-chip">Shine: <b>shiny</b></span>
+</div></div></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_aae214c8ce8a/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">AiiRZ Luxurious Satin Wrap Blazer Evening Formal</div>
+      <div class="ib">Missguided &middot; $18</div></td>
+  <td><span class="attr-chip">L2: <b>Blazer</b></span> <span class="attr-chip">Form: <b>4</b></span> <span class="attr-chip">Fab: <b>satin</b></span> <span class="attr-chip">Shine: <b>shiny</b></span> <span class="attr-chip">Sil: <b>Slim</b></span></td>
+  <td class="sc">0.699</td>
+  <td class="sc">0.747</td>
+  <td class="sc">0.641</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.699</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/another-tomorrow/another_tomorrow_20d10fede06b/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Seamed Waist Jacket</div>
+      <div class="ib">Another Tomorrow &middot; $1450</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>wool</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.683</td>
+  <td class="sc">0.747</td>
+  <td class="sc">0.605</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.683</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/joanna-ortiz/joanna_ortiz_4fc0f742057d/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">New Destiny Cape</div>
+      <div class="ib">Joanna Ortiz &middot; $870</div></td>
+  <td><span class="attr-chip">L2: <b>Cape</b></span> <span class="attr-chip">Form: <b>5</b></span> <span class="attr-chip">Fab: <b>silk</b></span> <span class="attr-chip">Shine: <b>slight</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.697</td>
+  <td class="sc">0.773</td>
+  <td class="sc">0.604</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.697</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/ba&amp;sh/baandsh_b33faec80d34/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">BOOP long-sleeve blazer</div>
+      <div class="ib">Ba&amp;sh &middot; $297</div></td>
+  <td><span class="attr-chip">L2: <b>Blazer</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.665</td>
+  <td class="sc">0.679</td>
+  <td class="sc">0.648</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.665</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>C) Blazer</h2>
+  <div class="d">Tailored blazer should NOT get track pants, windbreakers, or gym hoodies</div>
+  <div class="t">Tests: I2 blazer+gym, C2 sporty-L2+formal-L2, HF3</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/a1f91793-26ec-4c00-9098-3e4252212ee1/original_0_0ab561b1.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Petite Double Breasted Button Detail Blazer</div>
+  <div style="color:#666;font-size:12px">Boohoo &middot; $38</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Blazer</b></span>
+<span class="attr-chip">Formality: <b>Business Casual (3)</b></span>
+<span class="attr-chip">Fabric: <b>synthetic_woven</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>outer</b></span>
+<span class="attr-chip">Temp: <b>mild</b></span>
+<span class="attr-chip">Style: <b>Classic, Chic, Trendy</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Relaxed</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>tops (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_bd7f0ef6cbc8/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">MISSGUIDED Pinstripe Button Down Shirt With Wide</div>
+      <div class="ib">Missguided &middot; $46</div></td>
+  <td><span class="attr-chip">L2: <b>Shirt</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Sil: <b>Oversized</b></span></td>
+  <td class="sc">0.797</td>
+  <td class="sc">0.830</td>
+  <td class="sc">0.757</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.717</td>
+  <td><span class="rd">&darr;3</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/alexis/alexis_1c8baae7da83/primary.webp" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Lazlo Top</div>
+      <div class="ib">Alexis &middot; $440</div></td>
+  <td><span class="attr-chip">L2: <b>Top</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>leather</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.796</td>
+  <td class="sc">0.765</td>
+  <td class="sc">0.834</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.796</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/club-monaco/club_monaco_0cc94d02fca2/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Carolena Top</div>
+      <div class="ib">Club Monaco &middot; $50</div></td>
+  <td><span class="attr-chip">L2: <b>T-Shirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Slim</b></span></td>
+  <td class="sc">0.796</td>
+  <td class="sc">0.846</td>
+  <td class="sc">0.734</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.796</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/f185ea5a-a4cc-4df0-a2fa-e9ec83f48148/original_0_1b88a0d2.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Petite Longline Button Through Waistcoat</div>
+      <div class="ib">Boohoo &middot; $42</div></td>
+  <td><span class="attr-chip">L2: <b>Vest</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.767</td>
+  <td class="sc">0.771</td>
+  <td class="sc">0.762</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.767</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/0180d52b-c2e8-4f10-a404-bb106e8ac381/original_0_772cd63e.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Tailored Textured Woven Straight Leg Trouser</div>
+      <div class="ib">Boohoo &middot; $30</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.859</td>
+  <td class="sc">0.856</td>
+  <td class="sc">0.864</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.779</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="pen">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_fbe7c58c0cb3/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Wide Leg High Waisted Flowy Pleated Suit Pants</div>
+      <div class="ib">Missguided &middot; $29</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Flared</b></span></td>
+  <td class="sc">0.846</td>
+  <td class="sc">0.862</td>
+  <td class="sc">0.826</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.766</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_6b552c903665/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Premium Skinny Tailored Trousers</div>
+      <div class="ib">Nasty Gal &middot; $40</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Slim</b></span></td>
+  <td class="sc">0.820</td>
+  <td class="sc">0.829</td>
+  <td class="sc">0.809</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.820</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+<tr class="pen">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_fd27cb3d1c24/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Premium Pleat Front Wide Leg Trousers</div>
+      <div class="ib">Nasty Gal &middot; $44</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Flared</b></span></td>
+  <td class="sc">0.845</td>
+  <td class="sc">0.861</td>
+  <td class="sc">0.824</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.765</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+</table></div>
+<div class="catsec"><h3>dresses (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/ann-taylor/ann_taylor_f97dd1c9752c/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Linen Blend Wide-Leg Jumpsuit</div>
+      <div class="ib">Ann Taylor &middot; $60</div></td>
+  <td><span class="attr-chip">L2: <b>Jumpsuit</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>linen</b></span> <span class="attr-chip">Sil: <b>Flared</b></span></td>
+  <td class="sc">0.789</td>
+  <td class="sc">0.837</td>
+  <td class="sc">0.730</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.709</td>
+  <td><span class="rd">&darr;3</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/white-house-black-market/white_house_black_market_df7975dc0929/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Tailored Crepe Jumpsuit</div>
+      <div class="ib">White House Black Market &middot; $195</div></td>
+  <td><span class="attr-chip">L2: <b>Jumpsuit</b></span> <span class="attr-chip">Form: <b>3</b></span> <span class="attr-chip">Fab: <b>silk</b></span> <span class="attr-chip">Shine: <b>slight</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.748</td>
+  <td class="sc">0.766</td>
+  <td class="sc">0.726</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.748</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/c33b0928-a54d-4a3c-98a3-5b2ff77bc137/original_0_ccd8765a.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Short Sleeve Short Blazer Playsuit</div>
+      <div class="ib">Boohoo &middot; $49</div></td>
+  <td><span class="attr-chip">L2: <b>Jumpsuit</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.779</td>
+  <td class="sc">0.804</td>
+  <td class="sc">0.748</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.779</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_f08a74a3c4e4/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Notched Zip-Up Jumpsuit</div>
+      <div class="ib">Forever 21 &middot; $17</div></td>
+  <td><span class="attr-chip">L2: <b>Jumpsuit</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.778</td>
+  <td class="sc">0.796</td>
+  <td class="sc">0.756</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.778</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>D) Leggings</h2>
+  <div class="d">Casual leggings should NOT get tux shirts or very formal evening tops</div>
+  <div class="t">Tests: I4 legging+formal, HF4 activewear+formal</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_b8fe59e63ca6/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">LIVI Ultra High Rise Livi Soft Ruched Waistband 7/8 Legging</div>
+  <div style="color:#666;font-size:12px">Lane Bryant &middot; $55</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Legging</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>synthetic_stretch</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>any</b></span>
+<span class="attr-chip">Style: <b>Sporty, Casual, Trendy</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Fitted</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>tops (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/4687a928-103e-4862-8b51-7d1991ad88b0/original_0_bda3b95a.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">High Waisted Bike Shorts</div>
+      <div class="ib">Gap &middot; $54</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_stretch</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.816</td>
+  <td class="sc">0.860</td>
+  <td class="sc">0.763</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.816</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_fc8f8d28d329/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">LIVI Journey Crew-Neck Sweatshirt</div>
+      <div class="ib">Lane Bryant &middot; $37</div></td>
+  <td><span class="attr-chip">L2: <b>Sweatshirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.795</td>
+  <td class="sc">0.872</td>
+  <td class="sc">0.702</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.795</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/dynamite/dynamite_1931e103f732/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Lola Off Shoulder Sweater</div>
+      <div class="ib">Dynamite &middot; $70</div></td>
+  <td><span class="attr-chip">L2: <b>Sweater</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.792</td>
+  <td class="sc">0.860</td>
+  <td class="sc">0.709</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.792</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_019604a33d8e/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Maternity Supersoft Sculpt Long Sleeve Top</div>
+      <div class="ib">Nasty Gal &middot; $20</div></td>
+  <td><span class="attr-chip">L2: <b>Top</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.805</td>
+  <td class="sc">0.833</td>
+  <td class="sc">0.770</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.805</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+</table></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_3a489fde24be/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Active Seamless Cropped Jacket</div>
+      <div class="ib">Forever 21 &middot; $30</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.791</td>
+  <td class="sc">0.851</td>
+  <td class="sc">0.718</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.791</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_27e58bdb0b74/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">LIVI Journey Zip-Up Jacket</div>
+      <div class="ib">Lane Bryant &middot; $42</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.781</td>
+  <td class="sc">0.886</td>
+  <td class="sc">0.654</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.781</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/95f8ff8d-d5e8-467f-898a-21bccfaf7875/original_1_102ff59e.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">DSGN Studio Borg Zip Through Funnel Neck Jacket</div>
+      <div class="ib">Boohoo &middot; $38</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.784</td>
+  <td class="sc">0.863</td>
+  <td class="sc">0.688</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.784</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_fb0b48ff3660/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Plus Size Open-Front Cardigan Sweater</div>
+      <div class="ib">Forever 21 &middot; $35</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.784</td>
+  <td class="sc">0.855</td>
+  <td class="sc">0.697</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.784</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>E) Black Jeans</h2>
+  <div class="d">Denim jeans should NOT get denim jacket as default complement (too matchy)</div>
+  <div class="t">Tests: D1 denim-on-denim (material matchy)</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/equipment/equipment_c6daac3cbc26/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Barbara Bootcut Jeans - Black</div>
+  <div style="color:#666;font-size:12px">Equipment &middot; $99</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Jean</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>denim</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>any</b></span>
+<span class="attr-chip">Style: <b>Classic, Casual, Chic</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Flared</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>tops (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/skims/skims_ed09f6338adf/primary.webp" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Sheer Modal Crewneck Henley</div>
+      <div class="ib">Skims &middot; $80</div></td>
+  <td><span class="attr-chip">L2: <b>Henley</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.810</td>
+  <td class="sc">0.859</td>
+  <td class="sc">0.749</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.810</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/72e557a3-2022-42ab-ada7-f06771c88d93/original_0_08e0505b.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Cable Embellished Polo Collar Jumper</div>
+      <div class="ib">Boohoo &middot; $40</div></td>
+  <td><span class="attr-chip">L2: <b>Sweater</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.791</td>
+  <td class="sc">0.846</td>
+  <td class="sc">0.723</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.791</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/faithful/faithful_72b90e436631/primary.webp" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Asha Top Black - Final Sale</div>
+      <div class="ib">Faithful &middot; $175</div></td>
+  <td><span class="attr-chip">L2: <b>Top</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>linen</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.773</td>
+  <td class="sc">0.815</td>
+  <td class="sc">0.721</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.773</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/632f138a-b40c-45e9-b315-0ca18b764026/original_0_e2993841.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Elbe Stretch Poplin Shirt Classic Fit</div>
+      <div class="ib">Universal Standard &middot; $128</div></td>
+  <td><span class="attr-chip">L2: <b>Shirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.790</td>
+  <td class="sc">0.856</td>
+  <td class="sc">0.710</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.790</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_54857202fb99/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Tall 3 Piece Bomber Tracksuit</div>
+      <div class="ib">Nasty Gal &middot; $56</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.794</td>
+  <td class="sc">0.863</td>
+  <td class="sc">0.710</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.794</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/c06c350b-4995-4e47-894e-ad229db79ba1/original_0_30226f93.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Sheer Modal Cardigan</div>
+      <div class="ib">Skims &middot; $68</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.784</td>
+  <td class="sc">0.865</td>
+  <td class="sc">0.686</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.784</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/splendid/splendid_eee47e058001/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Loopknit LYR Cardigan</div>
+      <div class="ib">Splendid &middot; $49</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.749</td>
+  <td class="sc">0.790</td>
+  <td class="sc">0.699</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.749</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/dkny/dkny_d6f8ced95a46/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">LOGO HOODED SHORT JACKET</div>
+      <div class="ib">DKNY &middot; $120</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.783</td>
+  <td class="sc">0.870</td>
+  <td class="sc">0.676</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.783</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>F) Joggers</h2>
+  <div class="d">Casual joggers should NOT get sequin tops, tailored blazers, or formal pieces</div>
+  <div class="t">Tests: C2 sporty+formal, F1 party+casual, HF2/HF3</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_c14f0182f293/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Mineral Wash Cargo Joggers</div>
+  <div style="color:#666;font-size:12px">Forever 21 &middot; $9</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Jogger</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>knit</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>any</b></span>
+<span class="attr-chip">Style: <b>Casual, Trendy, Streetwear</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Relaxed</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>tops (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_ba83deced310/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Polka Dot Bow Pajama Crop Top</div>
+      <div class="ib">Forever 21 &middot; $14</div></td>
+  <td><span class="attr-chip">L2: <b>Crop Top</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.808</td>
+  <td class="sc">0.848</td>
+  <td class="sc">0.759</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.808</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="pen">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/d1bc5e55-47ee-479d-86c8-e709dfc01712/original_0_c4fb6cb3.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Seam Detail Boxy Crop Zip Through Hoodie</div>
+      <div class="ib">Boohoo &middot; $14</div></td>
+  <td><span class="attr-chip">L2: <b>Hoodie</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Boxy</b></span></td>
+  <td class="sc">0.798</td>
+  <td class="sc">0.835</td>
+  <td class="sc">0.753</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.718</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/garage/garage_9477bde0f3dc/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">SoftTerry Iconic Full Zip Hoodie</div>
+      <div class="ib">Garage &middot; $40</div></td>
+  <td><span class="attr-chip">L2: <b>Hoodie</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.798</td>
+  <td class="sc">0.838</td>
+  <td class="sc">0.749</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.798</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="pen">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_0148e4fd24e0/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Watercolor Tie-Dye Zip-Up Cropped Drawstring Hoo</div>
+      <div class="ib">Missguided &middot; $31</div></td>
+  <td><span class="attr-chip">L2: <b>Hoodie</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Oversized</b></span></td>
+  <td class="sc">0.762</td>
+  <td class="sc">0.742</td>
+  <td class="sc">0.787</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.682</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+</table></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_fd4d1f8438dc/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Hooded Slit Zip-Up Jacket</div>
+      <div class="ib">Forever 21 &middot; $15</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.795</td>
+  <td class="sc">0.827</td>
+  <td class="sc">0.756</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.715</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="pen">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_4471454221ce/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Velour Cropped Zip-Up Jacket</div>
+      <div class="ib">Forever 21 &middot; $20</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>velvet</b></span> <span class="attr-chip">Shine: <b>shiny</b></span> <span class="attr-chip">Sil: <b>Slim</b></span></td>
+  <td class="sc">0.788</td>
+  <td class="sc">0.832</td>
+  <td class="sc">0.734</td>
+  <td><span class="pb" style="background:#d32f2f">-0.120</span></td>
+  <td><span class="rule-chip" title="Party fabric + casual piece">F1</span></td>
+  <td class="sc" style="font-weight:700">0.668</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_634eb0b74cf0/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Abstract Print Trucker Jacket</div>
+      <div class="ib">Forever 21 &middot; $15</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>denim</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.764</td>
+  <td class="sc">0.785</td>
+  <td class="sc">0.738</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.764</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+<tr class="pen">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_1604bc5c36c2/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Fleece Colorblock Zip-Up Hoodie</div>
+      <div class="ib">Forever 21 &middot; $35</div></td>
+  <td><span class="attr-chip">L2: <b>Jacket</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Sil: <b>Boxy</b></span></td>
+  <td class="sc">0.787</td>
+  <td class="sc">0.806</td>
+  <td class="sc">0.764</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.707</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>G) Corset Top</h2>
+  <div class="d">Smart-casual corset should NOT get distressed/destroyed bottoms or very casual sweats</div>
+  <div class="t">Tests: F3 delicate+distressed, B1 formality, coverage</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/565a2dde-ef69-49aa-a070-ed7cde81682f/original_0_38f3abf9.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Linen Look Strappy Corset Top</div>
+  <div style="color:#666;font-size:12px">Boohoo &middot; $25</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Corset</b></span>
+<span class="attr-chip">Formality: <b>Smart Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>cotton</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>hot</b></span>
+<span class="attr-chip">Style: <b>Chic, Trendy, Glamorous</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Fitted</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/7f125c6a-108f-44c5-8a68-fcb7610a4681/original_0_77a7a0b0.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Asymmetric Mini Skort</div>
+      <div class="ib">Boohoo &middot; $26</div></td>
+  <td><span class="attr-chip">L2: <b>Skort</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.817</td>
+  <td class="sc">0.845</td>
+  <td class="sc">0.783</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.817</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/63690502-4c61-4e5a-ad91-17290586b415/original_0_4ee62239.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Rhode Mini Skort Mauve Stripe</div>
+      <div class="ib">Princess Polly &middot; $14</div></td>
+  <td><span class="attr-chip">L2: <b>Skort</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>linen</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.789</td>
+  <td class="sc">0.831</td>
+  <td class="sc">0.737</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.789</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/89983491-ab03-495d-833a-59d186626995/original_0_a7afd9a7.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Linen A Line Mini Skirt</div>
+      <div class="ib">Boohoo &middot; $25</div></td>
+  <td><span class="attr-chip">L2: <b>Skirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.815</td>
+  <td class="sc">0.843</td>
+  <td class="sc">0.780</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.815</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/bf97a2f9-2583-46fb-a96e-8d30406fa774/original_0_34ff8db1.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Polka Print Floaty Mini Skirt</div>
+      <div class="ib">Boohoo &middot; $26</div></td>
+  <td><span class="attr-chip">L2: <b>Skirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.811</td>
+  <td class="sc">0.872</td>
+  <td class="sc">0.737</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.811</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/ff9fe64d-263b-41a2-9946-10f0d0497c70/original_0_533b0f93.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Cut Out Detail Tailored Blazer</div>
+      <div class="ib">Boohoo &middot; $21</div></td>
+  <td><span class="attr-chip">L2: <b>Blazer</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.783</td>
+  <td class="sc">0.847</td>
+  <td class="sc">0.704</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.783</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/f32b4c2d-ba8f-4dfe-b1af-c9f0dd2fe3d6/original_0_e190e69c.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Heavy Rib V Neckline Button Through Cardigan</div>
+      <div class="ib">Boohoo &middot; $21</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.758</td>
+  <td class="sc">0.809</td>
+  <td class="sc">0.696</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.758</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/8c40b04e-7afc-4c39-b96f-45be4cc46dfe/original_0_fa13d690.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Layered Crop Top And Knit Cardigan</div>
+      <div class="ib">Boohoo &middot; $31</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Slim</b></span></td>
+  <td class="sc">0.765</td>
+  <td class="sc">0.833</td>
+  <td class="sc">0.681</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.765</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/5cc7496c-c411-4763-92a9-d8937d30bade/original_0_b76bede2.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Burgundy Crinkle Sheer Tie Detail Cardigan</div>
+      <div class="ib">Boohoo &middot; $30</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Relaxed</b></span></td>
+  <td class="sc">0.765</td>
+  <td class="sc">0.848</td>
+  <td class="sc">0.663</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.765</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>H) Silk Tank Top</h2>
+  <div class="d">Delicate silk tank should NOT get heavy puffer/fleece outerwear or fleece joggers</div>
+  <div class="t">Tests: A2 hot+cold-outer, F2 silk+sweats, G1 occasion</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_dc2ff62145f6/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Silk tank top</div>
+  <div style="color:#666;font-size:12px">Maje &middot; $210</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Tank Top</b></span>
+<span class="attr-chip">Formality: <b>Smart Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>silk</b></span>
+<span class="attr-chip">Weight: <b>light</b></span>
+<span class="attr-chip">Layer: <b>base</b></span>
+<span class="attr-chip">Temp: <b>any</b></span>
+<span class="attr-chip">Style: <b>Classic, Chic, Minimalist</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Regular</b></span>
+<span class="attr-chip">Shine: <b>slight</b></span>
+</div></div></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_d300952d1ebe/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Straight-fit pleated shorts</div>
+      <div class="ib">Maje &middot; $224</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.806</td>
+  <td class="sc">0.849</td>
+  <td class="sc">0.755</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.806</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/posse/posse_89fb8ff4e661/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Alice Skirt - Chocolate Cream Pinstripe</div>
+      <div class="ib">Posse &middot; $155</div></td>
+  <td><span class="attr-chip">L2: <b>Skirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>linen</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.776</td>
+  <td class="sc">0.796</td>
+  <td class="sc">0.751</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.776</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/reformation/reformation_ca98dc74edac/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Veranda Skirt</div>
+      <div class="ib">Reformation &middot; $148</div></td>
+  <td><span class="attr-chip">L2: <b>Skirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.794</td>
+  <td class="sc">0.850</td>
+  <td class="sc">0.727</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.794</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_4c808d79816f/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Shiny tweed shorts</div>
+      <div class="ib">Maje &middot; $365</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>wool</b></span> <span class="attr-chip">Shine: <b>shiny</b></span> <span class="attr-chip">Sil: <b>Flared</b></span></td>
+  <td class="sc">0.799</td>
+  <td class="sc">0.816</td>
+  <td class="sc">0.778</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.799</td>
+  <td><span class="ru">&uarr;2</span></td></tr>
+</table></div>
+<div class="catsec"><h3>outerwear (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_dda429a8b655/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Sequined wool cardigan</div>
+      <div class="ib">Maje &middot; $208</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>wool</b></span> <span class="attr-chip">Shine: <b>slight</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.802</td>
+  <td class="sc">0.845</td>
+  <td class="sc">0.750</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.802</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_0cf80593c234/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Cropped short sleeve cardigan</div>
+      <div class="ib">Maje &middot; $178</div></td>
+  <td><span class="attr-chip">L2: <b>Cardigan</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.799</td>
+  <td class="sc">0.841</td>
+  <td class="sc">0.748</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.799</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/dissh/dissh_a616831b5c73/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Liza Black Oversized Blazer</div>
+      <div class="ib">Dissh &middot; $249</div></td>
+  <td><span class="attr-chip">L2: <b>Blazer</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Oversized</b></span></td>
+  <td class="sc">0.771</td>
+  <td class="sc">0.858</td>
+  <td class="sc">0.665</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.771</td>
+  <td><span class="rd">&darr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/reformation/reformation_9cd044f77591/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Vintage Beatriz Suede Coat</div>
+      <div class="ib">Reformation &middot; $278</div></td>
+  <td><span class="attr-chip">L2: <b>Coat</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>leather</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.786</td>
+  <td class="sc">0.857</td>
+  <td class="sc">0.699</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.786</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>I) Cable Knit Sweater</h2>
+  <div class="d">Heavy cable knit should NOT get light sheer cardigan or another oversized chunky knit</div>
+  <div class="t">Tests: A1 light-over-heavy, E1 oversized+oversized, D1 knit matchy</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lee/lee_47f9a76e2fe9/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">Women&#x27;s Curved Hem Cable Knit Sweater</div>
+  <div style="color:#666;font-size:12px">Lee &middot; $35</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Sweater</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>knit</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>midlayer</b></span>
+<span class="attr-chip">Temp: <b>cold</b></span>
+<span class="attr-chip">Style: <b>Classic, Casual, Chic</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Regular</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="ok">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/c351f08c-05b1-4cd3-9434-b71700d30f46/original_0_d23b8a15.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Ray Corduroy Mini Skirt</div>
+      <div class="ib">Free People &middot; $15</div></td>
+  <td><span class="attr-chip">L2: <b>Skirt</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>corduroy</b></span> <span class="attr-chip">Sil: <b>A-Line</b></span></td>
+  <td class="sc">0.775</td>
+  <td class="sc">0.827</td>
+  <td class="sc">0.712</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.775</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/7c705d8d-605b-4ed5-93a5-bd7466ccf85d/original_0_3bbd81f7.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Velour Micro Shorts</div>
+      <div class="ib">Boohoo &middot; $25</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>velvet</b></span> <span class="attr-chip">Shine: <b>shiny</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.771</td>
+  <td class="sc">0.832</td>
+  <td class="sc">0.698</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.771</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/joes-jeans/joe&#x27;s_jeans_6beba17208ce/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">THE MARGOT HIGH RISE STRAIGHT</div>
+      <div class="ib">Joe&#x27;s Jeans &middot; $69</div></td>
+  <td><span class="attr-chip">L2: <b>Jean</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>denim</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.762</td>
+  <td class="sc">0.875</td>
+  <td class="sc">0.623</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.762</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/the-frankie-shop/the_frankie_shop_96e84f02ca7f/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Brisbane Knit Mini Shorts - Brown</div>
+      <div class="ib">The Frankie Shop &middot; $125</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>wool</b></span> <span class="attr-chip">Sil: <b>Regular</b></span></td>
+  <td class="sc">0.757</td>
+  <td class="sc">0.774</td>
+  <td class="sc">0.737</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.757</td>
+  <td><span class="rs">&mdash;</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+<div class="cs"><div class="ch">
+  <h2>J) Sweatshirt</h2>
+  <div class="d">Casual sweatshirt should NOT get silk/satin skirts, sequin pieces, or evening wear</div>
+  <div class="t">Tests: I1 hoodie+delicate, F2 satin+sweats, F1 party+casual</div>
+</div>
+<div class="sb"><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_84cdbe5f94b2/primary.jpg" style="width:100px;height:130px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"><div>
+  <div style="font-weight:600;font-size:14px">LIVI French Terry Short-Sleeve V-Neck Sweatshirt</div>
+  <div style="color:#666;font-size:12px">Lane Bryant &middot; $17</div>
+  <div class="sa">
+<span class="attr-chip">L2: <b>Sweatshirt</b></span>
+<span class="attr-chip">Formality: <b>Casual (1)</b></span>
+<span class="attr-chip">Fabric: <b>knit</b></span>
+<span class="attr-chip">Weight: <b>mid</b></span>
+<span class="attr-chip">Layer: <b>midlayer</b></span>
+<span class="attr-chip">Temp: <b>hot</b></span>
+<span class="attr-chip">Style: <b>Casual, Classic, Trendy</b></span>
+<span class="attr-chip">Pattern: <b>Solid</b></span>
+<span class="attr-chip">Silhouette: <b>Regular</b></span>
+
+</div></div></div>
+<div class="catsec"><h3>bottoms (4 items)</h3>
+<table><tr><th>#</th><th></th><th>Product</th><th>L2 / Attrs</th>
+<th>TATTOO</th><th>Compat</th><th>Cosine</th>
+<th>Avoid&nbsp;Adj</th><th>Rules</th><th>New&nbsp;TATTOO</th><th>&Delta;</th></tr>
+<tr class="pen">
+  <td class="rc">1</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/lane-bryant/lane_bryant_3047d906731f/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">LIVI Journey Relaxed Straight Pant</div>
+      <div class="ib">Lane Bryant &middot; $27</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.788</td>
+  <td class="sc">0.880</td>
+  <td class="sc">0.675</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.708</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="pen">
+  <td class="rc">2</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/universal-standard/universal_standard_a8bf66e0cbe0/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Varsity French Terry Pull On Pants</div>
+      <div class="ib">Universal Standard &middot; $40</div></td>
+  <td><span class="attr-chip">L2: <b>Pant</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>knit</b></span> <span class="attr-chip">Sil: <b>Straight</b></span></td>
+  <td class="sc">0.776</td>
+  <td class="sc">0.832</td>
+  <td class="sc">0.708</td>
+  <td><span class="pb" style="background:#e65100">-0.080</span></td>
+  <td><span class="rule-chip" title="Both oversized (non-outerwear)">E1</span></td>
+  <td class="sc" style="font-weight:700">0.696</td>
+  <td><span class="rd">&darr;2</span></td></tr>
+<tr class="ok">
+  <td class="rc">3</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_16cc8209e56e/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Plus Size Speckled Print Biker Shorts</div>
+      <div class="ib">Forever 21 &middot; $9</div></td>
+  <td><span class="attr-chip">L2: <b>Short</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>cotton</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.732</td>
+  <td class="sc">0.783</td>
+  <td class="sc">0.670</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.732</td>
+  <td><span class="ru">&uarr;1</span></td></tr>
+<tr class="ok">
+  <td class="rc">4</td>
+  <td><img src="https://usepose.s3.us-east-1.amazonaws.com/products/universal-standard/universal_standard_ac4ea8380ce4/primary.jpg" style="width:56px;height:72px;object-fit:cover;object-position:top;border-radius:8px;" loading="lazy" onerror="this.style.display='none'"></td>
+  <td><div class="in">Next-to-Naked Legging - Aventurine</div>
+      <div class="ib">Universal Standard &middot; $96</div></td>
+  <td><span class="attr-chip">L2: <b>Legging</b></span> <span class="attr-chip">Form: <b>1</b></span> <span class="attr-chip">Fab: <b>synthetic_woven</b></span> <span class="attr-chip">Sil: <b>Fitted</b></span></td>
+  <td class="sc">0.776</td>
+  <td class="sc">0.827</td>
+  <td class="sc">0.714</td>
+  <td><span class="pb" style="background:#2e7d32">+0.000</span></td>
+  <td></td>
+  <td class="sc" style="font-weight:700">0.776</td>
+  <td><span class="ru">&uarr;3</span></td></tr>
+</table></div>
+<div class="leg">
+<span style="background:#fce4ec;padding:2px 6px;border-radius:4px">Hard-filtered</span>
+<span style="background:#fff8e1;padding:2px 6px;border-radius:4px">Soft-penalized</span>
+<span style="background:#fff;padding:2px 6px;border-radius:4px;border:1px solid #eee">Clean</span>
+</div></div>
+</body></html>

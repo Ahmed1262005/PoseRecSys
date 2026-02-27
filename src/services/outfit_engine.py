@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 from supabase import Client
 
+from services.outfit_avoids import compute_avoid_penalties, filter_hard_avoids
+
 logger = logging.getLogger(__name__)
 
 
@@ -2453,6 +2455,13 @@ class OutfitEngine:
                 user_id, user_clusters,
             )
 
+        # 2c. Resolve user style tags for avoids overrides
+        user_styles: Optional[Set[str]] = None
+        if user_profile:
+            personas = user_profile.get("style_persona") or []
+            if personas:
+                user_styles = {s.lower().strip() for s in personas if s}
+
         # 3. State machine
         all_targets, status = get_complementary_targets(source_broad, source)
 
@@ -2485,6 +2494,7 @@ class OutfitEngine:
                     self._score_category,
                     source, source_broad, tb, status,
                     user_clusters, user_profile, profile_scorer,
+                    user_styles,
                 ): tb
                 for tb in target_broads
             }
@@ -2500,6 +2510,7 @@ class OutfitEngine:
                 scored_by_cat[tb] = self._score_category(
                     source, source_broad, tb, status,
                     user_clusters, user_profile, profile_scorer,
+                    user_styles,
                 )
 
         # Assemble results (preserve target_broads order)
@@ -2544,11 +2555,12 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.55*compat + 0.45*cosine + profile" if personalized
-                          else "0.55*compat + 0.45*cosine",
-                "engine": "tattoo_v2.2" if personalized else "tattoo_v2.1",
+                "fusion": "0.55*compat + 0.45*cosine + profile + avoids" if personalized
+                          else "0.55*compat + 0.45*cosine + avoids",
+                "engine": "tattoo_v2.3",
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
+                "avoids": True,
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -2593,6 +2605,13 @@ class OutfitEngine:
             user_clusters = self._resolve_user_clusters(user_profile)
             user_profile["_resolved_clusters"] = user_clusters
 
+        # Resolve user style tags for avoids overrides
+        user_styles: Optional[Set[str]] = None
+        if user_profile:
+            personas = user_profile.get("style_persona") or []
+            if personas:
+                user_styles = {s.lower().strip() for s in personas if s}
+
         # Retrieve via original get_similar_products (HNSW-friendly, in_stock,
         # no DISTINCT ON).  Falls back to get_similar_products_v2 if v1 absent.
         fetch_count = offset + limit + 60  # headroom for dedup
@@ -2636,7 +2655,7 @@ class OutfitEngine:
         profiles = _filter_by_gemini_category(source, profiles, source_broad)
         profiles = _deduplicate(profiles)
 
-        # Rank: cosine primary + optional profile boost
+        # Rank: cosine primary + optional profile boost + avoids
         scored = []
         for cand in profiles:
             cand.broad_category = _gemini_broad(cand.gemini_category_l1) or source_broad
@@ -2647,12 +2666,18 @@ class OutfitEngine:
                 cand_dict = _profile_to_scoring_dict(cand)
                 profile_adj = similar_scorer.score_item(cand_dict, user_profile)
 
-            score = cand.similarity + profile_adj
+            # Outfit avoids — soft penalty adjustment
+            avoid_adj, _triggered = compute_avoid_penalties(
+                source, cand, user_styles,
+            )
+
+            score = cand.similarity + profile_adj + avoid_adj
             scored.append({
                 "profile": cand, "compat": compat,
                 "tattoo": round(score, 4),
                 "cosine": cand.similarity, "dims": dims,
                 "profile_adjustment": round(profile_adj, 4),
+                "avoid_adjustment": round(avoid_adj, 4),
             })
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
@@ -2834,6 +2859,7 @@ class OutfitEngine:
         user_clusters: Optional[List[str]] = None,
         user_profile: Optional[dict] = None,
         profile_scorer: Optional[Any] = None,
+        user_styles: Optional[Set[str]] = None,
     ) -> List[Dict]:
         """Retrieve, filter, score candidates for one target category.
 
@@ -2945,8 +2971,19 @@ class OutfitEngine:
         if status == "activewear":
             profiles = _filter_activewear(profiles)
 
+        # --- Hard avoids filter ---
+        # Remove truly absurd combos (HF1-HF4) before scoring.
+        pre_count = len(profiles)
+        profiles = filter_hard_avoids(source, profiles, user_styles)
+        hard_removed = pre_count - len(profiles)
+        if hard_removed:
+            logger.info(
+                "Hard-avoids removed %d/%d candidates for %s",
+                hard_removed, pre_count, target_broad,
+            )
+
         # --- Complement fusion ---
-        # Formula:  tattoo = 0.55 * compat + 0.45 * cosine + profile_adj
+        # Formula:  tattoo = 0.55 * compat + 0.45 * cosine + profile_adj + avoid_adj
         # Balanced fusion: compat rules provide style-aware complement logic
         # (pattern contrast, fabric contrast, formality match) while cosine
         # ensures visual cohesion.  Cosine can't dominate because product
@@ -2973,10 +3010,17 @@ class OutfitEngine:
                 profile_adj = profile_scorer.score_item(cand_dict, user_profile)
                 tattoo += profile_adj
 
+            # Outfit avoids — soft penalty adjustment
+            avoid_adj, _triggered = compute_avoid_penalties(
+                source, cand, user_styles,
+            )
+            tattoo += avoid_adj
+
             scored.append({
                 "profile": cand, "compat": compat, "tattoo": tattoo,
                 "cosine": cosine, "novelty": novelty, "dims": dims,
                 "profile_adjustment": round(profile_adj, 4),
+                "avoid_adjustment": round(avoid_adj, 4),
             })
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
@@ -3024,6 +3068,8 @@ class OutfitEngine:
             result["novelty_score"] = round(entry["novelty"], 4)
         if entry.get("profile_adjustment"):
             result["profile_adjustment"] = entry["profile_adjustment"]
+        if entry.get("avoid_adjustment"):
+            result["avoid_adjustment"] = entry["avoid_adjustment"]
         return result
 
     def _format_similar_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
@@ -3044,6 +3090,8 @@ class OutfitEngine:
         }
         if entry.get("profile_adjustment"):
             result["profile_adjustment"] = entry["profile_adjustment"]
+        if entry.get("avoid_adjustment"):
+            result["avoid_adjustment"] = entry["avoid_adjustment"]
         return result
 
 
