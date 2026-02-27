@@ -30,6 +30,7 @@ from services.outfit_avoids import (
     _check_G1, _check_G2, _check_G3,
     _check_I1, _check_I2, _check_I3, _check_I4,
     _check_J1, _check_J2,
+    _check_K1,
 )
 
 
@@ -859,3 +860,123 @@ class TestTriggeredRulesOutput:
         penalty, triggered = compute_avoid_penalties(_casual_top(), _denim_jeans())
         assert triggered == []
         assert penalty == 0.0
+
+
+# =========================================================================
+# K1: STYLE-TAG COHERENCE (refined vs sporty world clash)
+# =========================================================================
+
+class TestK1StyleCoherence:
+
+    def test_refined_source_sporty_candidate(self):
+        """Classic/Chic jeans + Sporty tracksuit top → penalty."""
+        src = _p(style_tags=["Classic", "Casual", "Chic"])
+        cand = _p(style_tags=["Sporty", "Casual", "Streetwear"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_sporty_source_refined_candidate(self):
+        """Sporty joggers + Chic blouse → penalty (bidirectional)."""
+        src = _p(style_tags=["Sporty", "Casual"])
+        cand = _p(style_tags=["Classic", "Chic", "Elegant"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_bridge_item_no_penalty(self):
+        """Candidate has both Sporty and Chic → bridge item, no penalty."""
+        src = _p(style_tags=["Classic", "Chic"])
+        cand = _p(style_tags=["Sporty", "Chic"])  # bridge
+        assert _check_K1(src, cand) == 0.0
+
+    def test_both_refined_no_penalty(self):
+        """Both items refined → no clash."""
+        src = _p(style_tags=["Classic", "Chic"])
+        cand = _p(style_tags=["Elegant", "Minimalist"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_both_sporty_no_penalty(self):
+        """Both items sporty → no clash."""
+        src = _p(style_tags=["Sporty", "Streetwear"])
+        cand = _p(style_tags=["Sporty", "Casual"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_neutral_only_no_penalty(self):
+        """Only neutral tags (Casual, Trendy) → no clash."""
+        src = _p(style_tags=["Casual", "Trendy"])
+        cand = _p(style_tags=["Casual", "Modern"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_empty_styles_no_penalty(self):
+        """Missing style tags → no crash, no penalty."""
+        src = _p(style_tags=[])
+        cand = _p(style_tags=["Sporty"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_none_styles_no_penalty(self):
+        """None style tags → no crash, no penalty."""
+        src = _p(style_tags=None)
+        cand = _p(style_tags=["Classic", "Chic"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_case_insensitive(self):
+        """Style tags are case-insensitive."""
+        src = _p(style_tags=["CLASSIC", "Chic"])
+        cand = _p(style_tags=["sporty", "STREETWEAR"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_romantic_vs_sporty(self):
+        """Romantic (refined) + Sporty → penalty."""
+        src = _p(style_tags=["Romantic", "Bohemian"])
+        cand = _p(style_tags=["Sporty"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_glamorous_vs_streetwear(self):
+        """Glamorous (refined) + Streetwear (sporty) → penalty."""
+        src = _p(style_tags=["Glamorous", "Party"])
+        cand = _p(style_tags=["Streetwear", "Trendy"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_minimalist_vs_sporty(self):
+        """Minimalist (refined) + Sporty → penalty."""
+        src = _p(style_tags=["Minimalist"])
+        cand = _p(style_tags=["Sporty"])
+        assert _check_K1(src, cand) == -0.06
+
+    def test_edgy_is_neutral(self):
+        """Edgy is neutral — doesn't count as refined or sporty."""
+        src = _p(style_tags=["Edgy"])  # neutral only
+        cand = _p(style_tags=["Sporty"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_bohemian_is_neutral(self):
+        """Bohemian is neutral — doesn't count as refined or sporty."""
+        src = _p(style_tags=["Bohemian"])  # neutral only
+        cand = _p(style_tags=["Sporty"])
+        assert _check_K1(src, cand) == 0.0
+
+    def test_k1_in_compute_penalties(self):
+        """K1 fires through the full compute_avoid_penalties pipeline."""
+        src = _p(style_tags=["Classic", "Chic", "Casual"])
+        cand = _p(style_tags=["Sporty", "Streetwear", "Casual"])
+        penalty, triggered = compute_avoid_penalties(src, cand)
+        assert "K1" in triggered
+        assert penalty <= -0.06
+
+    def test_k1_override_by_streetwear(self):
+        """Streetwear user style reduces K1 to 30%."""
+        src = _p(style_tags=["Classic", "Chic"])
+        cand = _p(style_tags=["Sporty", "Streetwear"])
+        penalty, triggered = compute_avoid_penalties(
+            src, cand, user_styles={"streetwear"},
+        )
+        assert "K1" in triggered
+        # -0.06 * 0.3 = -0.018
+        assert -0.02 < penalty < 0.0
+
+    def test_k1_override_by_athleisure(self):
+        """Athleisure user style reduces K1 to 30%."""
+        src = _p(style_tags=["Classic", "Elegant"])
+        cand = _p(style_tags=["Sporty"])
+        penalty, triggered = compute_avoid_penalties(
+            src, cand, user_styles={"athleisure"},
+        )
+        assert "K1" in triggered
+        assert -0.02 < penalty < 0.0

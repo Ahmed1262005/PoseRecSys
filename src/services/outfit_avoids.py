@@ -90,24 +90,31 @@ _STATEMENT_PRINTS: Set[str] = {
 
 _NEON_SIGNALS: Set[str] = {"neon", "electric", "fluorescent", "hot pink", "lime"}
 
+# Style-world groups for K1 coherence check
+_REFINED_STYLES: Set[str] = {
+    "classic", "chic", "elegant", "glamorous", "romantic",
+    "preppy", "minimalist", "formal",
+}
+_SPORTY_STYLES: Set[str] = {"sporty", "streetwear"}
+
 # ============================================================================
 # Style-override mappings
 # ============================================================================
 
 # style-tag → set of rule IDs whose penalty is reduced to 30 %
 _STYLE_OVERRIDES: Dict[str, Set[str]] = {
-    "streetwear":    {"E1", "E3", "HF1"},
+    "streetwear":    {"E1", "E3", "HF1", "K1"},
     "edgy":          {"F3", "B1", "HF2"},
     "punk":          {"F3", "B1", "HF2"},
     "grunge":        {"F3", "B1", "HF2"},
-    "athleisure":    {"C1", "C2", "HF3"},
-    "sporty chic":   {"C1", "C2", "HF3"},
+    "athleisure":    {"C1", "C2", "HF3", "K1"},
+    "sporty chic":   {"C1", "C2", "HF3", "K1"},
     "avant-garde":   {"E1", "E2", "E3"},
     "experimental":  {"E1", "E2", "E3"},
-    "eclectic":      {"J1", "B1", "HF1"},
+    "eclectic":      {"J1", "B1", "HF1", "K1"},
     "maximalist":    {"J1", "B1", "HF1"},
     "monochrome":    {"D1"},
-    "high-low":      {"B1", "HF1", "HF2"},
+    "high-low":      {"B1", "HF1", "HF2", "K1"},
 }
 
 _OVERRIDE_MULTIPLIER: float = 0.3   # penalty × 0.3 when overridden
@@ -660,6 +667,37 @@ def _check_J2(src: "AestheticProfile", cand: "AestheticProfile") -> float:
     return 0.0
 
 
+# --- K: Style-tag coherence -----------------------------------------------
+
+def _check_K1(src: "AestheticProfile", cand: "AestheticProfile") -> float:
+    """Refined-world vs sporty-world style clash.
+
+    Fires when one item's style tags are purely in the REFINED world
+    (Classic, Chic, Elegant, etc.) and the other's are purely in the
+    SPORTY world (Sporty, Streetwear), with no cross-world bridging.
+    Items tagged in both worlds (e.g. "Sporty Chic") are bridge items
+    and do NOT trigger.  Neutral tags (Casual, Trendy, Modern, etc.)
+    are ignored for this check.
+    """
+    src_styles = _style_set(src)
+    cand_styles = _style_set(cand)
+    if not src_styles or not cand_styles:
+        return 0.0
+
+    src_refined = src_styles & _REFINED_STYLES
+    src_sporty = src_styles & _SPORTY_STYLES
+    cand_refined = cand_styles & _REFINED_STYLES
+    cand_sporty = cand_styles & _SPORTY_STYLES
+
+    # Source purely refined, candidate purely sporty
+    if src_refined and not src_sporty and cand_sporty and not cand_refined:
+        return -0.06
+    # Source purely sporty, candidate purely refined
+    if src_sporty and not src_refined and cand_refined and not cand_sporty:
+        return -0.06
+    return 0.0
+
+
 # ============================================================================
 # Soft-rule registry
 # ============================================================================
@@ -696,6 +734,8 @@ _SOFT_RULES: List[Tuple[str, Callable]] = [
     # J: Color / print
     ("J1", _check_J1),
     ("J2", _check_J2),
+    # K: Style-tag coherence
+    ("K1", _check_K1),
 ]
 
 
