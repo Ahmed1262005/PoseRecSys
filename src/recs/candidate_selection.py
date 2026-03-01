@@ -688,6 +688,155 @@ class CandidateSelectionModule:
 
         return scored_candidates
 
+    # =========================================================
+    # Sorted Feed Candidate Retrieval (price_asc / price_desc)
+    # =========================================================
+
+    def get_candidates_sorted_keyset(
+        self,
+        user_state: UserState,
+        gender: str = "female",
+        sort_mode: str = "price_asc",
+        cursor_value: Optional[float] = None,
+        cursor_id: Optional[str] = None,
+        page_size: int = 50,
+        exclude_ids: Optional[Set[str]] = None,
+        article_types: Optional[List[str]] = None,
+        on_sale_only: bool = False,
+        new_arrivals_only: bool = False,
+        new_arrivals_days: int = 7,
+        include_materials: Optional[List[str]] = None,
+        # Attribute filters (same as get_candidates_keyset)
+        attr_include_formality: Optional[List[str]] = None,
+        attr_exclude_formality: Optional[List[str]] = None,
+        attr_include_seasons: Optional[List[str]] = None,
+        attr_exclude_seasons: Optional[List[str]] = None,
+        attr_include_style_tags: Optional[List[str]] = None,
+        attr_exclude_style_tags: Optional[List[str]] = None,
+        attr_include_color_family: Optional[List[str]] = None,
+        attr_exclude_color_family: Optional[List[str]] = None,
+        attr_include_silhouette: Optional[List[str]] = None,
+        attr_exclude_silhouette: Optional[List[str]] = None,
+        attr_include_fit_type: Optional[List[str]] = None,
+        attr_exclude_fit_type: Optional[List[str]] = None,
+        attr_include_coverage: Optional[List[str]] = None,
+        attr_exclude_coverage: Optional[List[str]] = None,
+        attr_include_pattern: Optional[List[str]] = None,
+        attr_exclude_pattern: Optional[List[str]] = None,
+        attr_include_neckline: Optional[List[str]] = None,
+        attr_exclude_neckline: Optional[List[str]] = None,
+        attr_include_sleeve_type: Optional[List[str]] = None,
+        attr_exclude_sleeve_type: Optional[List[str]] = None,
+        attr_include_length: Optional[List[str]] = None,
+        attr_exclude_length: Optional[List[str]] = None,
+        attr_include_occasions: Optional[List[str]] = None,
+        attr_exclude_occasions: Optional[List[str]] = None,
+    ) -> List[Candidate]:
+        """
+        Get candidates sorted by price (ASC or DESC) for the sorted feed path.
+
+        Uses the ``get_feed_sorted_keyset`` SQL RPC which applies all the same
+        filters as the exploration path but orders by ``price`` instead of a
+        random hash.  The ``exploration_score`` return column is repurposed to
+        hold the price value so the cursor system works unchanged.
+
+        Scoring and reranking are skipped by the caller — candidates are
+        returned in database sort order (cheapest-first or most-expensive-first).
+
+        Args:
+            sort_mode: ``"price_asc"`` or ``"price_desc"``
+            cursor_value: Price of the last item on the previous page (or None).
+            cursor_id: UUID of the last item on the previous page (or None).
+            (remaining args identical to get_candidates_keyset)
+
+        Returns:
+            List of Candidate objects in the requested price order.
+        """
+        hard_filters = HardFilters.from_user_state(user_state, gender)
+
+        # Prepare exclude_product_ids for SQL-level exclusion
+        sql_exclude_ids = None
+        overflow_exclude_ids = None
+        if exclude_ids:
+            exclude_list = list(exclude_ids)
+            if len(exclude_list) <= self.SQL_EXCLUDE_IDS_LIMIT:
+                sql_exclude_ids = exclude_list
+            else:
+                sql_exclude_ids = exclude_list[: self.SQL_EXCLUDE_IDS_LIMIT]
+                overflow_exclude_ids = set(exclude_list[self.SQL_EXCLUDE_IDS_LIMIT :])
+
+        try:
+            params = {
+                "p_sort_mode": sort_mode,
+                "filter_gender": hard_filters.gender,
+                "filter_categories": hard_filters.categories,
+                "exclude_colors": hard_filters.exclude_colors,
+                "exclude_materials": hard_filters.exclude_materials,
+                "exclude_brands": hard_filters.exclude_brands,
+                "min_price": hard_filters.min_price,
+                "max_price": hard_filters.max_price,
+                "cursor_value": cursor_value,
+                "cursor_id": cursor_id,
+                "p_limit": page_size,
+                "exclude_styles": hard_filters.exclude_styles,
+                "include_occasions": None,
+                "include_article_types": None,
+                "style_threshold": 0.25,
+                "occasion_threshold": 0.18,
+                "include_patterns": None,
+                "exclude_patterns": None,
+                "pattern_threshold": 0.30,
+                "on_sale_only": on_sale_only,
+                "new_arrivals_only": new_arrivals_only,
+                "new_arrivals_days": new_arrivals_days,
+                "exclude_product_ids": sql_exclude_ids,
+                "include_materials": include_materials,
+                # Attribute filters via product_attributes JOIN
+                "attr_include_formality": attr_include_formality,
+                "attr_exclude_formality": attr_exclude_formality,
+                "attr_include_seasons": attr_include_seasons,
+                "attr_exclude_seasons": attr_exclude_seasons,
+                "attr_include_style_tags": attr_include_style_tags,
+                "attr_exclude_style_tags": attr_exclude_style_tags,
+                "attr_include_color_family": attr_include_color_family,
+                "attr_exclude_color_family": attr_exclude_color_family,
+                "attr_include_silhouette": attr_include_silhouette,
+                "attr_exclude_silhouette": attr_exclude_silhouette,
+                "attr_include_fit_type": attr_include_fit_type,
+                "attr_exclude_fit_type": attr_exclude_fit_type,
+                "attr_include_coverage": attr_include_coverage,
+                "attr_exclude_coverage": attr_exclude_coverage,
+                "attr_include_pattern": attr_include_pattern,
+                "attr_exclude_pattern": attr_exclude_pattern,
+                "attr_include_neckline": attr_include_neckline,
+                "attr_exclude_neckline": attr_exclude_neckline,
+                "attr_include_sleeve_type": attr_include_sleeve_type,
+                "attr_exclude_sleeve_type": attr_exclude_sleeve_type,
+                "attr_include_length": attr_include_length,
+                "attr_exclude_length": attr_exclude_length,
+                "attr_include_occasions": attr_include_occasions,
+                "attr_exclude_occasions": attr_exclude_occasions,
+            }
+
+            print(f"[CandidateSelection] Sorted feed: sort_mode={sort_mode}, cursor_value={cursor_value}")
+
+            result = self.supabase.rpc("get_feed_sorted_keyset", params).execute()
+            candidates = [
+                self._row_to_candidate(row, source="sorted_feed")
+                for row in (result.data or [])
+            ]
+
+            # Python fallback: filter overflow exclude_ids
+            if overflow_exclude_ids:
+                candidates = [c for c in candidates if c.item_id not in overflow_exclude_ids]
+
+            # Enrich with product_attributes
+            return self._enrich_with_attributes(candidates)
+
+        except Exception as e:
+            print(f"[CandidateSelection] Error in sorted keyset retrieval: {e}")
+            return []
+
     def _retrieve_by_taste_vector_keyset(
         self,
         taste_vector: List[float],

@@ -41,20 +41,37 @@ class KeysetCursor:
 
     Instead of tracking seen_ids array (O(n) exclusion), we use a cursor
     based on the last item's (score, id) for constant-time pagination.
+
+    The ``sort_mode`` field records which sort dimension the ``score``
+    value belongs to:
+    - ``"relevance"``  -> score = exploration_score (random hash float)
+    - ``"price_asc"``  -> score = price of the last item
+    - ``"price_desc"`` -> score = price of the last item
+
+    If a subsequent request uses a different ``sort_by`` than what is
+    stored in the cursor, the cursor is invalidated and pagination
+    resets to page 1.
     """
     score: float
     item_id: str
     page: int = 0  # Page number for reference
+    sort_mode: str = "relevance"  # relevance | price_asc | price_desc
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"score": self.score, "item_id": self.item_id, "page": self.page}
+        return {
+            "score": self.score,
+            "item_id": self.item_id,
+            "page": self.page,
+            "sort_mode": self.sort_mode,
+        }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "KeysetCursor":
         return cls(
             score=float(data.get("score", 0.0)),
             item_id=str(data.get("item_id", "")),
-            page=int(data.get("page", 0))
+            page=int(data.get("page", 0)),
+            sort_mode=str(data.get("sort_mode", "relevance")),
         )
 
     def encode(self) -> str:
@@ -671,7 +688,14 @@ class SessionStateService:
             return state.cursor
         return None
 
-    def set_cursor(self, session_id: str, score: float, item_id: str, page: int = 0):
+    def set_cursor(
+        self,
+        session_id: str,
+        score: float,
+        item_id: str,
+        page: int = 0,
+        sort_mode: str = "relevance",
+    ):
         """
         Set the keyset cursor for this session.
 
@@ -679,12 +703,14 @@ class SessionStateService:
 
         Args:
             session_id: Session identifier
-            score: Score of the last item returned
+            score: Score of the last item returned (exploration_score for
+                   relevance, price for price sorts)
             item_id: ID of the last item returned
             page: Current page number
+            sort_mode: Sort mode this cursor belongs to (relevance, price_asc, price_desc)
         """
         state = self._backend.get_or_create_session(session_id)
-        state.cursor = KeysetCursor(score=score, item_id=item_id, page=page)
+        state.cursor = KeysetCursor(score=score, item_id=item_id, page=page, sort_mode=sort_mode)
         self._backend.update_session(state)
 
     def get_cursor_encoded(self, session_id: str) -> Optional[str]:

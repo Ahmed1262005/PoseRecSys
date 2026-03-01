@@ -400,32 +400,110 @@ VOCABULARY TRANSLATION:
 
 ## SECTION 9: FOLLOW-UP QUESTIONS
 
-For vague or ambiguous queries, generate 1-3 contextual follow-up questions that would help
-refine the search. Only include questions where the user's intent is genuinely unclear.
+**Goal:** For vague or under-specified queries, generate 1-3 contextual follow-up questions that
+materially reduce ambiguity and improve retrieval quality. Only ask follow-ups when the missing
+info would meaningfully change the results.
 
-Each follow-up has:
-- "dimension": one of "formality", "coverage", "price", "garment_type", "color", "occasion"
+**Output:** Return a JSON array in the key "follow_ups".
+Each follow-up object has:
+- "dimension": one of ["garment_type", "occasion", "formality", "vibe", "coverage", "price", "color"]
 - "question": natural, conversational question text specific to THIS query
-- "options": 2-4 choices, each with "label" (display text) and "filters" (filter updates to apply)
+- "options": 2-4 choices, each with:
+  - "label": 2-5 words (symbols allowed like "$50-$100")
+  - "filters": a filter PATCH to apply
 
-The "filters" object uses the same keys as the attributes section (category_l1, colors, formality,
-max_price, min_price, occasions, fit_type, sleeve_type, length, neckline, materials, patterns,
-style_tags, modes). "modes" is a special key that adds mode tags.
+If the query is specific enough that no follow-ups are needed, return: "follow_ups": []
 
-RULES:
-- Only generate follow-ups when the query is genuinely ambiguous. "red midi dress" → no follow-ups.
-  "something cute for this weekend" → yes, 2-3 follow-ups.
-- Do NOT ask about things the user already specified. "office dress" → don't ask about occasion.
-- Questions must be SPECIFIC to the query, not generic. Not "What's your budget?" but
-  "What price range works for your date night outfit?"
-- Each option's filters should be ADDITIVE to the existing search plan (merged on top).
-- Keep options concise: 2-5 words per label.
-- For the "price" dimension, use min_price/max_price in filters.
-- For the "coverage" dimension, use modes (e.g. {{"modes": ["cover_arms", "cover_chest"]}}).
-- For "formality", use formality values (e.g. {{"formality": ["Smart Casual"]}}).
-- For "garment_type", use category_l1 (e.g. {{"category_l1": ["Dresses"]}}).
-- For "color", use colors (e.g. {{"colors": ["Black", "Navy Blue"]}}).
-- For "occasion", use occasions (e.g. {{"occasions": ["Date Night"]}}).
+**Allowed filter keys (STRICT):**
+The "filters" object MUST only use these keys:
+category_l1, colors, formality, min_price, max_price, occasions, fit_type, sleeve_type,
+length, neckline, materials, patterns, style_tags, modes.
+
+**Canonical values (STRICT):**
+Values must come from the taxonomy in Section 4 above. Do NOT invent new enum values.
+
+**"modes" is COVERAGE-ONLY (IMPORTANT):**
+modes is reserved strictly for coverage/modesty constraints (e.g. "cover_arms", "cover_chest",
+"cover_legs", "cover_midriff", "fully_covered"). Do NOT put vibes or formality concepts in modes.
+
+**Merge semantics (CRITICAL):**
+Each option's "filters" is a PATCH applied on top of the existing search plan. Follow-ups NARROW,
+not widen:
+
+1) Overwrite keys (single-choice narrowing): category_l1, formality, min_price, max_price
+2) Replace keys (do NOT union; choose one path): colors, occasions, style_tags, materials,
+   patterns, modes, fit_type, sleeve_type, length, neckline
+3) Price tightening: If an existing min_price/max_price already exists, the new bounds MUST
+   tighten or stay within it. Never widen.
+
+### When to ask follow-ups (Ambiguity rubric)
+
+Do NOT ask follow-ups if the query already includes enough constraints to narrow results.
+Examples: "red midi dress", "black blazer for work", "long sleeve modest maxi dress under $120" → follow_ups: []
+
+Ask follow-ups when the query is under-specified such that results would be broad or mixed.
+Generate 1-3 follow-ups when ANY of the triggers below apply, choosing the highest-lift
+missing dimensions.
+
+**Trigger A — Broad category only (IMPORTANT):**
+If the query is ONLY a broad category/category_l1 with no other constraints (e.g. "tops",
+"dresses", "pants", "jeans", "jackets", "skirts", "sweaters"):
+- ALWAYS generate 2-3 follow-ups.
+- Priority: 1) occasion OR formality (choose ONE), 2) vibe, 3) coverage OR a concrete
+  attribute if it maps directly (preferred for categories like tops/jeans)
+
+**Trigger B — Occasion/outfit intent without an anchor:**
+If the query implies an occasion/outfit but does NOT specify a garment anchor or category_l1.
+Examples: "outfit for a date", "something for a family gathering", "vacation outfits"
+- Ask garment_type first, then occasion OR formality, then vibe if still vague.
+
+**Trigger C — Vague descriptors:**
+If the query uses broad adjectives without constraints (e.g. "cute", "nice", "hot", "elegant",
+"put together") and lacks an occasion/formality/style direction:
+- Ask vibe (high lift), then occasion OR formality next if needed.
+
+**Trigger D — Coverage/modesty ambiguity:**
+Ask coverage ONLY if: the query mentions modesty/coverage, or user context indicates a covered
+preference, or the category commonly benefits from coverage refinement AND the query is broad.
+
+**Trigger E — Price ambiguity:**
+Ask price ONLY if: the query mentions budget sensitivity ("cheap", "affordable", "designer"),
+or user context provides budget AND the query is very broad (especially Trigger A).
+
+**Trigger F — Color ambiguity:**
+Ask color ONLY if: the user explicitly asked for a color, or color is central to the request.
+
+### How many follow-ups
+- Max 3 total.
+- If Trigger A (broad category) applies, return 2-3 follow-ups.
+- Otherwise, return 1-3 depending on how many high-signal dimensions are missing.
+
+### Priority order (pick highest expected lift first)
+1) garment_type (only if no clear garment/category anchor exists)
+2) occasion OR formality (choose ONE unless extremely vague)
+3) vibe
+4) a concrete attribute that maps directly to filters (preferred over abstract coverage):
+   - for tops: sleeve_type, neckline
+   - for jeans/pants: length, fit_type
+   - for dresses: length, sleeve_type, neckline
+5) coverage (modes) when relevant (see Trigger D)
+6) price (see Trigger E)
+7) color (see Trigger F)
+
+### Rules
+- Do NOT ask about anything already specified in the query or the existing plan.
+- For "occasion OR formality": choose the one that will narrow more for this query.
+  Event-like queries ("wedding guest", "work", "funeral") → occasion is often enough.
+  General lifestyle queries ("outfits for my new job") → formality often clarifies more.
+- Prefer concrete attribute follow-ups over coverage when there is no explicit modesty signal.
+- Garment type: prefer single-item anchors (Dresses / Tops / Bottoms / Outerwear) over
+  multi-item options like "Top & bottoms".
+- Questions must be specific to the query context (not generic).
+  Bad: "What's your budget?" Good: "What price range works for your date-night look?"
+- Options must be meaningfully distinct and map cleanly to filters.
+- Avoid judgmental or stereotype-y labels. Use neutral language.
+
+### Examples
 
 Example for "something for a night out":
 ```json
@@ -434,56 +512,55 @@ Example for "something for a night out":
     "dimension": "formality",
     "question": "How dressed up do you want to be?",
     "options": [
-      {{"label": "Casual & fun", "filters": {{"formality": ["Casual"], "modes": ["casual"]}}}},
-      {{"label": "Sexy & glam", "filters": {{"formality": ["Semi-Formal"], "modes": ["glamorous"]}}}},
-      {{"label": "Elegant & classy", "filters": {{"formality": ["Formal"], "modes": ["very_formal"]}}}}
+      {{"label": "Casual", "filters": {{"formality": ["Casual"]}}}},
+      {{"label": "Smart casual", "filters": {{"formality": ["Smart Casual"]}}}},
+      {{"label": "Dressy", "filters": {{"formality": ["Semi-Formal"]}}}},
+      {{"label": "Formal", "filters": {{"formality": ["Formal"]}}}}
     ]
   }},
   {{
-    "dimension": "garment_type",
-    "question": "What type of outfit are you thinking?",
+    "dimension": "vibe",
+    "question": "What vibe are you going for?",
     "options": [
-      {{"label": "A dress", "filters": {{"category_l1": ["Dresses"]}}}},
-      {{"label": "Top & bottoms", "filters": {{"category_l1": ["Tops", "Bottoms"]}}}},
-      {{"label": "A jumpsuit", "filters": {{"category_l2": ["Jumpsuit", "Jumpsuits"]}}}}
+      {{"label": "Glamorous", "filters": {{"style_tags": ["Glamorous"]}}}},
+      {{"label": "Edgy", "filters": {{"style_tags": ["Edgy"]}}}},
+      {{"label": "Romantic", "filters": {{"style_tags": ["Romantic"]}}}},
+      {{"label": "Minimal", "filters": {{"style_tags": ["Minimalist"]}}}}
     ]
   }}
 ]
 ```
 
-If the query is specific enough that no follow-ups are needed, return an empty array: "follow_ups": []
-
-Add follow_ups to your JSON output alongside intent, algolia_query, etc.
+Example for "red midi dress":
+```json
+"follow_ups": []
+```
 
 ## SECTION 10: PERSONALIZED FOLLOW-UPS (when user context is provided)
 
-When a [User context: ...] prefix is present before the query, use it to personalize follow-ups:
+When a "User context:" prefix is present, personalize follow-ups as follows:
 
-1. **Reorder options** so the most likely choice for this user is FIRST:
-   - A Gen-Z user searching "outfit for a night out" → "Sexy & glam" first, not "Elegant & classy".
-   - An Established user searching "outfit for a night out" → "Elegant & classy" first.
-   - A user with brand_affinity "Ultra-Fast Fashion" → budget options first.
-   - A user with brand_affinity "Premium Contemporary" → mid/premium options first.
+1. **Reorder options** so the most likely choice for this user is FIRST.
+   - Prefer behavior-based evidence (clicks/saves/history) over demographics.
+   - If no strong evidence exists, use "most popular first" defaults.
 
-2. **Calibrate price ranges** to the user's actual budget:
-   - If user context says price=$15-$80, price follow-up options should be "Under $30" / "$30-$60" / "$60+".
-   - If user context says price=$80-$300, options should be "Under $100" / "$100-$200" / "$200+".
-   - Never suggest price ranges far outside the user's range.
+2. **Calibrate price options** to the user's typical range (if budget is known).
+   - Use 3 bands that partition their range.
+     Example: user range $15-$80 → "Under $30" / "$30-$60" / "$60+"
+     Example: user range $80-$300 → "Under $100" / "$100-$200" / "$200+"
+   - Never suggest ranges far outside the user's range.
 
-3. **Adjust style/occasion for age group**:
-   - gen_z/young_adult: prioritize "Party", "Festival", "Night Out", "Casual & fun" options
-   - mid_career/established: prioritize "Work", "Dinner", "Wedding Guest", "Polished" options
-   - Modesty context: if modesty=covered, put coverage-related options higher; if modesty=balanced, keep default order
+3. **Coverage ordering:**
+   - If modesty=covered, put coverage-friendly options first.
+   - If modesty=balanced, keep default ordering.
 
-4. **Match garment types to style persona**:
-   - style=bohemian → suggest flowy dresses, layered looks
-   - style=minimalist → suggest clean silhouettes, structured pieces
-   - style=trendy → suggest trending cuts, statement pieces
+4. **Match vibe/style ordering** to user preferences.
+   - If user commonly prefers minimalist, reorder vibe options to put "Minimal" first.
+   - If user prefers boho, reorder to put "Bohemian" first (must be canonical style_tags values).
 
-5. **Do NOT filter out options** — still show all relevant choices, just reorder them.
-   The user can always pick any option. Personalization only affects DEFAULT ordering.
-
-6. **If no user context is provided**, generate follow-ups in the default order (most popular first).
+5. **Do NOT remove options** — only reorder them.
+6. **Skip follow-up questions** already answered by user context or the query.
+7. **If no user context is provided**, generate follow-ups in the default order (most popular first).
 
 Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
 

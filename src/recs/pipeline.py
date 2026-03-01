@@ -30,6 +30,7 @@ from recs.models import (
     FeedRequest,
     FeedResponse,
     FeedItem,
+    FeedSortBy,
     HardFilters,
 )
 from recs.candidate_selection import CandidateSelectionModule, CandidateSelectionConfig, expand_occasions
@@ -50,6 +51,7 @@ from recs.session_scoring import (
 from recs.feed_reranker import (
     GreedyConstrainedReranker,
     get_feed_reranker,
+    apply_sort_diversity,
 )
 from scoring import ContextScorer, ContextResolver, UserContext
 
@@ -478,6 +480,10 @@ class RecommendationPipeline:
         exclude_materials: Optional[List[str]] = None,
         exclude_occasions: Optional[List[str]] = None,
         debug: bool = False,
+        # ============================================================
+        # Sort mode (relevance | price_asc | price_desc)
+        # ============================================================
+        sort_by: FeedSortBy = FeedSortBy.RELEVANCE,
     ) -> Dict[str, Any]:
         """
         Generate feed using keyset cursor for O(1) pagination.
@@ -488,6 +494,10 @@ class RecommendationPipeline:
         3. Feed versioning for stable ordering within session
         4. Still tracks seen items for authoritative dedup
         5. Lifestyle filtering (styles_to_avoid, occasions)
+
+        When ``sort_by`` is not RELEVANCE, the full scoring/reranking pipeline
+        is skipped and candidates are returned in deterministic price order
+        with light brand diversity applied.
 
         Args:
             user_id: Logged-in user UUID
@@ -500,12 +510,74 @@ class RecommendationPipeline:
             include_occasions: Optional list of occasions to include (casual, office, evening, beach)
             cursor: Base64 encoded keyset cursor (None for first page)
             page_size: Items per page (default 50)
+            sort_by: Sort mode — RELEVANCE (default), PRICE_ASC, or PRICE_DESC
 
         Returns:
             Dict with results, cursor, pagination, and session_id
         """
         from recs.session_state import KeysetCursor
         import hashlib
+
+        # ---------------------------------------------------------------
+        # Sort-mode dispatch: non-relevance sorts use a dedicated fast path
+        # that skips scoring/reranking to preserve deterministic order.
+        # ---------------------------------------------------------------
+        if sort_by != FeedSortBy.RELEVANCE:
+            return self._get_feed_sorted(
+                sort_by=sort_by,
+                user_id=user_id,
+                anon_id=anon_id,
+                session_id=session_id,
+                gender=gender,
+                categories=categories,
+                article_types=article_types,
+                exclude_styles=exclude_styles,
+                include_occasions=include_occasions,
+                min_price=min_price,
+                max_price=max_price,
+                exclude_brands=exclude_brands,
+                preferred_brands=preferred_brands,
+                exclude_colors=exclude_colors,
+                include_colors=include_colors,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                fit=fit,
+                length=length,
+                sleeves=sleeves,
+                neckline=neckline,
+                rise=rise,
+                cursor=cursor,
+                page_size=page_size,
+                on_sale_only=on_sale_only,
+                new_arrivals_only=new_arrivals_only,
+                new_arrivals_days=new_arrivals_days,
+                include_formality=include_formality,
+                exclude_formality=exclude_formality,
+                include_seasons=include_seasons,
+                exclude_seasons=exclude_seasons,
+                include_style_tags=include_style_tags,
+                exclude_style_tags=exclude_style_tags,
+                include_color_family=include_color_family,
+                exclude_color_family=exclude_color_family,
+                include_silhouette=include_silhouette,
+                exclude_silhouette=exclude_silhouette,
+                include_fit=include_fit,
+                exclude_fit=exclude_fit,
+                include_length=include_length,
+                exclude_length=exclude_length,
+                include_sleeves=include_sleeves,
+                exclude_sleeves=exclude_sleeves,
+                include_neckline=include_neckline,
+                exclude_neckline=exclude_neckline,
+                include_rise=include_rise,
+                exclude_rise=exclude_rise,
+                include_coverage=include_coverage,
+                exclude_coverage=exclude_coverage,
+                include_materials=include_materials,
+                exclude_materials=exclude_materials,
+                exclude_occasions=exclude_occasions,
+                debug=debug,
+            )
 
         # Session ID logic:
         # - If session_id provided: use it (explicit session tracking)
@@ -1075,6 +1147,7 @@ class RecommendationPipeline:
             "user_id": user_id or anon_id or "anonymous",
             "session_id": session_id,
             "cursor": next_cursor,
+            "sort_by": FeedSortBy.RELEVANCE.value,
             "strategy": strategy,
             "results": results,
             "pagination": {
@@ -1145,6 +1218,397 @@ class RecommendationPipeline:
     def clear_session(self, session_id: str):
         """Clear a session (reset seen items)."""
         self.session_service.clear_session(session_id)
+
+    # =========================================================
+    # Sorted Feed (price_asc / price_desc fast path)
+    # =========================================================
+
+    def _get_feed_sorted(
+        self,
+        sort_by: FeedSortBy,
+        user_id: Optional[str] = None,
+        anon_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        gender: str = "female",
+        categories: Optional[List[str]] = None,
+        article_types: Optional[List[str]] = None,
+        exclude_styles: Optional[List[str]] = None,
+        include_occasions: Optional[List[str]] = None,
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        exclude_brands: Optional[List[str]] = None,
+        preferred_brands: Optional[List[str]] = None,
+        exclude_colors: Optional[List[str]] = None,
+        include_colors: Optional[List[str]] = None,
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        fit: Optional[List[str]] = None,
+        length: Optional[List[str]] = None,
+        sleeves: Optional[List[str]] = None,
+        neckline: Optional[List[str]] = None,
+        rise: Optional[List[str]] = None,
+        cursor: Optional[str] = None,
+        page_size: int = 50,
+        on_sale_only: bool = False,
+        new_arrivals_only: bool = False,
+        new_arrivals_days: int = 7,
+        include_formality: Optional[List[str]] = None,
+        exclude_formality: Optional[List[str]] = None,
+        include_seasons: Optional[List[str]] = None,
+        exclude_seasons: Optional[List[str]] = None,
+        include_style_tags: Optional[List[str]] = None,
+        exclude_style_tags: Optional[List[str]] = None,
+        include_color_family: Optional[List[str]] = None,
+        exclude_color_family: Optional[List[str]] = None,
+        include_silhouette: Optional[List[str]] = None,
+        exclude_silhouette: Optional[List[str]] = None,
+        include_fit: Optional[List[str]] = None,
+        exclude_fit: Optional[List[str]] = None,
+        include_length: Optional[List[str]] = None,
+        exclude_length: Optional[List[str]] = None,
+        include_sleeves: Optional[List[str]] = None,
+        exclude_sleeves: Optional[List[str]] = None,
+        include_neckline: Optional[List[str]] = None,
+        exclude_neckline: Optional[List[str]] = None,
+        include_rise: Optional[List[str]] = None,
+        exclude_rise: Optional[List[str]] = None,
+        include_coverage: Optional[List[str]] = None,
+        exclude_coverage: Optional[List[str]] = None,
+        include_materials: Optional[List[str]] = None,
+        exclude_materials: Optional[List[str]] = None,
+        exclude_occasions: Optional[List[str]] = None,
+        debug: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Fast-path feed for deterministic sort modes (price_asc, price_desc).
+
+        Skips: SASRec scoring, session scoring, context scoring, brand tier
+        bucketing, greedy constrained reranker, image dedup, session-intent
+        recall, feasibility filter, occasion filter.
+
+        Keeps: user state loading (for hard filters from onboarding), request
+        filter overrides, cursor decode with sort_mode validation, DB seen
+        history exclusion, Python-level hard filters (colors, brands,
+        article_types, rise), light brand diversity via apply_sort_diversity.
+        """
+        from recs.session_state import KeysetCursor
+        import hashlib
+
+        sort_mode = sort_by.value  # "price_asc" or "price_desc"
+        print(f"[Pipeline] Sorted feed path: sort_by={sort_mode}")
+
+        # ----- Session ID logic (same as relevance path) -----
+        is_new_session = session_id is None
+        if is_new_session:
+            if cursor and (anon_id or user_id):
+                seed = user_id or anon_id
+                session_id = f"sess_{hashlib.md5(seed.encode()).hexdigest()[:12]}"
+            else:
+                session_id = SessionStateService.generate_session_id()
+                print(f"[Pipeline] New sorted-feed session: {session_id}")
+
+        page_size = min(page_size, self.config.MAX_LIMIT)
+
+        # ----- Decode cursor & validate sort_mode -----
+        cursor_value: Optional[float] = None
+        cursor_id: Optional[str] = None
+        page = 0
+
+        if cursor:
+            cursor_obj = self.session_service.decode_cursor(cursor)
+            if cursor_obj:
+                if cursor_obj.sort_mode == sort_mode:
+                    cursor_value = cursor_obj.score  # holds price
+                    cursor_id = cursor_obj.item_id
+                    page = cursor_obj.page + 1
+                else:
+                    # Sort mode changed — reset to page 1
+                    print(f"[Pipeline] Cursor sort_mode mismatch: "
+                          f"cursor={cursor_obj.sort_mode}, request={sort_mode}. "
+                          f"Resetting to page 1.")
+
+        # ----- Load user state (for hard filters from onboarding) -----
+        user_state = self._load_user_state(user_id, anon_id, session_id)
+
+        # Override categories from request
+        if categories:
+            if user_state.onboarding_profile:
+                user_state.onboarding_profile.categories = categories
+            else:
+                from recs.models import OnboardingProfile
+                user_state.onboarding_profile = OnboardingProfile(
+                    user_id=user_state.user_id,
+                    categories=categories,
+                )
+
+        # Merge legacy attribute params into new include_ params
+        if fit and not include_fit:
+            include_fit = fit
+        if length and not include_length:
+            include_length = length
+        if sleeves and not include_sleeves:
+            include_sleeves = sleeves
+        if neckline and not include_neckline:
+            include_neckline = neckline
+        if rise and not include_rise:
+            include_rise = rise
+
+        # Apply request filter overrides to profile (same as relevance path)
+        has_any_filter = any([
+            exclude_styles, include_occasions, min_price, max_price,
+            exclude_brands, preferred_brands, exclude_colors, include_colors,
+            include_patterns, exclude_patterns,
+            include_fit, include_length, include_sleeves, include_neckline, include_rise,
+        ])
+        if has_any_filter:
+            if not user_state.onboarding_profile:
+                from recs.models import OnboardingProfile
+                user_state.onboarding_profile = OnboardingProfile(
+                    user_id=user_state.user_id
+                )
+            profile = user_state.onboarding_profile
+            if exclude_styles:
+                profile.styles_to_avoid = exclude_styles
+            if include_occasions:
+                profile.occasions = include_occasions
+            if min_price is not None:
+                profile.global_min_price = min_price
+            if max_price is not None:
+                profile.global_max_price = max_price
+            if exclude_brands:
+                profile.brands_to_avoid = exclude_brands
+            if preferred_brands:
+                profile.preferred_brands = preferred_brands
+            if exclude_colors:
+                profile.colors_to_avoid = exclude_colors
+            if include_colors:
+                profile.colors_preferred = include_colors
+            if include_patterns:
+                profile.patterns_liked = include_patterns
+            if exclude_patterns:
+                profile.patterns_avoided = exclude_patterns
+            if include_fit:
+                profile.preferred_fits = include_fit
+            if include_length:
+                profile.preferred_lengths = include_length
+            if include_sleeves:
+                profile.preferred_sleeves = include_sleeves
+            if include_neckline:
+                profile.preferred_necklines = include_neckline
+            if include_rise:
+                profile.preferred_rises = include_rise
+
+        # ----- Title-case helper + occasion expansion (reuse from relevance) -----
+        def _tc(vals):
+            if not vals:
+                return vals
+            return [v.title() for v in vals]
+
+        _OCCASION_EXPANSION = {
+            'casual': ['Everyday', 'Weekend', 'Brunch', 'Casual Outings'],
+            'active': ['Workout'], 'activewear': ['Workout'],
+            'beach': ['Vacation'], 'vacation': ['Vacation'],
+            'evening': ['Date Night', 'Party', 'Night Out', 'Evening', 'Evening Event'],
+            'date-night': ['Date Night'], 'date night': ['Date Night'],
+            'party': ['Party', 'Night Out'],
+            'office': ['Office', 'Work'], 'work': ['Office', 'Work'],
+            'formal': ['Formal Event', 'Wedding Guest'],
+            'wedding': ['Wedding Guest', 'Wedding'],
+            'lounge': ['Lounging'], 'lounging': ['Lounging'],
+            'brunch': ['Brunch'], 'weekend': ['Weekend'],
+            'workout': ['Workout'], 'night-out': ['Night Out', 'Party'],
+        }
+
+        def _expand(vals, expansion_map):
+            if not vals:
+                return None
+            expanded = []
+            for v in vals:
+                key = v.lower().strip()
+                if key in expansion_map:
+                    expanded.extend(expansion_map[key])
+                else:
+                    expanded.append(v.title())
+            return list(dict.fromkeys(expanded)) if expanded else None
+
+        expanded_occasions = _expand(include_occasions, _OCCASION_EXPANSION) if include_occasions else None
+        expanded_exclude_occasions = _expand(exclude_occasions, _OCCASION_EXPANSION) if exclude_occasions else None
+
+        # ----- DB seen history (for SQL-level exclusion) -----
+        db_seen_ids = self.candidate_module.get_user_seen_history(anon_id, user_id)
+
+        # Fetch more than page_size to account for Python-level filtering
+        has_python_filters = bool(
+            include_colors or exclude_colors or preferred_brands or exclude_brands
+            or article_types or include_rise or exclude_rise
+        )
+        buffer_mult = 3 if has_python_filters else 1
+        fetch_size = min(max(200, page_size * 5) * buffer_mult, 3000)
+
+        # ----- Retrieve sorted candidates from SQL -----
+        candidates = self.candidate_module.get_candidates_sorted_keyset(
+            user_state,
+            gender,
+            sort_mode=sort_mode,
+            cursor_value=cursor_value,
+            cursor_id=cursor_id,
+            page_size=fetch_size,
+            exclude_ids=db_seen_ids if db_seen_ids else None,
+            article_types=article_types,
+            on_sale_only=on_sale_only,
+            new_arrivals_only=new_arrivals_only,
+            new_arrivals_days=new_arrivals_days,
+            include_materials=include_materials,
+            attr_include_formality=_tc(include_formality),
+            attr_exclude_formality=_tc(exclude_formality),
+            attr_include_seasons=_tc(include_seasons),
+            attr_exclude_seasons=_tc(exclude_seasons),
+            attr_include_style_tags=_tc(include_style_tags),
+            attr_exclude_style_tags=_tc(exclude_style_tags),
+            attr_include_color_family=_tc(include_color_family),
+            attr_exclude_color_family=_tc(exclude_color_family),
+            attr_include_silhouette=_tc(include_silhouette),
+            attr_exclude_silhouette=_tc(exclude_silhouette),
+            attr_include_fit_type=_tc(include_fit),
+            attr_exclude_fit_type=_tc(exclude_fit),
+            attr_include_coverage=_tc(include_coverage),
+            attr_exclude_coverage=_tc(exclude_coverage),
+            attr_include_pattern=_tc(include_patterns),
+            attr_exclude_pattern=_tc(exclude_patterns),
+            attr_include_neckline=_tc(include_neckline),
+            attr_exclude_neckline=_tc(exclude_neckline),
+            attr_include_sleeve_type=_tc(include_sleeves),
+            attr_exclude_sleeve_type=_tc(exclude_sleeves),
+            attr_include_length=_tc(include_length),
+            attr_exclude_length=_tc(exclude_length),
+            attr_include_occasions=expanded_occasions,
+            attr_exclude_occasions=expanded_exclude_occasions,
+        )
+
+        pre_filter_count = len(candidates)
+
+        # ----- Python-level hard filters (same as relevance path) -----
+        if include_colors or exclude_colors:
+            candidates = self._apply_color_filter(candidates, include_colors, exclude_colors)
+        if preferred_brands or exclude_brands:
+            candidates = self._apply_brand_filter(candidates, preferred_brands, exclude_brands)
+        if article_types:
+            candidates = self._apply_article_type_filter(candidates, article_types)
+        if include_rise or exclude_rise:
+            inc_set = {v.lower() for v in include_rise} if include_rise else None
+            exc_set = {v.lower() for v in exclude_rise} if exclude_rise else None
+            filtered = []
+            for c in candidates:
+                val = (c.rise or '').lower() if c.rise else None
+                if inc_set and (not val or val not in inc_set):
+                    continue
+                if exc_set and val and val in exc_set:
+                    continue
+                filtered.append(c)
+            candidates = filtered
+
+        post_filter_count = len(candidates)
+        if pre_filter_count != post_filter_count:
+            print(f"[Pipeline] Sorted feed Python filters: {pre_filter_count} -> {post_filter_count}")
+
+        # ----- Light brand diversity (preserves sort order) -----
+        session_seen_ids = self.session_service.get_seen_items(session_id)
+        all_seen_ids = session_seen_ids | db_seen_ids
+
+        diversified = apply_sort_diversity(
+            candidates,
+            max_consecutive=2,
+            max_brand_share=0.30,
+            seen_ids=all_seen_ids,
+        )
+
+        # ----- Take page -----
+        page_results = diversified[:page_size]
+
+        # ----- Update session state -----
+        if page_results:
+            shown_ids = [c.item_id for c in page_results]
+            self.session_service.add_seen_items(session_id, shown_ids)
+
+            last_item = page_results[-1]
+            # Cursor value = price (stored in embedding_score by SQL, or fall back to .price)
+            last_price = last_item.embedding_score if last_item.embedding_score > 0 else last_item.price
+            self.session_service.set_cursor(
+                session_id,
+                score=last_price,
+                item_id=last_item.item_id,
+                page=page,
+                sort_mode=sort_mode,
+            )
+
+        # ----- Build next cursor -----
+        next_cursor = None
+        if page_results:
+            last_item = page_results[-1]
+            last_price = last_item.embedding_score if last_item.embedding_score > 0 else last_item.price
+            next_cursor_obj = KeysetCursor(
+                score=last_price,
+                item_id=last_item.item_id,
+                page=page,
+                sort_mode=sort_mode,
+            )
+            next_cursor = next_cursor_obj.encode()
+
+        has_more = len(diversified) > page_size or len(candidates) >= fetch_size
+
+        total_seen = len(session_seen_ids) + len(page_results)
+
+        # ----- Convert to response format -----
+        results = []
+        for rank, candidate in enumerate(page_results, start=total_seen - len(page_results) + 1):
+            results.append({
+                "product_id": candidate.item_id,
+                "rank": rank,
+                "score": candidate.price,  # Use price as the score for sorted feeds
+                "reason": "sorted",
+                "category": candidate.category,
+                "broad_category": candidate.broad_category,
+                "brand": candidate.brand,
+                "name": candidate.name,
+                "price": candidate.price,
+                "image_url": candidate.image_url,
+                "gallery_images": candidate.gallery_images,
+                "colors": candidate.colors,
+                "source": candidate.source,
+                "original_price": candidate.original_price,
+                "is_on_sale": candidate.is_on_sale,
+                "discount_percent": candidate.discount_percent,
+                "is_new": candidate.is_new,
+            })
+
+        resp = {
+            "user_id": user_id or anon_id or "anonymous",
+            "session_id": session_id,
+            "cursor": next_cursor,
+            "sort_by": sort_mode,
+            "strategy": "sorted",
+            "results": results,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "items_returned": len(results),
+                "session_seen_count": total_seen,
+                "has_more": has_more,
+            },
+            "metadata": {
+                "sort_mode": sort_mode,
+                "candidates_retrieved": pre_filter_count,
+                "candidates_after_python_filters": post_filter_count,
+                "candidates_after_diversity": len(diversified),
+                "db_seen_history_count": len(db_seen_ids),
+                "fetch_size_used": fetch_size,
+            },
+        }
+
+        if not debug:
+            resp.pop("metadata", None)
+
+        return resp
 
     # =========================================================
     # Session Scoring (Redis-backed with L1 cache)

@@ -38,6 +38,7 @@ from recs.models import (
     FeedRequest,
     FeedResponse as PipelineFeedResponse,
     FeedItem,
+    FeedSortBy,
     SaveOnboardingRequest,
     SaveOnboardingResponse,
     StyleDiscoveryModule,
@@ -1423,6 +1424,7 @@ async def get_pipeline_feed(
     exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
     exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     on_sale_only: bool = Query(False, description="Only show items on sale"),
+    sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
     debug: bool = Query(False, description="Include internal pipeline metadata in response (for debugging only)")
@@ -1431,6 +1433,12 @@ async def get_pipeline_feed(
     
     # User ID from JWT auth
     user_id = user.id
+
+    # Parse sort_by
+    try:
+        feed_sort_by = FeedSortBy(sort_by.lower().strip())
+    except ValueError:
+        feed_sort_by = FeedSortBy.RELEVANCE
 
     pipeline = get_pipeline()
 
@@ -1589,6 +1597,7 @@ async def get_pipeline_feed(
         exclude_materials=exclude_materials_filter_list,
         exclude_occasions=exclude_occasions_list,
         debug=debug,
+        sort_by=feed_sort_by,
     )
 
     # Auto-persist seen_ids to Supabase in background (replaces manual /session/sync)
@@ -1639,6 +1648,7 @@ async def get_sale_items(
     include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
     debug: bool = Query(False, description="Include internal pipeline metadata in response")
@@ -1646,6 +1656,12 @@ async def get_sale_items(
     """Get personalized sale items."""
     
     user_id = user.id
+
+    # Parse sort_by
+    try:
+        feed_sort_by = FeedSortBy(sort_by.lower().strip())
+    except ValueError:
+        feed_sort_by = FeedSortBy.RELEVANCE
 
     pipeline = get_pipeline()
 
@@ -1683,6 +1699,7 @@ async def get_sale_items(
         on_sale_only=True,
         user_metadata=user.user_metadata,
         debug=debug,
+        sort_by=feed_sort_by,
     )
 
     # Auto-persist seen_ids in background
@@ -1732,6 +1749,7 @@ async def get_new_arrivals(
     include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
     debug: bool = Query(False, description="Include internal pipeline metadata in response")
@@ -1739,6 +1757,12 @@ async def get_new_arrivals(
     """Get personalized new arrivals."""
     
     user_id = user.id
+
+    # Parse sort_by
+    try:
+        feed_sort_by = FeedSortBy(sort_by.lower().strip())
+    except ValueError:
+        feed_sort_by = FeedSortBy.RELEVANCE
 
     pipeline = get_pipeline()
 
@@ -1776,6 +1800,7 @@ async def get_new_arrivals(
         new_arrivals_only=True,
         user_metadata=user.user_metadata,
         debug=debug,
+        sort_by=feed_sort_by,
     )
 
     # Auto-persist seen_ids in background
@@ -1918,6 +1943,7 @@ async def get_keyset_feed(
     exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
     exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     on_sale_only: bool = Query(False, description="Only show items on sale"),
+    sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Opaque cursor from previous response (NULL for first page)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
     debug: bool = Query(False, description="Include internal pipeline metadata in response")
@@ -1925,6 +1951,12 @@ async def get_keyset_feed(
     """Get keyset cursor paginated feed with full filter support."""
     
     user_id = user.id
+
+    # Parse sort_by
+    try:
+        feed_sort_by = FeedSortBy(sort_by.lower().strip())
+    except ValueError:
+        feed_sort_by = FeedSortBy.RELEVANCE
 
     pipeline = get_pipeline()
 
@@ -1980,6 +2012,7 @@ async def get_keyset_feed(
         exclude_materials=_parse_csv(exclude_materials_filter),
         exclude_occasions=_parse_csv(exclude_occasions),
         debug=debug,
+        sort_by=feed_sort_by,
     )
 
     return response

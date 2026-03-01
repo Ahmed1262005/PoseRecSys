@@ -434,6 +434,86 @@ class GreedyConstrainedReranker:
 
 
 # =============================================================================
+# Light Diversity for Sorted Feeds
+# =============================================================================
+
+def apply_sort_diversity(
+    candidates: List[Any],
+    max_consecutive: int = 2,
+    max_brand_share: float = 0.30,
+    seen_ids: Optional[Set[str]] = None,
+) -> List[Any]:
+    """
+    Apply lightweight brand diversity to a *deterministically sorted* list.
+
+    Unlike the full greedy reranker (which reorders by adjusted score), this
+    function preserves the caller's sort order as much as possible.  It only
+    intervenes when:
+
+    1. **Consecutive-brand limit** — more than ``max_consecutive`` items in a
+       row share the same brand.  The excess item is deferred (pushed down a
+       few positions) rather than removed.
+    2. **Brand-share cap** — a single brand exceeds ``max_brand_share`` of the
+       total page.  Excess items are deferred to the end.
+
+    Deferred items retain their relative sort order among themselves.
+
+    Args:
+        candidates: Pre-sorted candidate list (e.g. by price ASC).
+        max_consecutive: Maximum items in a row from the same brand (default 2).
+        max_brand_share: Maximum fraction of the result from one brand (default 0.30).
+        seen_ids: Optional set of product IDs to exclude entirely.
+
+    Returns:
+        Diversified list (same length or shorter if seen_ids removed items).
+    """
+    seen_ids = seen_ids or set()
+
+    # Strip already-seen items first
+    pool = [
+        c for c in candidates
+        if (getattr(c, "item_id", None) or getattr(c, "product_id", ""))
+        not in seen_ids
+    ]
+
+    if not pool:
+        return []
+
+    max_per_brand = max(3, int(len(pool) * max_brand_share))
+
+    result: List[Any] = []
+    deferred: List[Any] = []
+    brand_counts: Dict[str, int] = defaultdict(int)
+
+    for item in pool:
+        brand = (getattr(item, "brand", "") or "").lower()
+        pid = getattr(item, "item_id", None) or getattr(item, "product_id", "")
+
+        # Check brand share cap
+        if brand and brand_counts[brand] >= max_per_brand:
+            deferred.append(item)
+            continue
+
+        # Check consecutive brand limit
+        if brand and len(result) >= max_consecutive:
+            recent_brands = [
+                (getattr(r, "brand", "") or "").lower()
+                for r in result[-max_consecutive:]
+            ]
+            if all(b == brand for b in recent_brands):
+                deferred.append(item)
+                continue
+
+        result.append(item)
+        if brand:
+            brand_counts[brand] += 1
+
+    # Append deferred items at the end (preserving their relative sort order)
+    result.extend(deferred)
+    return result
+
+
+# =============================================================================
 # Singleton
 # =============================================================================
 

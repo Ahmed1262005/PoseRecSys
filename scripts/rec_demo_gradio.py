@@ -2722,6 +2722,7 @@ def tab6_apply_filters(
     brands, exclude_brands, min_price, max_price, on_sale,
     materials,
     coverage_levels, skin_exposure, model_body_types, model_size_estimates,
+    sort_by="relevance",
 ):
     """Apply filters to the FULL product pool (~96K items) and return results.
 
@@ -2800,14 +2801,26 @@ def tab6_apply_filters(
         deduped.append(f)
     matched_flats = deduped
 
+    # Apply sort order
+    sort_by = sort_by or "relevance"
+    if sort_by == "price_asc":
+        matched_flats.sort(key=lambda f: float(f.get("price") or 0))
+    elif sort_by == "price_desc":
+        matched_flats.sort(key=lambda f: float(f.get("price") or 0), reverse=True)
+    # relevance = keep original DB order (no re-sort)
+
     n = len(matched_flats)
     elapsed = time.time() - t0
 
     summary_html = ""
 
     # Product card grid (up to 80 products)
+    # When sorted by price, show the first 80 (deterministic) instead of random sample
     GRID_SIZE = 80
-    sample = matched_flats[:GRID_SIZE] if n <= GRID_SIZE else random.sample(matched_flats, GRID_SIZE)
+    if sort_by in ("price_asc", "price_desc"):
+        sample = matched_flats[:GRID_SIZE]
+    else:
+        sample = matched_flats[:GRID_SIZE] if n <= GRID_SIZE else random.sample(matched_flats, GRID_SIZE)
 
     if matched_flats:
         grid_html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:4px;">'
@@ -3122,6 +3135,13 @@ purchase, Nike, hoodie""")
                                 multiselect=True, allow_custom_value=False,
                             )
 
+                        with gr.Accordion("Sort", open=True):
+                            t6_sort_by = gr.Radio(
+                                choices=["relevance", "price_asc", "price_desc"],
+                                value="relevance",
+                                label="Sort By",
+                            )
+
                         with gr.Row():
                             t6_btn = gr.Button("Apply Filters", variant="primary", size="lg")
                             t6_btn_clear = gr.Button("Clear All", variant="stop", size="sm")
@@ -3146,6 +3166,7 @@ purchase, Nike, hoodie""")
                     t6_brands, t6_exclude_brands, t6_min_price, t6_max_price, t6_on_sale,
                     t6_materials,
                     t6_coverage_levels, t6_skin_exposure, t6_model_body_types, t6_model_size_estimates,
+                    t6_sort_by,
                 ]
 
                 t6_btn.click(
@@ -3165,6 +3186,7 @@ purchase, Nike, hoodie""")
                         [], [], 0, 0, False,           # brands, exclude, prices, sale
                         [],                            # materials
                         [], [], [], [],                # gemini coverage/body type
+                        "relevance",                   # sort_by
                         "",                            # summary
                         "",                            # grid
                         [[""] * len(FILTER_TABLE_HEADERS)],  # table

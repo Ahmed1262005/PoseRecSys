@@ -48,6 +48,18 @@ class StyleDirection(str, Enum):
     STATEMENT = "statement"
 
 
+class FeedSortBy(str, Enum):
+    """Sort mode for the feed.
+
+    - RELEVANCE: Full scoring pipeline (personalised ranking + diversity reranker).
+    - PRICE_ASC: Cheapest first within the user's personalised candidate pool.
+    - PRICE_DESC: Most expensive first within the user's personalised candidate pool.
+    """
+    RELEVANCE = "relevance"
+    PRICE_ASC = "price_asc"
+    PRICE_DESC = "price_desc"
+
+
 # =============================================================================
 # Category Preferences (Modules 2-7: Soft Preferences)
 # =============================================================================
@@ -758,6 +770,7 @@ class FeedResponse(BaseModel):
     """Response for personalized feed."""
     user_id: str
     strategy: str  # sasrec, seed_vector, trending
+    sort_by: str = "relevance"  # relevance, price_asc, price_desc
     results: List[FeedItem]
     metadata: Dict[str, Any] = Field(default_factory=dict)
     pagination: Dict[str, Any] = Field(default_factory=dict)
