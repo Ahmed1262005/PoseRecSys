@@ -696,7 +696,7 @@ def create_app():
                 # State: follow-up data, original query, and accumulated selections
                 fu_state = gr.State(value=[])           # list of {dimension, question, options}
                 fu_original_query = gr.State(value="")
-                fu_selections = gr.State(value={})      # {question_idx: {label, filters}}
+                fu_selections = gr.State(value={})      # {question_idx: [{label, filters}, ...]}
 
                 # Pre-allocate a grid of buttons for follow-up options.
                 # Each question gets a label + row of option buttons.
@@ -741,8 +741,8 @@ def create_app():
                 def _build_button_updates(follow_ups, selections=None):
                     """Return gr.update() list for all labels + buttons.
 
-                    If selections is provided, selected buttons show with
-                    primary variant; others show secondary.
+                    selections is {qi_str: [{label, filters}, ...]} (multi-select).
+                    Selected buttons show with primary variant; others secondary.
                     """
                     if selections is None:
                         selections = {}
@@ -753,9 +753,10 @@ def create_app():
                         if qi < len(follow_ups):
                             fu = follow_ups[qi]
                             question = fu.get("question", "")
-                            sel = selections.get(str(qi))
-                            if sel:
-                                checkmark = f' -- *Selected: {sel["label"]}*'
+                            sel_list = selections.get(str(qi), [])
+                            if sel_list:
+                                names = ", ".join(s["label"] for s in sel_list)
+                                checkmark = f' -- *Selected: {names}*'
                             else:
                                 checkmark = ""
                             updates.append(gr.update(
@@ -772,9 +773,9 @@ def create_app():
                                 options = follow_ups[qi].get("options", [])
                                 if oi < len(options):
                                     label = options[oi].get("label", "")
-                                    sel = selections.get(str(qi))
-                                    is_selected = sel and sel.get("label") == label
-                                    # Mark selected with checkmark prefix
+                                    sel_list = selections.get(str(qi), [])
+                                    sel_labels = {s["label"] for s in sel_list}
+                                    is_selected = label in sel_labels
                                     display = f">> {label} <<" if is_selected else label
                                     variant = "primary" if is_selected else "secondary"
                                     updates.append(gr.update(
@@ -799,18 +800,23 @@ def create_app():
                     return updates
 
                 def _selection_summary_html(selections):
-                    """Render the current selection summary."""
+                    """Render the current selection summary (multi-select aware)."""
                     if not selections:
                         return ""
                     parts = []
                     for qi_str in sorted(selections.keys()):
-                        sel = selections[qi_str]
-                        parts.append(
-                            f'<span style="display:inline-block; background:#e0e7ff; '
-                            f'color:#3730a3; padding:3px 10px; border-radius:12px; '
-                            f'font-size:12px; margin:2px 4px;">'
-                            f'{sel["label"]}</span>'
-                        )
+                        sel_list = selections[qi_str]
+                        if not sel_list:
+                            continue
+                        for sel in sel_list:
+                            parts.append(
+                                f'<span style="display:inline-block; background:#e0e7ff; '
+                                f'color:#3730a3; padding:3px 10px; border-radius:12px; '
+                                f'font-size:12px; margin:2px 4px;">'
+                                f'{sel["label"]}</span>'
+                            )
+                    if not parts:
+                        return ""
                     return (
                         '<div style="padding:8px 0;">'
                         '<span style="font-size:13px; font-weight:600; color:#374151;">'
@@ -928,7 +934,7 @@ def create_app():
                 # ===========================================================
 
                 def make_toggle_handler(question_idx, option_idx):
-                    """Factory: create a click handler that toggles selection."""
+                    """Factory: create a click handler that toggles selection (multi-select)."""
 
                     def on_click(fu_data, selections):
                         if not fu_data or question_idx >= len(fu_data):
@@ -944,17 +950,28 @@ def create_app():
                         filters = opt.get("filters", {})
                         qi_key = str(question_idx)
 
-                        # Toggle: if same option clicked again, deselect
-                        new_selections = dict(selections) if selections else {}
-                        if new_selections.get(qi_key, {}).get("label") == label:
-                            del new_selections[qi_key]
+                        # Multi-select toggle: add or remove this option from the list
+                        new_selections = {k: list(v) for k, v in (selections or {}).items()}
+                        current = new_selections.get(qi_key, [])
+                        existing_labels = {s["label"] for s in current}
+
+                        if label in existing_labels:
+                            # Deselect: remove this option
+                            current = [s for s in current if s["label"] != label]
                         else:
-                            new_selections[qi_key] = {"label": label, "filters": filters}
+                            # Select: add this option
+                            current.append({"label": label, "filters": filters})
+
+                        if current:
+                            new_selections[qi_key] = current
+                        else:
+                            new_selections.pop(qi_key, None)
 
                         # Rebuild button visuals with new selections
                         btn_updates = _build_button_updates(fu_data, new_selections)
                         summary = _selection_summary_html(new_selections)
-                        show_apply = gr.update(visible=bool(new_selections))
+                        has_any = any(bool(v) for v in new_selections.values())
+                        show_apply = gr.update(visible=has_any)
 
                         return [new_selections, summary, show_apply] + btn_updates
 
@@ -976,6 +993,56 @@ def create_app():
                 # Apply: full NEW search with merged follow-up filters
                 # ===========================================================
 
+                def _merge_multi_selections(selections):
+                    """Merge multi-select filters into a single dict.
+
+                    Within the same question: union list values, min of min_prices,
+                    max of max_prices. Across questions: later keys overwrite.
+                    Returns (merged_filters: dict, all_labels: list[str]).
+                    """
+                    merged = {}
+                    all_labels = []
+
+                    for qi_key in sorted(selections.keys()):
+                        sel_list = selections[qi_key]
+                        if not sel_list:
+                            continue
+
+                        # First: union all filters within this question
+                        q_merged = {}
+                        for sel in sel_list:
+                            all_labels.append(sel["label"])
+                            for fk, fv in sel.get("filters", {}).items():
+                                if fk == "min_price":
+                                    # Widest floor: take the smallest min_price
+                                    cur = q_merged.get("min_price")
+                                    val = float(fv) if fv is not None else None
+                                    if val is not None:
+                                        q_merged["min_price"] = min(cur, val) if cur is not None else val
+                                elif fk == "max_price":
+                                    # Widest ceiling: take the largest max_price
+                                    cur = q_merged.get("max_price")
+                                    val = float(fv) if fv is not None else None
+                                    if val is not None:
+                                        q_merged["max_price"] = max(cur, val) if cur is not None else val
+                                elif isinstance(fv, list):
+                                    # Union list values (deduplicated, order preserved)
+                                    existing = q_merged.get(fk, [])
+                                    seen = set(existing)
+                                    for v in fv:
+                                        if v not in seen:
+                                            existing.append(v)
+                                            seen.add(v)
+                                    q_merged[fk] = existing
+                                else:
+                                    q_merged[fk] = fv
+
+                        # Merge this question's filters into the overall dict
+                        # (across questions: later keys overwrite)
+                        merged.update(q_merged)
+
+                    return merged, all_labels
+
                 def on_apply(fu_data, orig_query, selections, age, clusters, mn, mx, mod):
                     empty_btns = _hide_all_buttons()
                     if not selections or not orig_query:
@@ -992,51 +1059,46 @@ def create_app():
                             gr.update(visible=False),
                         ] + empty_btns
 
-                    # Extract concise keywords from filter VALUES (not labels)
-                    # to build a short, natural enriched query.
-                    labels_used = []
-                    keywords = []
+                    # Merge multi-select filters
+                    merged_filters, labels_used = _merge_multi_selections(selections)
 
+                    # Extract concise keywords from merged filter values
+                    keywords = []
                     _CAT_WORD = {
                         "Dresses": "dress", "Tops": "top", "Bottoms": "pants",
                         "Outerwear": "jacket", "Activewear": "activewear",
                     }
 
-                    for qi_key in sorted(selections.keys()):
-                        sel = selections[qi_key]
-                        labels_used.append(sel["label"])
-                        filters = sel.get("filters", {})
-
-                        for fk, fv in filters.items():
-                            if fk == "modes":
-                                # Extract useful mode words (skip internal modes)
-                                if isinstance(fv, list):
-                                    for m in fv:
-                                        if m in ("modest", "revealing", "formal", "casual"):
-                                            keywords.append(m)
-                                continue
-                            if not fv:
-                                continue
-                            if fk == "category_l1" and isinstance(fv, list):
-                                for cat in fv:
-                                    word = _CAT_WORD.get(cat, cat.lower())
-                                    keywords.append(word)
-                            elif fk == "formality" and isinstance(fv, list):
-                                keywords.append(fv[0].lower())
-                            elif fk == "occasions" and isinstance(fv, list):
-                                keywords.append(f"for {fv[0].lower()}")
-                            elif fk == "colors" and isinstance(fv, list):
-                                keywords.extend(c.lower() for c in fv[:2])
-                            elif fk == "length" and isinstance(fv, list):
-                                keywords.append(fv[0].lower())
-                            elif fk == "materials" and isinstance(fv, list):
-                                keywords.append(fv[0].lower())
-                            elif fk == "patterns" and isinstance(fv, list):
-                                keywords.append(fv[0].lower())
-                            elif fk == "style_tags" and isinstance(fv, list):
-                                keywords.append(fv[0].lower())
-                            elif isinstance(fv, list) and fv:
-                                keywords.append(fv[0].lower())
+                    for fk, fv in merged_filters.items():
+                        if fk == "modes":
+                            if isinstance(fv, list):
+                                for m in fv:
+                                    if m in ("modest", "revealing", "formal", "casual"):
+                                        keywords.append(m)
+                            continue
+                        if not fv:
+                            continue
+                        if fk in ("min_price", "max_price"):
+                            continue  # Don't add price as a keyword
+                        if fk == "category_l1" and isinstance(fv, list):
+                            for cat in fv:
+                                keywords.append(_CAT_WORD.get(cat, cat.lower()))
+                        elif fk == "formality" and isinstance(fv, list):
+                            keywords.append(fv[0].lower())
+                        elif fk == "occasions" and isinstance(fv, list):
+                            keywords.append(f"for {fv[0].lower()}")
+                        elif fk == "colors" and isinstance(fv, list):
+                            keywords.extend(c.lower() for c in fv[:2])
+                        elif fk == "length" and isinstance(fv, list):
+                            keywords.append(fv[0].lower())
+                        elif fk == "materials" and isinstance(fv, list):
+                            keywords.append(fv[0].lower())
+                        elif fk == "patterns" and isinstance(fv, list):
+                            keywords.append(fv[0].lower())
+                        elif fk == "style_tags" and isinstance(fv, list):
+                            keywords.append(fv[0].lower())
+                        elif isinstance(fv, list) and fv:
+                            keywords.append(fv[0].lower())
 
                     # Dedupe and build concise query
                     seen = set()
