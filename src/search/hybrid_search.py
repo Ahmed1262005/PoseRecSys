@@ -202,11 +202,20 @@ class HybridSearchService:
             # EXACT: apply filters normally.
             # ---------------------------------------------------------
             if intent_str == "vague":
-                updates = {}
+                # Preserve category_l1 — it's structural (what garment type),
+                # not subjective.  Without it, Bottoms/Pants leak into outfit
+                # queries where the planner correctly inferred Tops+Dresses.
+                preserved = {}
+                skipped = dict(plan_updates)
+                if "category_l1" in plan_updates and not getattr(request, "category_l1", None):
+                    preserved["category_l1"] = plan_updates["category_l1"]
+                    skipped.pop("category_l1", None)
+                updates = preserved
                 logger.info(
-                    "Vague query — skipping planner attribute filters (follow-ups will narrow)",
+                    "Vague query — skipping subjective filters, keeping category_l1",
                     query=request.query,
-                    skipped_filters=plan_updates,
+                    preserved_filters=preserved,
+                    skipped_filters=skipped,
                     semantic_queries=semantic_queries,
                 )
             else:
@@ -596,7 +605,7 @@ class HybridSearchService:
         # of garment types (dresses, tops, bottoms, etc.) rather than a wall
         # of one category.  Within each category, items keep their reranked
         # order.  Applied AFTER the reranker so scoring doesn't undo diversity.
-        if intent == QueryIntent.VAGUE and not request.category_l1 and merged:
+        if intent == QueryIntent.VAGUE and merged:
             cat_buckets: Dict[str, List[dict]] = {}
             for item in merged:
                 cat = item.get("category_l1") or item.get("broad_category") or "Other"

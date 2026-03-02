@@ -406,7 +406,7 @@ info would meaningfully change the results.
 
 **Output:** Return a JSON array in the key "follow_ups".
 Each follow-up object has:
-- "dimension": one of ["garment_type", "occasion", "formality", "vibe", "coverage", "price", "color"]
+- "dimension": one of ["garment_type", "fit", "vibe", "occasion", "formality", "coverage", "price", "color"]
 - "question": natural, conversational question text specific to THIS query
 - "options": 2-4 choices, each with:
   - "label": 2-5 words (symbols allowed like "$50-$100")
@@ -416,8 +416,8 @@ If the query is specific enough that no follow-ups are needed, return: "follow_u
 
 **Allowed filter keys (STRICT):**
 The "filters" object MUST only use these keys:
-category_l1, colors, formality, min_price, max_price, occasions, fit_type, sleeve_type,
-length, neckline, materials, patterns, style_tags, modes.
+category_l1, colors, formality, min_price, max_price, occasions, fit_type, silhouette,
+sleeve_type, length, neckline, materials, patterns, style_tags, modes.
 
 **Canonical values (STRICT):**
 Values must come from the taxonomy in Section 4 above. Do NOT invent new enum values.
@@ -432,72 +432,107 @@ not widen:
 
 1) Overwrite keys (single-choice narrowing): category_l1, formality, min_price, max_price
 2) Replace keys (do NOT union; choose one path): colors, occasions, style_tags, materials,
-   patterns, modes, fit_type, sleeve_type, length, neckline
+   patterns, modes, fit_type, silhouette, sleeve_type, length, neckline
 3) Price tightening: If an existing min_price/max_price already exists, the new bounds MUST
    tighten or stay within it. Never widen.
+
+### Dimension guide
+
+**"fit"** — silhouette and proportion (HIGH LIFT for most queries).
+"Fitted vs relaxed vs oversized" changes results more than almost any other dimension.
+Use fit_type and/or silhouette filters. Ask for any broad or outfit query.
+
+**"vibe"** — style direction and aesthetic (HIGH LIFT for vague queries).
+Each vibe option should carry MULTIPLE filter keys to give the search real signal:
+- "Romantic & feminine" → {{"style_tags": ["Romantic"], "patterns": ["Floral"], "materials": ["Lace", "Chiffon"]}}
+- "Glamorous" → {{"style_tags": ["Glamorous"], "materials": ["Satin", "Silk"], "fit_type": ["Fitted", "Slim"]}}
+- "Edgy" → {{"style_tags": ["Edgy"], "materials": ["Faux Leather"], "patterns": ["Solid"]}}
+- "Minimal & clean" → {{"style_tags": ["Minimalist"], "patterns": ["Solid"], "fit_type": ["Slim", "Fitted"]}}
+- "Relaxed & effortless" → {{"style_tags": ["Bohemian"], "fit_type": ["Relaxed", "Loose"]}}
+- "Classic & polished" → {{"style_tags": ["Classic"], "fit_type": ["Fitted", "Regular"], "patterns": ["Solid"]}}
+- "Sporty casual" → {{"style_tags": ["Sporty"], "fit_type": ["Regular", "Relaxed"]}}
+- "Bold & trendy" → {{"style_tags": ["Streetwear", "Modern"], "patterns": ["Colorblock", "Abstract"]}}
+Pick 3-4 vibes relevant to the query. Do NOT always use the same set.
+
+**"garment_type"** — category anchor. Only ask when no garment is specified. Prefer single-item
+anchors: Dresses / Tops / Bottoms / Outerwear / Jumpsuits.
+
+**"occasion"** / **"formality"** — ask ONE of these, not both.
+Formality is LOW-LIFT when the query already implies a dress code: "date" → semi-formal,
+"work" → business casual, "wedding guest" → formal, "party" → semi-formal, "brunch" → casual.
+If the occasion already signals formality, skip formality and ask a higher-lift dimension.
+
+**"coverage"** — modesty. Only ask if the query mentions modesty, user context says covered,
+or the category commonly needs it (tops, dresses) AND the query is broad.
+
+**"price"** / **"color"** — low lift. Only ask if the user explicitly signals budget sensitivity
+or color preference.
+
+### Concrete attributes (category-specific)
+
+When asking about fit or a concrete attribute, choose what matters most for the category:
+- **tops** → neckline (highest lift), then sleeve_type, then fit
+- **dresses** → length (mini/midi/maxi), then fit, then sleeve_type or neckline
+- **bottoms/jeans** → fit (slim/relaxed/wide-leg), then length
+- **outerwear** → length (cropped/mid/long), then fit
+
+These can use dimension "fit" with the relevant filter keys.
 
 ### When to ask follow-ups (Ambiguity rubric)
 
 Do NOT ask follow-ups if the query already includes enough constraints to narrow results.
 Examples: "red midi dress", "black blazer for work", "long sleeve modest maxi dress under $120" → follow_ups: []
 
-Ask follow-ups when the query is under-specified such that results would be broad or mixed.
-Generate 1-3 follow-ups when ANY of the triggers below apply, choosing the highest-lift
-missing dimensions.
+Ask follow-ups when the query is under-specified. Generate 1-3 follow-ups when ANY trigger
+below applies, choosing the highest-lift missing dimensions.
 
 **Trigger A — Broad category only (IMPORTANT):**
-If the query is ONLY a broad category/category_l1 with no other constraints (e.g. "tops",
-"dresses", "pants", "jeans", "jackets", "skirts", "sweaters"):
+Query is ONLY a broad category with no other constraints ("tops", "dresses", "jeans", "skirts"):
 - ALWAYS generate 2-3 follow-ups.
-- Priority: 1) occasion OR formality (choose ONE), 2) vibe, 3) coverage OR a concrete
-  attribute if it maps directly (preferred for categories like tops/jeans)
+- Priority: 1) fit (silhouette/proportion), 2) vibe OR category-specific attribute (neckline
+  for tops, length for dresses), 3) occasion (only if no lifestyle context)
 
 **Trigger B — Occasion/outfit intent without an anchor:**
-If the query implies an occasion/outfit but does NOT specify a garment anchor or category_l1.
-Examples: "outfit for a date", "something for a family gathering", "vacation outfits"
-- Ask garment_type first, then occasion OR formality, then vibe if still vague.
+Query implies an occasion but no garment ("outfit for a date", "vacation outfits"):
+- Ask garment_type first, then fit OR vibe, then occasion only if truly unclear.
 
 **Trigger C — Vague descriptors:**
-If the query uses broad adjectives without constraints (e.g. "cute", "nice", "hot", "elegant",
-"put together") and lacks an occasion/formality/style direction:
-- Ask vibe (high lift), then occasion OR formality next if needed.
+Broad adjectives without constraints ("cute", "nice", "hot", "elegant", "put together"):
+- Ask vibe first (highest lift — maps directly to style+fabric+fit).
+- Then garment_type or fit if still broad.
 
 **Trigger D — Coverage/modesty ambiguity:**
-Ask coverage ONLY if: the query mentions modesty/coverage, or user context indicates a covered
-preference, or the category commonly benefits from coverage refinement AND the query is broad.
+Ask coverage ONLY if: the query mentions modesty/coverage, or user context indicates covered,
+or the category commonly benefits AND the query is broad.
 
 **Trigger E — Price ambiguity:**
 Ask price ONLY if: the query mentions budget sensitivity ("cheap", "affordable", "designer"),
-or user context provides budget AND the query is very broad (especially Trigger A).
+or user context provides budget AND the query is very broad.
 
 **Trigger F — Color ambiguity:**
-Ask color ONLY if: the user explicitly asked for a color, or color is central to the request.
+Ask color ONLY if: the user explicitly asked for a color, or color is central.
 
 ### How many follow-ups
 - Max 3 total.
-- If Trigger A (broad category) applies, return 2-3 follow-ups.
-- Otherwise, return 1-3 depending on how many high-signal dimensions are missing.
+- Trigger A (broad category): return 2-3.
+- Otherwise: return 1-3 depending on how many high-signal dimensions are missing.
 
 ### Priority order (pick highest expected lift first)
-1) garment_type (only if no clear garment/category anchor exists)
-2) occasion OR formality (choose ONE unless extremely vague)
-3) vibe
-4) a concrete attribute that maps directly to filters (preferred over abstract coverage):
-   - for tops: sleeve_type, neckline
-   - for jeans/pants: length, fit_type
-   - for dresses: length, sleeve_type, neckline
-5) coverage (modes) when relevant (see Trigger D)
-6) price (see Trigger E)
-7) color (see Trigger F)
+1) garment_type (only if no category anchor exists)
+2) fit (silhouette/proportion — high lift for nearly all broad queries)
+3) vibe (style direction — carries multiple filter signals)
+4) concrete attribute (category-specific: neckline for tops, length for dresses, etc.)
+5) occasion OR formality (choose ONE — only when genuinely ambiguous about context)
+6) coverage (modes) when relevant (see Trigger D)
+7) price (see Trigger E)
+8) color (see Trigger F)
 
 ### Rules
 - Do NOT ask about anything already specified in the query or the existing plan.
-- For "occasion OR formality": choose the one that will narrow more for this query.
-  Event-like queries ("wedding guest", "work", "funeral") → occasion is often enough.
-  General lifestyle queries ("outfits for my new job") → formality often clarifies more.
-- Prefer concrete attribute follow-ups over coverage when there is no explicit modesty signal.
-- Garment type: prefer single-item anchors (Dresses / Tops / Bottoms / Outerwear) over
-  multi-item options like "Top & bottoms".
+- For "occasion OR formality": pick ONE, and only if no higher-lift dimension remains.
+  If the query implies an occasion, skip formality (it's already implied).
+- Prefer fit and vibe over formality for most queries — they change results more.
+- Garment type: prefer single-item anchors (Dresses / Tops / Bottoms / Outerwear).
 - Questions must be specific to the query context (not generic).
   Bad: "What's your budget?" Good: "What price range works for your date-night look?"
 - Options must be meaningfully distinct and map cleanly to filters.
@@ -505,33 +540,120 @@ Ask color ONLY if: the user explicitly asked for a color, or color is central to
 
 ### Examples
 
-Example for "something for a night out":
+Example 1: query = "tops" (Trigger A — broad category)
 ```json
 "follow_ups": [
   {{
-    "dimension": "formality",
-    "question": "How dressed up do you want to be?",
+    "dimension": "fit",
+    "question": "What fit do you prefer?",
     "options": [
-      {{"label": "Casual", "filters": {{"formality": ["Casual"]}}}},
-      {{"label": "Smart casual", "filters": {{"formality": ["Smart Casual"]}}}},
-      {{"label": "Dressy", "filters": {{"formality": ["Semi-Formal"]}}}},
-      {{"label": "Formal", "filters": {{"formality": ["Formal"]}}}}
+      {{"label": "Fitted", "filters": {{"fit_type": ["Fitted", "Slim"]}}}},
+      {{"label": "Relaxed", "filters": {{"fit_type": ["Relaxed", "Loose"]}}}},
+      {{"label": "Oversized", "filters": {{"fit_type": ["Oversized"]}}}},
+      {{"label": "Cropped", "filters": {{"length": ["Cropped"]}}}}
     ]
   }},
   {{
     "dimension": "vibe",
     "question": "What vibe are you going for?",
     "options": [
-      {{"label": "Glamorous", "filters": {{"style_tags": ["Glamorous"]}}}},
-      {{"label": "Edgy", "filters": {{"style_tags": ["Edgy"]}}}},
-      {{"label": "Romantic", "filters": {{"style_tags": ["Romantic"]}}}},
-      {{"label": "Minimal", "filters": {{"style_tags": ["Minimalist"]}}}}
+      {{"label": "Minimal & clean", "filters": {{"style_tags": ["Minimalist"], "patterns": ["Solid"]}}}},
+      {{"label": "Romantic", "filters": {{"style_tags": ["Romantic"], "patterns": ["Floral"], "materials": ["Lace"]}}}},
+      {{"label": "Edgy", "filters": {{"style_tags": ["Edgy"], "materials": ["Faux Leather"]}}}},
+      {{"label": "Classic", "filters": {{"style_tags": ["Classic"], "patterns": ["Solid", "Striped"]}}}}
+    ]
+  }},
+  {{
+    "dimension": "occasion",
+    "question": "Where will you wear these?",
+    "options": [
+      {{"label": "Everyday", "filters": {{"occasions": ["Everyday"]}}}},
+      {{"label": "Work", "filters": {{"occasions": ["Work"]}}}},
+      {{"label": "Going out", "filters": {{"occasions": ["Night Out"]}}}},
+      {{"label": "Date", "filters": {{"occasions": ["Date Night"]}}}}
     ]
   }}
 ]
 ```
 
-Example for "red midi dress":
+Example 2: query = "outfit for a first date" (Trigger B — occasion without anchor)
+```json
+"follow_ups": [
+  {{
+    "dimension": "garment_type",
+    "question": "What are you looking for?",
+    "options": [
+      {{"label": "A dress", "filters": {{"category_l1": ["Dresses"]}}}},
+      {{"label": "A top", "filters": {{"category_l1": ["Tops"]}}}},
+      {{"label": "A jumpsuit", "filters": {{"category_l1": ["Dresses"]}}}},
+      {{"label": "Outerwear", "filters": {{"category_l1": ["Outerwear"]}}}}
+    ]
+  }},
+  {{
+    "dimension": "vibe",
+    "question": "What vibe for your date?",
+    "options": [
+      {{"label": "Romantic & feminine", "filters": {{"style_tags": ["Romantic"], "patterns": ["Floral"], "materials": ["Lace", "Chiffon"]}}}},
+      {{"label": "Effortless & cool", "filters": {{"style_tags": ["Modern"], "fit_type": ["Relaxed"]}}}},
+      {{"label": "Glamorous", "filters": {{"style_tags": ["Glamorous"], "materials": ["Satin", "Silk"], "fit_type": ["Fitted"]}}}},
+      {{"label": "Minimal & chic", "filters": {{"style_tags": ["Minimalist"], "patterns": ["Solid"], "fit_type": ["Slim"]}}}}
+    ]
+  }}
+]
+```
+
+Example 3: query = "something cute" (Trigger C — vague descriptor)
+```json
+"follow_ups": [
+  {{
+    "dimension": "vibe",
+    "question": "What kind of cute?",
+    "options": [
+      {{"label": "Flirty & feminine", "filters": {{"style_tags": ["Romantic", "Sexy"], "materials": ["Lace", "Satin"]}}}},
+      {{"label": "Casual & minimal", "filters": {{"style_tags": ["Minimalist"], "fit_type": ["Regular", "Relaxed"], "patterns": ["Solid"]}}}},
+      {{"label": "Bold & trendy", "filters": {{"style_tags": ["Streetwear", "Modern"], "patterns": ["Colorblock"]}}}},
+      {{"label": "Classic & polished", "filters": {{"style_tags": ["Classic"], "fit_type": ["Fitted"], "patterns": ["Solid"]}}}}
+    ]
+  }},
+  {{
+    "dimension": "garment_type",
+    "question": "What are you looking for?",
+    "options": [
+      {{"label": "A dress", "filters": {{"category_l1": ["Dresses"]}}}},
+      {{"label": "A top", "filters": {{"category_l1": ["Tops"]}}}},
+      {{"label": "Bottoms", "filters": {{"category_l1": ["Bottoms"]}}}}
+    ]
+  }}
+]
+```
+
+Example 4: query = "dresses" (Trigger A — broad category)
+```json
+"follow_ups": [
+  {{
+    "dimension": "fit",
+    "question": "What length and shape?",
+    "options": [
+      {{"label": "Mini", "filters": {{"length": ["Mini"]}}}},
+      {{"label": "Midi", "filters": {{"length": ["Midi"]}}}},
+      {{"label": "Maxi", "filters": {{"length": ["Maxi"]}}}},
+      {{"label": "Bodycon", "filters": {{"silhouette": ["Bodycon"], "fit_type": ["Fitted"]}}}}
+    ]
+  }},
+  {{
+    "dimension": "vibe",
+    "question": "What's the vibe?",
+    "options": [
+      {{"label": "Romantic & flowy", "filters": {{"style_tags": ["Romantic"], "silhouette": ["A-Line"], "materials": ["Chiffon"]}}}},
+      {{"label": "Glamorous", "filters": {{"style_tags": ["Glamorous"], "materials": ["Satin", "Silk"]}}}},
+      {{"label": "Casual & easy", "filters": {{"style_tags": ["Modern"], "fit_type": ["Relaxed"], "materials": ["Cotton", "Jersey"]}}}},
+      {{"label": "Edgy", "filters": {{"style_tags": ["Edgy"], "materials": ["Faux Leather"], "patterns": ["Solid"]}}}}
+    ]
+  }}
+]
+```
+
+Example 5: query = "red midi dress" (specific enough — no follow-ups)
 ```json
 "follow_ups": []
 ```
@@ -556,11 +678,16 @@ When a "User context:" prefix is present, personalize follow-ups as follows:
 
 4. **Match vibe/style ordering** to user preferences.
    - If user commonly prefers minimalist, reorder vibe options to put "Minimal" first.
-   - If user prefers boho, reorder to put "Bohemian" first (must be canonical style_tags values).
+   - If user prefers boho, reorder to put "Bohemian" / "Romantic" first.
+   - All values must be canonical (from Section 4).
 
-5. **Do NOT remove options** — only reorder them.
-6. **Skip follow-up questions** already answered by user context or the query.
-7. **If no user context is provided**, generate follow-ups in the default order (most popular first).
+5. **Match fit ordering** to user preferences.
+   - If user prefers oversized/relaxed styles, reorder fit options accordingly.
+   - If user prefers fitted, put "Fitted" / "Slim" first.
+
+6. **Do NOT remove options** — only reorder them.
+7. **Skip follow-up questions** already answered by user context or the query.
+8. **If no user context is provided**, generate follow-ups in the default order (most popular first).
 
 Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
 

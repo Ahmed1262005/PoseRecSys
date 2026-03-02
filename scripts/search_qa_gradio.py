@@ -739,10 +739,11 @@ def create_app():
                 # ===========================================================
 
                 def _build_button_updates(follow_ups, selections=None):
-                    """Return gr.update() list for all labels + buttons.
+                    """Return component instance list for all labels + buttons.
 
                     selections is {qi_str: [{label, filters}, ...]} (multi-select).
                     Selected buttons show with primary variant; others secondary.
+                    Uses Gradio 6.x component returns (not gr.update dicts).
                     """
                     if selections is None:
                         selections = {}
@@ -759,12 +760,12 @@ def create_app():
                                 checkmark = f' -- *Selected: {names}*'
                             else:
                                 checkmark = ""
-                            updates.append(gr.update(
+                            updates.append(gr.Markdown(
                                 value=f"**{question}**{checkmark}",
                                 visible=True,
                             ))
                         else:
-                            updates.append(gr.update(value="", visible=False))
+                            updates.append(gr.Markdown(value="", visible=False))
 
                     # Buttons (MAX_FU_QUESTIONS x MAX_FU_OPTIONS)
                     for qi in range(MAX_FU_QUESTIONS):
@@ -778,25 +779,27 @@ def create_app():
                                     is_selected = label in sel_labels
                                     display = f">> {label} <<" if is_selected else label
                                     variant = "primary" if is_selected else "secondary"
-                                    updates.append(gr.update(
+                                    updates.append(gr.Button(
                                         value=display,
                                         visible=True,
                                         variant=variant,
+                                        size="sm",
+                                        min_width=80,
                                     ))
                                 else:
-                                    updates.append(gr.update(value="", visible=False))
+                                    updates.append(gr.Button(value="", visible=False, size="sm", min_width=80))
                             else:
-                                updates.append(gr.update(value="", visible=False))
+                                updates.append(gr.Button(value="", visible=False, size="sm", min_width=80))
 
                     return updates
 
                 def _hide_all_buttons():
-                    """Return updates to hide all labels + buttons."""
+                    """Return component instances to hide all labels + buttons."""
                     updates = []
                     for _ in range(MAX_FU_QUESTIONS):
-                        updates.append(gr.update(value="", visible=False))
+                        updates.append(gr.Markdown(value="", visible=False))
                     for _ in range(MAX_FU_QUESTIONS * MAX_FU_OPTIONS):
-                        updates.append(gr.update(value="", visible=False))
+                        updates.append(gr.Button(value="", visible=False, size="sm", min_width=80))
                     return updates
 
                 def _selection_summary_html(selections):
@@ -845,7 +848,7 @@ def create_app():
                             "",   # fu_original_query
                             {},   # fu_selections (reset)
                             "",   # selection_summary
-                            gr.update(visible=False),  # apply_btn
+                            gr.Button("Search with selections", visible=False, variant="primary"),
                         ] + empty_btns
 
                     # Build planner context from onboarding
@@ -874,7 +877,7 @@ def create_app():
                             "",
                             {},
                             "",
-                            gr.update(visible=False),
+                            gr.Button("Search with selections", visible=False, variant="primary"),
                         ] + empty_btns
 
                     # Meta
@@ -896,7 +899,7 @@ def create_app():
                     btn_updates = _build_button_updates(follow_ups)
 
                     # Show apply button only if there are follow-ups
-                    show_apply = gr.update(visible=bool(follow_ups))
+                    show_apply = gr.Button("Search with selections", visible=bool(follow_ups), variant="primary")
 
                     return [
                         meta,
@@ -938,12 +941,12 @@ def create_app():
 
                     def on_click(fu_data, selections):
                         if not fu_data or question_idx >= len(fu_data):
-                            return [selections, "", gr.update(visible=False)] + _hide_all_buttons()
+                            return [selections, "", gr.Button("Search with selections", visible=False, variant="primary")] + _hide_all_buttons()
 
                         fu = fu_data[question_idx]
                         options = fu.get("options", [])
                         if option_idx >= len(options):
-                            return [selections, "", gr.update(visible=False)] + _hide_all_buttons()
+                            return [selections, "", gr.Button("Search with selections", visible=False, variant="primary")] + _hide_all_buttons()
 
                         opt = options[option_idx]
                         label = opt.get("label", "")
@@ -971,7 +974,7 @@ def create_app():
                         btn_updates = _build_button_updates(fu_data, new_selections)
                         summary = _selection_summary_html(new_selections)
                         has_any = any(bool(v) for v in new_selections.values())
-                        show_apply = gr.update(visible=has_any)
+                        show_apply = gr.Button("Search with selections", visible=has_any, variant="primary")
 
                         return [new_selections, summary, show_apply] + btn_updates
 
@@ -1056,7 +1059,7 @@ def create_app():
                             orig_query,
                             {},
                             "",
-                            gr.update(visible=False),
+                            gr.Button("Search with selections", visible=False, variant="primary"),
                         ] + empty_btns
 
                     # Merge multi-select filters
@@ -1139,7 +1142,7 @@ def create_app():
                             orig_query,
                             selections,
                             _selection_summary_html(selections),
-                            gr.update(visible=True),
+                            gr.Button("Search with selections", visible=True, variant="primary"),
                         ] + _build_button_updates(fu_data, selections)
 
                     # Meta
@@ -1170,7 +1173,7 @@ def create_app():
                         orig_query,         # keep original query
                         {},                 # reset selections
                         "",                 # clear summary
-                        gr.update(visible=bool(new_follow_ups)),
+                        gr.Button("Search with selections", visible=bool(new_follow_ups), variant="primary"),
                     ] + btn_updates
 
                 apply_outputs = [
