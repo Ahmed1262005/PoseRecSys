@@ -1109,18 +1109,33 @@ def create_app():
                     else:
                         grid = '<div style="color:#999; padding:20px;">No results found</div>'
 
-                    # New follow-ups from the fresh search
+                    # New follow-ups from the fresh search.
+                    # When refine returns no follow-ups (planner skipped), keep
+                    # the original follow-up data so the user can change their
+                    # selections and refine again — prevents the UI from going
+                    # unresponsive after applying filters.
                     new_follow_ups = response.get("follow_ups") or []
-                    fu_html = _followup_html(new_follow_ups)
-                    btn_updates = _build_button_updates(new_follow_ups)
+                    if new_follow_ups:
+                        active_follow_ups = new_follow_ups
+                        active_selections = {}  # fresh follow-ups → reset selections
+                        summary = ""
+                    else:
+                        # Keep original follow-ups + current selections so the
+                        # user can adjust and re-apply.
+                        active_follow_ups = fu_data
+                        active_selections = selections
+                        summary = _selection_summary_html(selections)
+
+                    fu_html = _followup_html(active_follow_ups)
+                    btn_updates = _build_button_updates(active_follow_ups, active_selections)
 
                     return [
                         meta, grid, fu_html, ctx, response,
-                        new_follow_ups,     # new fu_state
-                        orig_query,         # keep original query
-                        {},                 # reset selections
-                        "",                 # clear summary
-                        gr.Button("Search with selections", visible=bool(new_follow_ups), variant="primary"),
+                        active_follow_ups,    # fu_state (keep original if no new ones)
+                        orig_query,           # keep original query
+                        active_selections,    # keep selections if reusing follow-ups
+                        summary,              # keep summary if reusing follow-ups
+                        gr.Button("Search with selections", visible=bool(active_follow_ups), variant="primary"),
                     ] + btn_updates
 
                 apply_outputs = [

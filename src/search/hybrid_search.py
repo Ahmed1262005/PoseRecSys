@@ -281,16 +281,20 @@ class HybridSearchService:
             algolia_weight = 1.0 - semantic_weight
 
         # Step 2c: Build Algolia filter strings.
-        # When the planner is active, split into hard filters (brand, price,
-        # stock, category) and optional filters (neckline, color, fit, etc.)
-        # so Algolia returns a wider candidate pool where keyword terms like
-        # "ribbed" can match, while still boosting attribute-matching results.
+        # When the planner is active OR skip_planner (refine path), split into
+        # hard filters (brand, price, stock, category) and optional filters
+        # (neckline, color, fit, etc.) so Algolia returns a wider candidate
+        # pool.  Subjective attributes become optionalFilters (boost, don't
+        # exclude) — this prevents 0-result failures when the user selects
+        # multiple follow-up filters that are too restrictive together.
         algolia_optional_filters: Optional[List[str]] = None
-        if search_plan is not None:
+        use_split_filters = search_plan is not None or skip_planner
+        if use_split_filters:
             algolia_filters, algolia_optional_filters = self._build_algolia_filters_split(request)
             if algolia_optional_filters:
                 logger.info(
-                    "Using optionalFilters for Algolia (planner active)",
+                    "Using optionalFilters for Algolia",
+                    source="planner" if search_plan else "refine",
                     hard_filters=algolia_filters,
                     optional_count=len(algolia_optional_filters),
                 )
@@ -323,8 +327,11 @@ class HybridSearchService:
             else [clip_query]
         )
 
-        # Build a relaxed request for semantic search when planner is active.
-        if search_plan is not None:
+        # Build a relaxed request for semantic search when planner is active
+        # or when filters are pre-resolved (refine path).  Subjective filters
+        # (colors, patterns, occasions) are removed so pgvector returns more
+        # candidates — the post-filter soft scoring will boost matches.
+        if search_plan is not None or skip_planner:
             semantic_request = request.model_copy(update={
                 "categories": None,
                 "colors": None,
@@ -332,7 +339,8 @@ class HybridSearchService:
                 "occasions": None,
             })
             logger.info(
-                "Using relaxed filters for semantic search (planner active)",
+                "Using relaxed filters for semantic search",
+                source="planner" if search_plan else "refine",
                 kept=["price", "brands", "exclude_brands", "category_l1", "category_l2"],
                 removed=["categories", "colors", "patterns", "occasions"],
             )
@@ -443,6 +451,7 @@ class HybridSearchService:
 
             semantic_results = self._post_filter_semantic(
                 enriched_snapshot, request, expanded_filters=expanded_filters,
+                force_soft=skip_planner,
             )
 
             # Check if we have active exclusion filters that could be relaxed
@@ -467,6 +476,7 @@ class HybridSearchService:
                     list(enriched_snapshot), request,
                     expanded_filters=expanded_filters,
                     drop_nulls=False,
+                    force_soft=skip_planner,
                 )
                 relaxation_level = "lenient_nulls"
 
@@ -484,6 +494,7 @@ class HybridSearchService:
                 semantic_results = self._post_filter_semantic(
                     list(enriched_snapshot), relaxed_request,
                     expanded_filters=expanded_filters,
+                    force_soft=skip_planner,
                 )
                 relaxation_level = "no_exclusions"
 
@@ -1752,6 +1763,7 @@ class HybridSearchService:
         request: HybridSearchRequest,
         expanded_filters: Optional[Dict[str, List[str]]] = None,
         drop_nulls: bool = True,
+        force_soft: bool = False,
     ) -> List[dict]:
         """
         Post-filter on semantic results after Algolia enrichment.
@@ -1760,12 +1772,13 @@ class HybridSearchService:
         1. **Strict mode** (no expanded_filters / regex fallback): All filters
            are hard -- non-matching results are dropped. This is the original
            behavior.
-        2. **Relaxed mode** (expanded_filters from LLM planner): Only hard
-           filters (brand, category, price) drop results. Attribute filters
-           (occasions, materials, style_tags, formality, etc.) become soft
-           scoring boosts -- matching items rank higher, but non-matching items
-           aren't dropped. This prevents 0-result scenarios when DB labels
-           don't match the user's language.
+        2. **Relaxed mode** (expanded_filters from LLM planner OR force_soft
+           from refine path): Only hard filters (brand, category, price) drop
+           results. Attribute filters (occasions, materials, style_tags,
+           formality, etc.) become soft scoring boosts -- matching items rank
+           higher, but non-matching items aren't dropped. This prevents
+           0-result scenarios when DB labels don't match the user's language
+           or when multiple follow-up selections are too restrictive together.
 
         When drop_nulls=False (progressive relaxation), exclusion filters keep
         items with null/N/A attribute values instead of dropping them.
@@ -1773,7 +1786,7 @@ class HybridSearchService:
         if expanded_filters is None:
             expanded_filters = {}
 
-        use_soft_scoring = bool(expanded_filters)
+        use_soft_scoring = bool(expanded_filters) or force_soft
         filtered = results
 
         def _get_allowed_vals(field_name: str, strict_vals: List[str]) -> set:
