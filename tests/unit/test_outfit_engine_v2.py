@@ -494,12 +494,14 @@ class TestColor:
         assert score < 0.50
 
     def test_analogous_colors_good(self):
+        # v2.3: flattened — color should not strongly reward, just be neutral-ok
         score = _base_color_harmony("Red", "Orange")
-        assert score >= 0.70
+        assert score >= 0.50
 
     def test_complementary_colors_good(self):
+        # v2.3: flattened — complementary is still fine, just not high
         score = _base_color_harmony("Navy", "Rust")
-        assert score >= 0.65
+        assert score >= 0.50
 
     def test_same_color_same_material_penalty(self):
         """Blue denim + blue denim → same-material-same-color penalty."""

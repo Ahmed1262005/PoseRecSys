@@ -300,12 +300,17 @@ def _derive_fields(p: "AestheticProfile") -> None:
     """Compute all derived fields from raw DB attributes."""
     # formality_level
     f = (p.formality or "").lower().strip()
-    p.formality_level = _FORMALITY_TO_LEVEL.get(f, 2)
-    if p.formality_level == 2 and f:
-        for key, val in _FORMALITY_TO_LEVEL.items():
-            if key in f:
-                p.formality_level = val
-                break
+    exact = _FORMALITY_TO_LEVEL.get(f)
+    if exact is not None:
+        p.formality_level = exact
+    else:
+        # Fuzzy fallback — substring match for non-standard strings
+        p.formality_level = 2  # default
+        if f:
+            for key, val in _FORMALITY_TO_LEVEL.items():
+                if key in f:
+                    p.formality_level = val
+                    break
 
     # is_bridge
     l2 = (p.gemini_category_l2 or "").lower().strip()
@@ -469,29 +474,36 @@ def _is_cool_saturated(color: str) -> bool:
 
 
 def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[str]) -> float:
-    """Temperature-aware color compatibility (base logic, no cross-dim). Returns 0.0-1.0."""
+    """Temperature-aware color compatibility (base logic, no cross-dim). Returns 0.0-1.0.
+
+    v2.3: Range flattened toward 0.50 so color neither strongly rewards
+    nor strongly penalises.  Same-color items no longer get a high bonus;
+    complementary and analogous pairs are treated as neutral-good.  Only
+    genuinely clashing combos (warm neutral + cool saturated, unrelated
+    chromatics) stay low.
+    """
     sc = _normalize_color(source_color)
     cc = _normalize_color(candidate_color)
     if not sc or not cc:
-        return 0.5
+        return 0.50
 
     sc_neutral = _neutral_type(sc)
     cc_neutral = _neutral_type(cc)
 
-    # Both neutrals
+    # Both neutrals — always fine, but no big reward
     if sc_neutral and cc_neutral:
         if sc_neutral == cc_neutral:
-            return 0.85
+            return 0.60
         if "true" in (sc_neutral, cc_neutral):
-            return 0.80
-        return 0.65
+            return 0.60
+        return 0.55
 
-    # One neutral, one chromatic — neutrals always get minimum 0.75
+    # One neutral, one chromatic
     if sc_neutral or cc_neutral:
         neutral_type = sc_neutral if sc_neutral else cc_neutral
         chromatic_side = cc if sc_neutral else sc
         if neutral_type == "true":
-            return 0.80
+            return 0.60
         if neutral_type == "warm":
             if _is_cool_saturated(chromatic_side):
                 return 0.35
@@ -504,20 +516,20 @@ def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[s
                         "sage", "green", "pink", "rose", "blush", "dusty pink",
                     }
                 ):
-                    return 0.75
-            return 0.60
+                    return 0.55
+            return 0.50
         if neutral_type == "cool":
-            return 0.75
+            return 0.55
 
     # Both chromatic
     if sc == cc:
-        return 0.85
+        return 0.55          # same color — no longer rewarded
     if sc in cc or cc in sc:
-        return 0.80
+        return 0.55
 
     for group in ANALOGOUS_GROUPS:
         if any(c in sc for c in group) and any(c in cc for c in group):
-            return 0.75
+            return 0.55
 
     for group_a, group_b in COMPLEMENTARY_PAIRS:
         sc_in_a = any(c in sc for c in group_a)
@@ -525,9 +537,9 @@ def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[s
         sc_in_b = any(c in sc for c in group_b)
         cc_in_a = any(c in cc for c in group_a)
         if (sc_in_a and cc_in_b) or (sc_in_b and cc_in_a):
-            return 0.70
+            return 0.55
 
-    return 0.35
+    return 0.40
 
 
 # =============================================================================
@@ -542,53 +554,56 @@ def _base_color_harmony(source_color: Optional[str], candidate_color: Optional[s
 # color, seasonality) so complement items share attributes with the source.
 # Contrast dims (fabric, silhouette) are kept but reduced — fashion "rules"
 # like volume balance still contribute, just don't dominate.
+# v2.3: Color weight reduced from 0.14-0.16 → 0.06 to discourage
+# same-color outfits.  Freed weight redistributed to style (+0.04),
+# fabric (+0.03), pattern (+0.03) — dimensions that drive variety.
 CATEGORY_PAIR_WEIGHTS: Dict[Tuple[str, str], Dict[str, float]] = {
     ("tops", "bottoms"): {
-        "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
-        "pattern": 0.06, "price": 0.06,
+        "occasion_formality": 0.22, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.12,
+        "pattern": 0.09, "price": 0.06,
     },
     ("bottoms", "tops"): {
-        "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
-        "pattern": 0.06, "price": 0.06,
+        "occasion_formality": 0.22, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.12,
+        "pattern": 0.09, "price": 0.06,
     },
     ("dresses", "outerwear"): {
-        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.12,
-        "silhouette": 0.10, "color": 0.14, "seasonality": 0.16,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.18, "fabric": 0.15,
+        "silhouette": 0.10, "color": 0.06, "seasonality": 0.16,
+        "pattern": 0.07, "price": 0.08,
     },
     ("outerwear", "tops"): {
-        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.14,
+        "pattern": 0.07, "price": 0.08,
     },
     ("outerwear", "bottoms"): {
-        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.14,
+        "pattern": 0.07, "price": 0.08,
     },
     ("outerwear", "dresses"): {
-        "occasion_formality": 0.20, "style": 0.14, "fabric": 0.12,
-        "silhouette": 0.10, "color": 0.14, "seasonality": 0.16,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.18, "fabric": 0.15,
+        "silhouette": 0.10, "color": 0.06, "seasonality": 0.16,
+        "pattern": 0.07, "price": 0.08,
     },
     ("tops", "outerwear"): {
-        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.14,
+        "pattern": 0.07, "price": 0.08,
     },
     ("bottoms", "outerwear"): {
-        "occasion_formality": 0.20, "style": 0.16, "fabric": 0.10,
-        "silhouette": 0.12, "color": 0.14, "seasonality": 0.14,
-        "pattern": 0.06, "price": 0.08,
+        "occasion_formality": 0.20, "style": 0.20, "fabric": 0.13,
+        "silhouette": 0.12, "color": 0.06, "seasonality": 0.14,
+        "pattern": 0.07, "price": 0.08,
     },
 }
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "occasion_formality": 0.22, "style": 0.16, "fabric": 0.10,
-    "silhouette": 0.12, "color": 0.16, "seasonality": 0.12,
-    "pattern": 0.06, "price": 0.06,
+    "occasion_formality": 0.22, "style": 0.20, "fabric": 0.13,
+    "silhouette": 0.12, "color": 0.06, "seasonality": 0.12,
+    "pattern": 0.09, "price": 0.06,
 }
 
 
@@ -664,7 +679,16 @@ def _score_occasion_formality(source: AestheticProfile, cand: AestheticProfile) 
     else:
         time_score = 0.60  # unknown / mixed
 
-    return 0.55 * form_score + 0.30 * occ_score + 0.15 * time_score
+    result = 0.55 * form_score + 0.30 * occ_score + 0.15 * time_score
+
+    # Cross-gate: extreme formality mismatch caps the score even when
+    # occasions overlap — a Formal+Casual combo is never a good outfit.
+    if delta >= 4:
+        result = min(result, 0.40)
+    elif delta >= 3:
+        result = min(result, 0.55)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +789,14 @@ def _score_style(source: AestheticProfile, cand: AestheticProfile) -> float:
     else:
         bridge_score = adj_score  # no help needed
 
-    return 0.60 * adj_score + 0.25 * strength_score + 0.15 * bridge_score
+    result = 0.60 * adj_score + 0.25 * strength_score + 0.15 * bridge_score
+
+    # Cross-gate: two competing statement pieces (both sequin, both bold)
+    # fight for visual attention — penalize even if styles are adjacent.
+    if ss >= 0.7 and cs >= 0.7:
+        result -= 0.10
+
+    return max(0.0, result)
 
 
 # ---------------------------------------------------------------------------
@@ -949,7 +980,15 @@ def _score_fabric(source: AestheticProfile, cand: AestheticProfile) -> float:
     else:
         weight_score = 0.55
 
-    return 0.40 * contrast_score + 0.45 * pair_score + 0.15 * weight_score
+    result = 0.40 * contrast_score + 0.45 * pair_score + 0.15 * weight_score
+
+    # Cross-gate: two shiny items compete for visual attention — the pair
+    # table can't rescue this (satin+sequin = 0.75 is generous normally,
+    # but not when both are shiny/metallic).
+    if sh1 and sh2 and sh1 == "shiny" and sh2 == "shiny":
+        result = min(result, 0.45)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1029,13 +1068,12 @@ def _score_silhouette(source: AestheticProfile, cand: AestheticProfile) -> float
     c_len = (cand.length or "").strip().lower()
     s_cov = (source.coverage_level or "").strip().lower()
     c_cov = (cand.coverage_level or "").strip().lower()
-    s_rise = (cand.rise or "").strip().lower()   # candidate bottom rise
-
     s_broad = (source.broad_category or "").lower()
     c_broad = (cand.broad_category or "").lower()
 
     scores: List[float] = []
     weights: List[float] = []
+    sil_very_bad = False  # track severe silhouette clashes
 
     # --- Silhouette balance (weight 0.50) ---
     if s_sil and c_sil:
@@ -1048,7 +1086,9 @@ def _score_silhouette(source: AestheticProfile, cand: AestheticProfile) -> float
             top_sil = s_sil if s_broad == "tops" else c_sil
             bot_sil = c_sil if s_broad == "tops" else s_sil
             top_len = s_len if s_broad == "tops" else c_len
-            bot_rise = s_rise if s_broad == "bottoms" else (source.rise or "").strip().lower()
+            # Get the BOTTOM item's rise (regardless of arg order)
+            bot_rise = (cand.rise or "").strip().lower() if s_broad == "tops" \
+                else (source.rise or "").strip().lower()
 
             # Balance rule: wide bottom → fitted top
             if bot_sil in _WIDE_BOTTOM_SILS and top_sil in _FITTED_TOP_SILS:
@@ -1094,6 +1134,7 @@ def _score_silhouette(source: AestheticProfile, cand: AestheticProfile) -> float
         else:
             sil_score = _lookup_symmetric(_SILHOUETTE_COMPAT, s_sil, c_sil, 0.55)
 
+        sil_very_bad = sil_score <= 0.25
         scores.append(sil_score)
         weights.append(0.50)
 
@@ -1110,7 +1151,15 @@ def _score_silhouette(source: AestheticProfile, cand: AestheticProfile) -> float
     if not scores:
         return 0.50
     total_w = sum(weights)
-    return sum(s * w for s, w in zip(scores, weights)) / total_w
+    result = sum(s * w for s, w in zip(scores, weights)) / total_w
+
+    # Shape balance gate: when the silhouette combo is very bad
+    # (oversized+oversized, oversized+wide), coverage and length
+    # sub-scores shouldn't rescue it — the outfit looks shapeless.
+    if sil_very_bad:
+        result = min(result, 0.35)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1218,13 +1267,20 @@ def _score_seasonality(source: AestheticProfile, cand: AestheticProfile) -> floa
         elif s1_winter and s2_winter:
             fab_score = 0.80
         elif (s1_summer and s2_winter) or (s1_winter and s2_summer):
-            # Cross-season fabric — bad unless layering
+            # Cross-season fabric — bad unless layering (and even then, muted)
             roles = {source.layer_role, cand.layer_role}
-            fab_score = 0.45 if "outer" in roles else 0.20
+            fab_score = 0.35 if "outer" in roles else 0.20
         else:
             fab_score = 0.65  # mid-weight fabrics are versatile
 
-    return 0.45 * temp_score + 0.30 * layer_score + 0.25 * fab_score
+    result = 0.45 * temp_score + 0.30 * layer_score + 0.25 * fab_score
+
+    # Cross-gate: two outer layers is fundamentally bad outfit composition.
+    # Temp and fabric sub-scores can't rescue wearing two coats.
+    if r1 == "outer" and r2 == "outer":
+        result = min(result, 0.50)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2298,9 +2354,14 @@ class OutfitEngine:
 
         prompts = []
 
-        # --- Prompt 1: Neutral safe complement (always included) ---
+        # --- Prompt 1: Fabric + formality complement (color-neutral) ---
+        # v2.3: Removed source color from this prompt to avoid biasing
+        # FashionCLIP retrieval toward same-color items.
         safe_noun = nouns[0]
-        prompts.append(f"women's {safe_noun} to wear with {src_color} {src_fabric}".strip())
+        prompts.append(
+            f"women's {src_fabric} {safe_noun} "
+            f"{src_formality.lower() if src_formality else 'casual'}".strip()
+        )
 
         # --- Prompt 2: Fabric contrast ---
         contrast_fabrics = _FABRIC_CONTRAST.get(
@@ -2312,12 +2373,13 @@ class OutfitEngine:
             f"{src_formality.lower() if src_formality else 'casual'}".strip()
         )
 
-        # --- Prompt 3: Color complement ---
+        # --- Prompt 3: Style variety (was: color complement) ---
+        # v2.3: Focus on style/fabric variety instead of color matching.
         color_key = (src_color or "").lower().split()[0] if src_color else ""
         comp_colors = _COLOR_COMPLEMENTS.get(color_key, ["white", "black", "cream"])
         prompts.append(
-            f"{comp_colors[0]} {nouns[2 % len(nouns)]} "
-            f"{contrast_fabrics[1] if len(contrast_fabrics) > 1 else 'cotton'}"
+            f"stylish {nouns[2 % len(nouns)]} "
+            f"{contrast_fabrics[1] if len(contrast_fabrics) > 1 else 'cotton'} women"
         )
 
         # --- Prompt 4: Style neighbor (different vibe) ---
