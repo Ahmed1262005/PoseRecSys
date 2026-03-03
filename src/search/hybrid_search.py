@@ -230,6 +230,8 @@ class HybridSearchService:
                     preserved["category_l1"] = plan_updates["category_l1"]
                     skipped.pop("category_l1", None)
                 updates = preserved
+                if updates:
+                    request = request.model_copy(update=updates)
                 logger.info(
                     "Vague query — skipping subjective filters, keeping category_l1",
                     query=request.query,
