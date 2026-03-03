@@ -497,17 +497,20 @@ def do_search(
 def do_refine(
     original_query: str,
     selected_filters: dict,
+    selection_labels: list = None,
     page: int = 1,
     page_size: int = 30,
     session_id: str = None,
 ) -> dict:
-    """Call /api/search/refine with follow-up filters."""
+    """Call /api/search/refine with follow-up filters + refinement planner."""
     body = {
         "original_query": original_query,
         "selected_filters": selected_filters,
         "page": page,
         "page_size": page_size,
     }
+    if selection_labels:
+        body["selection_labels"] = selection_labels
     if session_id:
         body["session_id"] = session_id
 
@@ -1065,11 +1068,13 @@ def create_app():
                     # Merge multi-select filters into a flat dict
                     merged_filters, labels_used = _merge_multi_selections(selections)
 
-                    # Use /refine endpoint — applies filters as hard constraints,
-                    # skips the LLM planner (faster + filters are guaranteed to apply).
+                    # Use /refine endpoint — calls the refinement LLM planner
+                    # to generate updated semantic queries, proper filters, and
+                    # new follow-up questions incorporating the user's selections.
                     response = do_refine(
                         original_query=orig_query,
                         selected_filters=merged_filters,
+                        selection_labels=labels_used,
                         page=1,
                         page_size=30,
                         session_id=session_id,

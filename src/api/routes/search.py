@@ -188,24 +188,89 @@ def refine_search(
     Refine a previous search by applying filter updates from follow-up answers.
 
     The client sends the original query + the combined filters from selected
-    follow-up options. This endpoint merges them into a HybridSearchRequest
-    and re-runs the search **without** calling the LLM planner again (the
-    filters are already resolved).
+    follow-up options. This endpoint calls a **refinement LLM planner** that
+    generates an updated SearchPlan incorporating the user's selections:
+    - Updated semantic queries (original intent + selections woven in)
+    - Proper hard/soft filter decisions via modes + attributes
+    - New follow-up questions about unanswered dimensions
 
-    This avoids a second 15-25s planner call while preserving the full
-    hybrid pipeline (Algolia + semantic + RRF + reranker).
+    Falls back to skip_planner (soft filter) path if the refinement planner fails.
     """
     service = get_hybrid_search_service()
 
+    # Load user profile + context (needed for both planner and reranking)
+    user_profile = _load_user_profile(user.id)
+    user_context = _build_user_context(user, user_profile)
+    planner_context = _build_planner_context(user_profile, user_context)
+    session_scores = _load_session_scores(request.session_id)
+
+    # ------------------------------------------------------------------
+    # PRIMARY PATH: Call the refinement planner (second LLM call)
+    # ------------------------------------------------------------------
+    from search.query_planner import get_query_planner
+    planner = get_query_planner()
+
+    # Make a copy of selected_filters so we don't mutate the request
+    filters_for_planner = dict(request.selected_filters)
+
+    refine_plan = planner.refine(
+        original_query=request.original_query,
+        selected_filters=filters_for_planner,
+        selection_labels=request.selection_labels,
+        user_context=planner_context,
+    )
+
+    if refine_plan is not None:
+        # Refinement planner succeeded — run the full pipeline with the plan.
+        # Use the ORIGINAL query (the planner generates its own algolia_query
+        # and semantic_queries from the refinement context).
+        search_request = HybridSearchRequest(
+            query=request.original_query,
+            page=request.page,
+            page_size=request.page_size,
+            session_id=request.session_id,
+            sort_by=request.sort_by,
+            semantic_boost=request.semantic_boost,
+        )
+
+        result = service.search(
+            request=search_request,
+            user_id=user.id,
+            user_profile=user_profile,
+            user_context=user_context,
+            session_scores=session_scores,
+            pre_plan=refine_plan,
+        )
+
+        # Forward search signal
+        try:
+            _forward_search_signal(
+                user_id=user.id,
+                session_id=request.session_id,
+                query=request.original_query,
+                request=search_request,
+            )
+        except Exception:
+            pass
+
+        return result
+
+    # ------------------------------------------------------------------
+    # FALLBACK: Refinement planner failed — use skip_planner with soft
+    # filters (selected filters applied as optionalFilters in Algolia
+    # and soft scoring in semantic post-filter).
+    # ------------------------------------------------------------------
+    logger.warning(
+        "Refinement planner failed, falling back to skip_planner path",
+        query=request.original_query,
+    )
+
     # Build a refined query by injecting filter context into the original.
-    # This helps FashionCLIP semantic search target the right products
-    # (e.g. "outfit for a night out" + Dresses → "dress for a night out").
     refined_query = _build_refined_query(
         request.original_query, request.selected_filters
     )
 
-    # Build a HybridSearchRequest from the refined query + selected filters
-    search_fields = {
+    search_fields: Dict[str, Any] = {
         "query": refined_query,
         "page": request.page,
         "page_size": request.page_size,
@@ -215,18 +280,14 @@ def refine_search(
     }
 
     # Merge selected filters into the search request fields.
-    # Handle "modes" specially — they need to be expanded into filters via
-    # the planner's plan_to_request_updates, so we process them separately.
     modes_from_filters = request.selected_filters.pop("modes", None)
 
-    # Direct filter fields (map 1:1 to HybridSearchRequest fields)
     _ALLOWED_FILTER_FIELDS = {
         "categories", "category_l1", "category_l2", "brands", "exclude_brands",
         "colors", "color_family", "patterns", "materials", "occasions", "seasons",
         "formality", "fit_type", "neckline", "sleeve_type", "length", "rise",
         "silhouette", "article_type", "style_tags", "min_price", "max_price",
         "on_sale_only",
-        # Exclusion filters
         "exclude_neckline", "exclude_sleeve_type", "exclude_length",
         "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
         "exclude_colors", "exclude_materials", "exclude_occasions",
@@ -242,11 +303,9 @@ def refine_search(
         try:
             from search.mode_config import expand_modes
             mode_filters, mode_exclusions, _, _ = expand_modes(modes_from_filters)
-            # Merge mode filters into search fields (don't overwrite existing)
             for field, values in mode_filters.items():
                 if field not in search_fields:
                     search_fields[field] = list(values)
-            # Map mode exclusions to exclude_* fields
             _EXCLUDE_MAP = {
                 "neckline": "exclude_neckline",
                 "sleeve_type": "exclude_sleeve_type",
@@ -267,15 +326,9 @@ def refine_search(
                 if req_field and req_field not in search_fields:
                     search_fields[req_field] = list(values)
         except Exception as e:
-            logger.warning("Failed to expand modes in refine", error=str(e))
+            logger.warning("Failed to expand modes in refine fallback", error=str(e))
 
-    # Build the search request
     search_request = HybridSearchRequest(**search_fields)
-
-    # Load user profile + context (same as hybrid_search)
-    user_profile = _load_user_profile(user.id)
-    user_context = _build_user_context(user, user_profile)
-    session_scores = _load_session_scores(request.session_id)
 
     result = service.search(
         request=search_request,
@@ -283,10 +336,10 @@ def refine_search(
         user_profile=user_profile,
         user_context=user_context,
         session_scores=session_scores,
-        skip_planner=True,  # Filters already resolved — skip the LLM call
+        skip_planner=True,
     )
 
-    # Forward search signal (same as hybrid_search)
+    # Forward search signal
     try:
         _forward_search_signal(
             user_id=user.id,

@@ -102,6 +102,7 @@ class HybridSearchService:
         session_scores: Optional[Any] = None,
         skip_planner: bool = False,
         planner_context: Optional[Dict[str, Any]] = None,
+        pre_plan: Optional[Any] = None,
     ) -> HybridSearchResponse:
         """
         Execute hybrid search.
@@ -116,6 +117,8 @@ class HybridSearchService:
             skip_planner: If True, skip the LLM planner (filters pre-resolved).
             planner_context: Optional compact dict with user profile info for
                 personalized follow-ups (passed through to QueryPlanner.plan()).
+            pre_plan: Optional pre-computed SearchPlan (from refinement planner).
+                When provided, skip the planner call and use this plan directly.
 
         Returns:
             HybridSearchResponse with results and metadata.
@@ -156,7 +159,15 @@ class HybridSearchService:
         follow_ups: Optional[List[FollowUpQuestion]] = None
 
         t_plan = time.time()
-        if not skip_planner:
+        if pre_plan is not None:
+            # Use the pre-computed plan (from refinement planner)
+            search_plan = pre_plan
+            logger.info(
+                "Using pre-computed search plan (refinement)",
+                query=request.query,
+                intent=search_plan.intent,
+            )
+        elif not skip_planner:
             search_plan = self._planner.plan(
                 request.query,
                 user_context=planner_context,

@@ -107,6 +107,11 @@ class SearchRefineRequest(BaseModel):
         ...,
         description="Combined filter updates from selected follow-up options"
     )
+    selection_labels: Optional[List[str]] = Field(
+        None,
+        description="Human-readable labels of selected options (e.g. ['Fitted', 'Glamorous']). "
+        "Helps the refinement planner understand intent.",
+    )
     # All the same filter fields as HybridSearchRequest (inherited via merge)
     page: int = Field(1, ge=1, description="Page number")
     page_size: int = Field(50, ge=1, le=100, description="Results per page")

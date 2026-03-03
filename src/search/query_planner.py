@@ -689,6 +689,42 @@ When a "User context:" prefix is present, personalize follow-ups as follows:
 7. **Skip follow-up questions** already answered by user context or the query.
 8. **If no user context is provided**, generate follow-ups in the default order (most popular first).
 
+## SECTION 11: REFINEMENT MODE
+
+When the user message starts with "[REFINEMENT]", you are refining an existing search — NOT starting
+fresh. The user already searched, saw follow-up questions, and selected answers.
+
+**RULES FOR REFINEMENT:**
+
+1. **Selected filters are MANDATORY.** The selections listed in the user message MUST appear verbatim
+   in your "attributes" output. Do NOT weaken, remove, reinterpret, or contradict them.
+   If the user selected {{"fit_type": ["Fitted", "Slim"]}}, your attributes MUST include
+   "fit_type": ["Fitted", "Slim"].
+
+2. **Merge with original intent.** The original query provides the base context (occasion, garment
+   type, vibe). The selections NARROW it. Combine them — don't replace the original intent.
+   Example: query="outfit for a date" + selection {{"category_l1": ["Dresses"]}} →
+   your plan should be about dresses for a date, not just generic dresses.
+
+3. **Generate new semantic_queries** that describe what the user NOW wants — original intent +
+   all selected filters woven into visual descriptions. Each query should paint a picture
+   FashionCLIP can match.
+   Example: query="tops" + fitted + edgy → semantic_queries: [
+     "fitted black faux leather crop top with edgy streetwear style",
+     "slim fitted ribbed tank top in dark solid color, modern edge",
+     "structured fitted bodysuit in sleek fabric, edgy minimalist"
+   ]
+
+4. **Generate 1-2 NEW follow-up questions** about dimensions NOT yet answered. The user message
+   lists "Answered dimensions" — do NOT re-ask those. Pick the next highest-lift unanswered
+   dimensions from the priority list in Section 9.
+
+5. **Keep the same intent classification** as the original query would get, unless selections
+   make it more specific (e.g. vague + category selection → specific).
+
+6. **algolia_query** should include product-name keywords that reflect the refinement. Remove
+   filler words. If all terms are in filters, return empty string "".
+
 Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
 
 
@@ -982,6 +1018,252 @@ class QueryPlanner:
         latency_ms = int((time.time() - t_start) * 1000)
         logger.warning(
             "Query planner failed, falling back to basic search",
+            error=str(last_error),
+            latency_ms=latency_ms,
+        )
+        return None
+
+    # -----------------------------------------------------------------
+    # Refinement planner — second LLM call after follow-up selections
+    # -----------------------------------------------------------------
+
+    # Map filter keys → follow-up dimension names for the LLM
+    _FILTER_KEY_TO_DIMENSION = {
+        "category_l1": "garment_type",
+        "category_l2": "garment_type",
+        "fit_type": "fit",
+        "silhouette": "fit",
+        "style_tags": "vibe",
+        "patterns": "vibe",
+        "materials": "vibe",
+        "formality": "formality",
+        "occasions": "occasion",
+        "modes": "coverage",
+        "min_price": "price",
+        "max_price": "price",
+        "colors": "color",
+        "color_family": "color",
+        "neckline": "fit",
+        "sleeve_type": "fit",
+        "length": "fit",
+        "rise": "fit",
+    }
+
+    def _infer_answered_dimensions(self, selected_filters: Dict[str, Any]) -> List[str]:
+        """Infer which follow-up dimensions the user already answered from filter keys."""
+        dims: set = set()
+        for key in selected_filters:
+            dim = self._FILTER_KEY_TO_DIMENSION.get(key)
+            if dim:
+                dims.add(dim)
+        return sorted(dims)
+
+    @staticmethod
+    def _build_refine_user_message(
+        original_query: str,
+        selected_filters: Dict[str, Any],
+        selection_labels: Optional[List[str]] = None,
+        answered_dimensions: Optional[List[str]] = None,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Build user message for the refinement planner.
+
+        Prefixed with [REFINEMENT] so the system prompt's Section 11 activates.
+        Includes the original query, selected filters, and which dimensions are answered.
+        """
+        parts = []
+
+        # User context (same format as initial planner)
+        if user_context:
+            ctx_parts = []
+            age = user_context.get("age_group")
+            if age:
+                ctx_parts.append(f"age={age}")
+            style = user_context.get("style_persona")
+            if style:
+                ctx_parts.append(f"style={'/'.join(style) if isinstance(style, list) else style}")
+            descs = user_context.get("cluster_descriptions")
+            if descs and isinstance(descs, list):
+                ctx_parts.append(f"brand_affinity={'/'.join(descs[:3])}")
+            price_range = user_context.get("price_range")
+            if price_range and isinstance(price_range, dict):
+                pmin, pmax = price_range.get("min"), price_range.get("max")
+                if pmin is not None and pmax is not None:
+                    ctx_parts.append(f"price=${pmin}-${pmax}")
+                elif pmax is not None:
+                    ctx_parts.append(f"price=up to ${pmax}")
+            modesty = user_context.get("modesty")
+            if modesty:
+                ctx_parts.append(f"modesty={modesty}")
+            if ctx_parts:
+                parts.append(f"[User context: {', '.join(ctx_parts)}]")
+
+        # Refinement header
+        parts.append("[REFINEMENT]")
+        parts.append(f'Original query: "{original_query}"')
+
+        # Selected filters with labels for context
+        if selection_labels:
+            parts.append(f"User selected: {', '.join(selection_labels)}")
+
+        filters_json = json.dumps(selected_filters, indent=2)
+        parts.append(f"Selected filters:\n{filters_json}")
+
+        answered = ", ".join(answered_dimensions) if answered_dimensions else "none"
+        parts.append(f"Answered dimensions: {answered}")
+        parts.append(f"Do NOT re-ask: {answered}")
+
+        return "\n\n".join(parts)
+
+    def refine(
+        self,
+        original_query: str,
+        selected_filters: Dict[str, Any],
+        selection_labels: Optional[List[str]] = None,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[SearchPlan]:
+        """
+        Generate a refined search plan incorporating user's follow-up selections.
+
+        Uses the same system prompt as plan() but with a [REFINEMENT]-prefixed
+        user message (activating Section 11 instructions). The LLM generates
+        updated semantic queries, attributes, and new follow-ups.
+
+        Returns None on failure (caller should fall back to skip_planner path).
+        """
+        if not self._enabled:
+            logger.debug("Query planner disabled — cannot refine")
+            return None
+
+        answered_dimensions = self._infer_answered_dimensions(selected_filters)
+
+        user_message = self._build_refine_user_message(
+            original_query=original_query,
+            selected_filters=selected_filters,
+            selection_labels=selection_labels,
+            answered_dimensions=answered_dimensions,
+            user_context=user_context,
+        )
+
+        t_start = time.time()
+        last_error = None
+
+        for attempt in range(1 + self._MAX_RETRIES):
+            try:
+                is_reasoning_model = any(
+                    self._model.startswith(p)
+                    for p in ("gpt-5", "o1", "o3", "o4")
+                )
+
+                api_params = {
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "response_format": {"type": "json_object"},
+                }
+
+                if is_reasoning_model:
+                    api_params["max_completion_tokens"] = 8192
+                else:
+                    api_params["temperature"] = 0.0
+                    api_params["max_tokens"] = 1600
+
+                response = self.client.chat.completions.create(**api_params)
+
+                finish_reason = response.choices[0].finish_reason
+                if finish_reason == "length":
+                    logger.warning(
+                        "Refine planner output truncated",
+                        model=self._model,
+                        query=original_query,
+                    )
+
+                raw = response.choices[0].message.content
+                if not raw:
+                    logger.warning("Refine planner returned empty response")
+                    return None
+
+                data = json.loads(raw)
+
+                # Fix common LLM mistake: nesting avoid inside attributes
+                attributes = data.get("attributes", {})
+                if isinstance(attributes, dict) and "avoid" in attributes:
+                    nested_avoid = attributes.pop("avoid")
+                    if isinstance(nested_avoid, dict):
+                        existing = data.get("avoid", {})
+                        if not isinstance(existing, dict):
+                            existing = {}
+                        for k, v in nested_avoid.items():
+                            if k not in existing and isinstance(v, list):
+                                existing[k] = v
+                        data["avoid"] = existing
+
+                # Force-inject selected filters into attributes so they are
+                # ALWAYS present even if the LLM omitted or weakened them.
+                if "attributes" not in data or not isinstance(data["attributes"], dict):
+                    data["attributes"] = {}
+                for key, values in selected_filters.items():
+                    if key == "modes":
+                        # Modes go to the modes list, not attributes
+                        if isinstance(values, list):
+                            existing_modes = data.get("modes") or []
+                            for m in values:
+                                if m not in existing_modes:
+                                    existing_modes.append(m)
+                            data["modes"] = existing_modes
+                        continue
+                    if key in ("min_price", "max_price", "on_sale_only"):
+                        # Price/sale go to top-level fields
+                        data[key] = values
+                        continue
+                    if isinstance(values, list) and values:
+                        data["attributes"][key] = values
+
+                plan = SearchPlan(**data)
+
+                # Parse follow_ups
+                plan.parsed_follow_ups = self._parse_follow_ups(
+                    data.get("follow_ups", [])
+                )
+
+                latency_ms = int((time.time() - t_start) * 1000)
+                logger.info(
+                    "Refine planner generated updated plan",
+                    original_query=original_query,
+                    intent=plan.intent,
+                    algolia_query=plan.algolia_query,
+                    semantic_queries=plan.semantic_queries,
+                    modes=plan.modes,
+                    attributes=plan.attributes,
+                    avoid=plan.avoid,
+                    follow_ups_count=len(plan.parsed_follow_ups),
+                    selected_filters=selected_filters,
+                    latency_ms=latency_ms,
+                )
+                return plan
+
+            except json.JSONDecodeError as e:
+                logger.warning("Refine planner returned invalid JSON", error=str(e))
+                return None
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "429" in error_str and attempt < self._MAX_RETRIES:
+                    wait = self._RETRY_BACKOFF_SECONDS[attempt]
+                    logger.info(
+                        "Refine planner rate-limited, retrying",
+                        attempt=attempt + 1,
+                        wait_seconds=wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                break
+
+        latency_ms = int((time.time() - t_start) * 1000)
+        logger.warning(
+            "Refine planner failed, will fall back to skip_planner",
             error=str(last_error),
             latency_ms=latency_ms,
         )
