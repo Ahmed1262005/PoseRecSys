@@ -91,6 +91,13 @@ class HybridSearchRequest(BaseModel):
     # Planner context override (for testing / scripts — normally built server-side from user profile)
     planner_context: Optional[Dict[str, Any]] = Field(None, description="Override planner context for personalized follow-ups (testing only)", exclude=True)
 
+    # Follow-up refinement fields — when present, the planner runs in
+    # REFINEMENT mode (Section 11).  The LLM sees the original query plus
+    # the user's follow-up selections and generates updated semantic queries,
+    # modes, avoids, and new follow-up questions.
+    selected_filters: Optional[Dict[str, Any]] = Field(None, description="Follow-up filter selections (e.g. {\"fit_type\": [\"Fitted\"]})", exclude=True)
+    selection_labels: Optional[List[str]] = Field(None, description="Human-readable labels of selected follow-up options (e.g. ['Fitted', 'Glamorous'])", exclude=True)
+
     @model_validator(mode="after")
     def validate_price_range(self):
         """Ensure min_price <= max_price when both are set."""

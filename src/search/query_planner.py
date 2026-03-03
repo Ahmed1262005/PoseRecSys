@@ -799,28 +799,13 @@ class QueryPlanner:
         return parsed
 
     @staticmethod
-    def _build_user_message(
-        query: str,
-        user_context: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Build the user message with optional context prefix.
+    def _format_context_line(user_context: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Format the [User context: ...] line from a user_context dict.
 
-        When user_context is provided, prepend a compact context line (~80-120
-        tokens) so the LLM can personalize follow-up option ordering per
-        Section 10.  The prefix does NOT change how the LLM interprets the
-        query itself — it only affects follow-up personalization.
-
-        Args:
-            query: The raw search query.
-            user_context: Optional dict with keys: age_group, brand_clusters,
-                cluster_descriptions, price_range, style_persona,
-                brand_openness, modesty.
-
-        Returns:
-            User message string (with or without context prefix).
+        Returns None if user_context is empty or produces no parts.
         """
         if not user_context:
-            return query
+            return None
 
         parts = []
 
@@ -866,18 +851,93 @@ class QueryPlanner:
             parts.append(f"modesty={modesty}")
 
         if not parts:
-            return query
+            return None
 
-        context_line = f"[User context: {', '.join(parts)}]"
-        return f"{context_line}\n\n{query}"
+        return f"[User context: {', '.join(parts)}]"
+
+    @staticmethod
+    def _build_user_message(
+        query: str,
+        user_context: Optional[Dict[str, Any]] = None,
+        selected_filters: Optional[Dict[str, Any]] = None,
+        selection_labels: Optional[List[str]] = None,
+    ) -> str:
+        """Build the user message with optional context prefix and refinement block.
+
+        When user_context is provided, prepend a compact context line (~80-120
+        tokens) so the LLM can personalize follow-up option ordering per
+        Section 10.
+
+        When selected_filters / selection_labels are provided, the message is
+        formatted in REFINEMENT mode (Section 11 of the system prompt). The
+        LLM sees the original query plus the user's follow-up selections and
+        generates updated semantic queries, modes, avoids, and new follow-ups.
+
+        Args:
+            query: The raw search query.
+            user_context: Optional dict with keys: age_group, brand_clusters,
+                cluster_descriptions, price_range, style_persona,
+                brand_openness, modesty.
+            selected_filters: Optional dict of follow-up filter selections
+                (e.g. {"fit_type": ["Fitted"], "modes": ["cover_arms"]}).
+            selection_labels: Optional list of human-readable labels
+                (e.g. ["Fitted", "Covered arms"]).
+
+        Returns:
+            User message string.
+        """
+        context_line = QueryPlanner._format_context_line(user_context)
+
+        # ------------------------------------------------------------------
+        # REFINEMENT mode — when follow-up selections are provided, format
+        # the message so Section 11 of the system prompt activates.
+        # ------------------------------------------------------------------
+        if selected_filters:
+            answered_dimensions = QueryPlanner._infer_answered_dimensions(selected_filters)
+
+            parts = []
+            if context_line:
+                parts.append(context_line)
+
+            parts.append("[REFINEMENT]")
+            parts.append(f'Original query: "{query}"')
+
+            if selection_labels:
+                parts.append(f"User selected: {', '.join(selection_labels)}")
+
+            filters_json = json.dumps(selected_filters, indent=2)
+            parts.append(f"Selected filters:\n{filters_json}")
+
+            answered = ", ".join(answered_dimensions) if answered_dimensions else "none"
+            parts.append(f"Answered dimensions: {answered}")
+            parts.append(f"Do NOT re-ask: {answered}")
+
+            return "\n\n".join(parts)
+
+        # ------------------------------------------------------------------
+        # Normal mode — optional context prefix + raw query.
+        # ------------------------------------------------------------------
+        if context_line:
+            return f"{context_line}\n\n{query}"
+
+        return query
 
     def plan(
         self,
         query: str,
         user_context: Optional[Dict[str, Any]] = None,
+        selected_filters: Optional[Dict[str, Any]] = None,
+        selection_labels: Optional[List[str]] = None,
     ) -> Optional[SearchPlan]:
         """
         Generate a search plan for the given query.
+
+        When selected_filters / selection_labels are provided, the planner
+        runs in REFINEMENT mode (Section 11): the LLM sees the original
+        query plus the user's follow-up selections and generates updated
+        semantic queries, modes, avoids, and new follow-up questions.
+        After the LLM responds, selected filters are force-injected into
+        the plan so they cannot be dropped.
 
         Args:
             query: The user's search query.
@@ -885,6 +945,8 @@ class QueryPlanner:
                 personalized follow-ups. Keys: age_group, brand_clusters,
                 cluster_descriptions, price_range, style_persona,
                 brand_openness, modesty.
+            selected_filters: Optional dict of follow-up filter selections.
+            selection_labels: Optional list of human-readable option labels.
 
         Retries on rate-limit (429) errors with exponential backoff.
         Returns None if the planner is disabled, times out, or fails.
@@ -910,9 +972,11 @@ class QueryPlanner:
                 )
 
                 # Build user message: optional context prefix + query.
-                # Context is injected as a prefix (~80-120 tokens) so the LLM
-                # can personalize follow-up option ordering per Section 10.
-                user_message = self._build_user_message(query, user_context)
+                # When selected_filters are present, the message includes a
+                # [REFINEMENT] block activating Section 11.
+                user_message = self._build_user_message(
+                    query, user_context, selected_filters, selection_labels,
+                )
 
                 api_params = {
                     "model": self._model,
@@ -971,6 +1035,29 @@ class QueryPlanner:
                         extracted=data.get("avoid"),
                     )
 
+                # REFINEMENT mode: force-inject selected filters into the
+                # plan so they are ALWAYS present even if the LLM omitted
+                # or weakened them.
+                if selected_filters:
+                    if "attributes" not in data or not isinstance(data["attributes"], dict):
+                        data["attributes"] = {}
+                    for key, values in selected_filters.items():
+                        if key == "modes":
+                            # Modes go to the modes list, not attributes
+                            if isinstance(values, list):
+                                existing_modes = data.get("modes") or []
+                                for m in values:
+                                    if m not in existing_modes:
+                                        existing_modes.append(m)
+                                data["modes"] = existing_modes
+                            continue
+                        if key in ("min_price", "max_price", "on_sale_only"):
+                            # Price/sale go to top-level fields
+                            data[key] = values
+                            continue
+                        if isinstance(values, list) and values:
+                            data["attributes"][key] = values
+
                 plan = SearchPlan(**data)
 
                 # Parse follow_ups from raw LLM output into validated
@@ -980,9 +1067,11 @@ class QueryPlanner:
                 )
 
                 latency_ms = int((time.time() - t_start) * 1000)
+                is_refinement = bool(selected_filters)
                 logger.info(
                     "Query planner generated search plan",
                     query=query,
+                    refinement=is_refinement,
                     intent=plan.intent,
                     algolia_query=plan.algolia_query,
                     semantic_query=plan.semantic_query,
@@ -992,6 +1081,7 @@ class QueryPlanner:
                     follow_ups_count=len(plan.parsed_follow_ups),
                     confidence=plan.confidence,
                     latency_ms=latency_ms,
+                    **({"selection_labels": selection_labels} if is_refinement else {}),
                 )
                 return plan
 
@@ -1049,11 +1139,12 @@ class QueryPlanner:
         "rise": "fit",
     }
 
-    def _infer_answered_dimensions(self, selected_filters: Dict[str, Any]) -> List[str]:
+    @staticmethod
+    def _infer_answered_dimensions(selected_filters: Dict[str, Any]) -> List[str]:
         """Infer which follow-up dimensions the user already answered from filter keys."""
         dims: set = set()
         for key in selected_filters:
-            dim = self._FILTER_KEY_TO_DIMENSION.get(key)
+            dim = QueryPlanner._FILTER_KEY_TO_DIMENSION.get(key)
             if dim:
                 dims.add(dim)
         return sorted(dims)

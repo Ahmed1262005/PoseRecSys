@@ -103,6 +103,8 @@ class HybridSearchService:
         skip_planner: bool = False,
         planner_context: Optional[Dict[str, Any]] = None,
         pre_plan: Optional[Any] = None,
+        selected_filters: Optional[Dict[str, Any]] = None,
+        selection_labels: Optional[List[str]] = None,
     ) -> HybridSearchResponse:
         """
         Execute hybrid search.
@@ -117,6 +119,10 @@ class HybridSearchService:
             skip_planner: If True, skip the LLM planner (filters pre-resolved).
             planner_context: Optional compact dict with user profile info for
                 personalized follow-ups (passed through to QueryPlanner.plan()).
+            selected_filters: Optional follow-up filter selections. When
+                present, the planner runs in REFINEMENT mode (Section 11).
+            selection_labels: Optional human-readable labels of selected
+                follow-up options.
             pre_plan: Optional pre-computed SearchPlan (from refinement planner).
                 When provided, skip the planner call and use this plan directly.
 
@@ -171,6 +177,8 @@ class HybridSearchService:
             search_plan = self._planner.plan(
                 request.query,
                 user_context=planner_context,
+                selected_filters=selected_filters,
+                selection_labels=selection_labels,
             )
         timing["planner_ms"] = int((time.time() - t_plan) * 1000)
 

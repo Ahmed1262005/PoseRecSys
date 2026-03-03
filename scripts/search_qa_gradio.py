@@ -465,17 +465,34 @@ def _search_meta_html(response: dict) -> str:
 def do_search(
     query: str,
     planner_context: dict,
+    selected_filters: dict = None,
+    selection_labels: list = None,
     page: int = 1,
     page_size: int = 30,
     session_id: str = None,
 ) -> dict:
-    """Call /api/search/hybrid. Plain search, no extra filters."""
+    """Call /api/search/hybrid with optional follow-up refinement.
+
+    When selected_filters / selection_labels are provided (from follow-up
+    selections), the planner runs in REFINEMENT mode (Section 11): the LLM
+    sees the original query plus the user's selections and generates updated
+    semantic queries, modes, avoids, and new follow-up questions. Selected
+    filters are force-injected into the plan so the LLM can't drop them.
+    """
     body = {
         "query": query,
         "page": page,
         "page_size": page_size,
         "planner_context": planner_context,
     }
+    # Pass follow-up selections for refinement mode.
+    # These are sent as dedicated fields (not as HybridSearchRequest filter
+    # fields) so the planner gets them in its user message and can generate
+    # proper semantic queries, modes, and new follow-ups.
+    if selected_filters:
+        body["selected_filters"] = selected_filters
+    if selection_labels:
+        body["selection_labels"] = selection_labels
     if session_id:
         body["session_id"] = session_id
 
@@ -1068,19 +1085,28 @@ def create_app():
                     # Merge multi-select filters into a flat dict
                     merged_filters, labels_used = _merge_multi_selections(selections)
 
-                    # Use /refine endpoint — calls the refinement LLM planner
-                    # to generate updated semantic queries, proper filters, and
-                    # new follow-up questions incorporating the user's selections.
-                    response = do_refine(
-                        original_query=orig_query,
+                    # Build planner context from onboarding
+                    selected_ids = [
+                        s.split("]")[0].replace("[", "").strip() for s in clusters
+                    ]
+                    ctx = build_planner_context(age, selected_ids, mn, mx, mod)
+
+                    # Full search via /hybrid with REFINEMENT mode.
+                    # The planner sees the original query + selected_filters
+                    # + selection_labels in its [REFINEMENT] user message
+                    # (Section 11). It generates updated semantic queries,
+                    # modes, avoids, and NEW follow-up questions. Selected
+                    # filters are force-injected into the plan so the LLM
+                    # cannot drop them.
+                    response = do_search(
+                        query=orig_query,
+                        planner_context=ctx,
                         selected_filters=merged_filters,
                         selection_labels=labels_used,
                         page=1,
                         page_size=30,
                         session_id=session_id,
                     )
-
-                    ctx = {}
 
                     if "error" in response:
                         return [
@@ -1103,7 +1129,7 @@ def create_app():
                         f'<div style="font-size:12px; color:#059669; margin-top:4px;">'
                         f'Answers: <b>{" + ".join(labels_used)}</b></div>'
                         f'<div style="font-size:12px; color:#374151; margin-top:2px;">'
-                        f'Applied filters: <b>{filter_summary}</b></div>'
+                        f'Selected filters: <b>{filter_summary}</b></div>'
                     )
 
                     # Results grid
@@ -1114,19 +1140,14 @@ def create_app():
                     else:
                         grid = '<div style="color:#999; padding:20px;">No results found</div>'
 
-                    # New follow-ups from the fresh search.
-                    # When refine returns no follow-ups (planner skipped), keep
-                    # the original follow-up data so the user can change their
-                    # selections and refine again — prevents the UI from going
-                    # unresponsive after applying filters.
+                    # New follow-ups from the planner (fresh search generates them).
+                    # If none returned, keep original follow-ups so user can adjust.
                     new_follow_ups = response.get("follow_ups") or []
                     if new_follow_ups:
                         active_follow_ups = new_follow_ups
-                        active_selections = {}  # fresh follow-ups → reset selections
+                        active_selections = {}
                         summary = ""
                     else:
-                        # Keep original follow-ups + current selections so the
-                        # user can adjust and re-apply.
                         active_follow_ups = fu_data
                         active_selections = selections
                         summary = _selection_summary_html(selections)
@@ -1136,10 +1157,10 @@ def create_app():
 
                     return [
                         meta, grid, fu_html, ctx, response,
-                        active_follow_ups,    # fu_state (keep original if no new ones)
-                        orig_query,           # keep original query
-                        active_selections,    # keep selections if reusing follow-ups
-                        summary,              # keep summary if reusing follow-ups
+                        active_follow_ups,
+                        orig_query,
+                        active_selections,
+                        summary,
                         gr.Button("Search with selections", visible=bool(active_follow_ups), variant="primary"),
                     ] + btn_updates
 

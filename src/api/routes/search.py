@@ -89,6 +89,11 @@ def hybrid_search(
     # Load live session scores if session_id provided (for session-aware reranking)
     session_scores = _load_session_scores(request.session_id)
 
+    # Extract follow-up refinement fields (if present — enables REFINEMENT
+    # mode in the planner via Section 11 of the system prompt).
+    selected_filters = getattr(request, "selected_filters", None)
+    selection_labels = getattr(request, "selection_labels", None)
+
     result = service.search(
         request=request,
         user_id=user.id,
@@ -96,6 +101,8 @@ def hybrid_search(
         user_context=user_context,
         session_scores=session_scores,
         planner_context=planner_context,
+        selected_filters=selected_filters,
+        selection_labels=selection_labels,
     )
 
     # Wire search signals into recommendation session scoring (non-blocking)
