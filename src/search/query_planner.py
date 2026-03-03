@@ -190,7 +190,37 @@ def _build_system_prompt() -> str:
    - When in doubt, default to category_l1: ["Tops", "Dresses"]. Never leave category_l1 empty
      for vague queries — bottoms will pollute the results.
 
-5. **When the user requests a specific attribute value, also avoid the contradicting values.**
+5. **Think critically about the occasion.** When a query mentions a specific occasion, apply
+   real-world fashion knowledge about what is APPROPRIATE for that event:
+
+   **Garment type defaults by occasion** — override the generic "Tops, Dresses" default:
+   - Wedding / wedding guest / gala / cocktail party / formal event → category_l1: ["Dresses"] ONLY.
+     These are dress-first occasions. Nobody searches "wedding outfit" expecting tank tops.
+     Only include Tops/Outerwear if the user explicitly asks ("top for a wedding", "jacket for a gala").
+   - Date night / dinner / evening out → category_l1: ["Dresses"] ONLY (same reasoning).
+   - Job interview / business meeting → category_l1: ["Tops", "Dresses", "Bottoms"].
+     Separates (blouse + pants) are equally appropriate as a dress.
+   - Brunch / casual outing / vacation → category_l1: ["Tops", "Dresses"] (the default is fine).
+
+   **Color/style etiquette by occasion** — add to avoid{{}} when socially appropriate:
+   - Wedding guest → avoid: {{"colors": ["White", "Ivory", "Cream"]}}.
+     White is reserved for the bride. This is a strong cultural norm.
+   - Funeral / memorial → avoid: {{"colors": ["Red", "Hot Pink", "Neon"]}}.
+     Bright/loud colors are inappropriate. Prefer dark, muted tones.
+   - Job interview → avoid: {{"style_tags": ["Sexy", "Glamorous", "Edgy"]}}.
+     Keep it professional and understated.
+
+   **Formality calibration** — match the event's expected dress code:
+   - Wedding / gala → formal or semi-formal mode. NOT smart_casual (too casual).
+   - Cocktail party → semi-formal or glamorous mode.
+   - Date night → smart_casual or glamorous (depends on vibe).
+   - Office → work mode. NOT casual.
+
+   The key insight: when someone searches an occasion, they want APPROPRIATE results for that
+   specific event. Generic "Tops + Dresses" with no color avoids is lazy. Apply your fashion
+   knowledge to every occasion query.
+
+6. **When the user requests a specific attribute value, also avoid the contradicting values.**
    Requesting "long sleeves" means they do NOT want sleeveless, short, cap, or spaghetti strap results.
    Requesting "midi" means they do NOT want mini or micro. Always add the contradicting values to avoid.
    "With sleeves" means the user wants SUBSTANTIVE sleeves — at minimum 3/4 or long. Exclude
@@ -204,14 +234,14 @@ def _build_system_prompt() -> str:
    - "maxi skirt" → attributes: {{"length": ["Maxi"]}}, avoid: {{"length": ["Mini", "Micro", "Cropped"]}}
    This is critical — without the avoid values, semantic search results with wrong attributes leak through.
 
-6. **Non-filterable features go to semantic_query only.** Some things users mention cannot be filtered
+7. **Non-filterable features go to semantic_query only.** Some things users mention cannot be filtered
    because our database has no attribute for them: slit, ruching, cutout, wrap, tie-front, drawstring,
    button-down, zipper placement, pocket detail, etc. For these:
    - Put them in semantic_query (FashionCLIP understands visual features)
    - Do NOT invent avoid values that don't match — never guess filter mappings for concepts we don't track
-   - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 7)
+   - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8)
 
-7. **semantic_query must be POSITIVE descriptions only — NEVER use negation.**
+8. **semantic_query must be POSITIVE descriptions only — NEVER use negation.**
    FashionCLIP is a vision-language embedding model. It does NOT understand negation.
    "not backless" encodes close to "backless" and PULLS IN backless items.
    "not sheer" encodes close to "sheer" and PULLS IN sheer items.
@@ -225,7 +255,7 @@ def _build_system_prompt() -> str:
    Negation is handled by exclusion filters and modes — the semantic_query's ONLY job is to
    describe the positive visual appearance that FashionCLIP should match.
 
-8. **We sell CLOTHING, not underwear.** This is a women's fashion clothing store.
+9. **We sell CLOTHING, not underwear.** This is a women's fashion clothing store.
    We do NOT sell intimates, underwear, bras, lingerie, or shapewear.
    When a user mentions undergarments, they are ALWAYS talking about clothing that
    HIDES or works well OVER those undergarments:
@@ -321,7 +351,7 @@ avoid for specific concrete values that no mode covers.
 - If all terms became filters/modes, return empty string ""
 
 **semantic_query**: Rich POSITIVE visual description for FashionCLIP image-similarity.
-- Describe what the garment LOOKS LIKE — never use "not", "no", "without", "non-" (Principle 7)
+- Describe what the garment LOOKS LIKE — never use "not", "no", "without", "non-" (Principle 8)
 - Expand with visual details: "floral leaves jacket" → "a jacket with botanical leaf and flower print pattern"
 - For coverage queries, describe the covered version: "top that hides arms" → "a top with long opaque sleeves and full arm coverage"
 - For "no backless" → "a top with a fully closed high back"
@@ -333,7 +363,7 @@ A single semantic query pulls visually-similar items that cluster together. To g
 generate 2-4 semantic queries that each target a DIFFERENT visual angle of the user's intent.
 
 RULES:
-- Each query follows the same positive-only rules as semantic_query (Principle 7)
+- Each query follows the same positive-only rules as semantic_query (Principle 8)
 - Vary by: garment TYPE, STYLE angle, SILHOUETTE, COLOR mood, or FABRIC texture
 - Do NOT repeat the same description with synonyms — each must pull a genuinely different cluster
 - For exact brand queries: just 1 query is fine (set semantic_queries to [semantic_query])
@@ -383,7 +413,7 @@ If you can only think of one meaningful angle, set semantic_queries to [semantic
 1. Use MODES for: coverage/modesty, fit preference, occasion, formality, aesthetic vibe, weather.
 2. Use ATTRIBUTES for: concrete positive values (color, material, neckline, category, pattern).
 3. Use AVOID for: (a) concrete negative values the user explicitly said NO to, AND (b) contradicting
-   values when the user requested a specific attribute (per Principle 5).
+   values when the user requested a specific attribute (per Principle 6).
 4. Never duplicate: if a mode handles it, don't also put it in avoid.
 5. Combine freely: modes + attributes + avoid can all be used together.
 6. ALWAYS set category_l1. Never leave it empty. Default to ["Tops", "Dresses"] for vague queries.
