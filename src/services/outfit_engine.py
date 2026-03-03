@@ -74,20 +74,20 @@ def _get_cluster_prompts(
     cluster_ids: List[str],
     target_broad: str,
 ) -> List[str]:
-    """Pick 1 prompt from each of the user's top-2 clusters for the target category.
+    """Return all prompts from each of the user's top-2 clusters for the
+    target category.
 
-    Returns 0-2 prompts.  Uses alternating prompt index so the two
-    clusters produce diverse queries.
+    v2.3: Returns all available prompts per cluster (typically 2 each,
+    so 2-4 total) instead of 1 per cluster.  This doubles the cluster-
+    sourced candidate pool, giving the user's brand neighbourhood a
+    stronger presence in the retrieval phase.
     """
     from recs.brand_clusters import CLUSTER_COMPLEMENT_PROMPTS
 
     prompts: List[str] = []
-    for i, cid in enumerate(cluster_ids[:2]):
+    for cid in cluster_ids[:2]:
         cat_prompts = CLUSTER_COMPLEMENT_PROMPTS.get(cid, {}).get(target_broad, [])
-        if cat_prompts:
-            # First cluster gets prompt[0], second gets prompt[1] (if available)
-            idx = min(i, len(cat_prompts) - 1)
-            prompts.append(cat_prompts[idx])
+        prompts.extend(cat_prompts)
     return prompts
 
 
@@ -2001,6 +2001,10 @@ class OutfitEngine:
         around 0.15-0.20, a "decent match" around 0.05-0.10, and a
         "no match" near 0.  This creates real rank differentiation
         instead of everything clamping to max_positive.
+
+        v2.3: Brand cluster weights increased ~2x so that items from
+        the user's brand neighborhood get a meaningful rank boost in
+        outfit complements.
         """
         if self._outfit_scorer is None:
             from scoring.profile_scorer import ProfileScorer, ProfileScoringConfig
@@ -2008,10 +2012,10 @@ class OutfitEngine:
                 max_positive=0.25,
                 max_negative=-0.50,
                 coverage_kill_penalty=-0.50,
-                # Brand — preferred brand is the strongest signal
-                brand_preferred=0.08,
-                brand_cluster_adjacent=0.04,
-                brand_unrelated_penalty=0.0,
+                # Brand — preferred brand is the strongest signal (v2.3: ~2x cluster boost)
+                brand_preferred=0.14,
+                brand_cluster_adjacent=0.08,
+                brand_unrelated_penalty=-0.02,
                 # Style — main personalization dimension
                 style_match=0.05,           # per hit (default 0.15 is too strong)
                 style_match_cap=0.10,       # max from all style hits
