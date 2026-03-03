@@ -1062,74 +1062,20 @@ def create_app():
                             gr.Button("Search with selections", visible=False, variant="primary"),
                         ] + empty_btns
 
-                    # Merge multi-select filters
+                    # Merge multi-select filters into a flat dict
                     merged_filters, labels_used = _merge_multi_selections(selections)
 
-                    # Extract concise keywords from merged filter values
-                    keywords = []
-                    _CAT_WORD = {
-                        "Dresses": "dress", "Tops": "top", "Bottoms": "pants",
-                        "Outerwear": "jacket", "Activewear": "activewear",
-                    }
-
-                    for fk, fv in merged_filters.items():
-                        if fk == "modes":
-                            if isinstance(fv, list):
-                                for m in fv:
-                                    if m in ("modest", "revealing", "formal", "casual"):
-                                        keywords.append(m)
-                            continue
-                        if not fv:
-                            continue
-                        if fk in ("min_price", "max_price"):
-                            continue  # Don't add price as a keyword
-                        if fk == "category_l1" and isinstance(fv, list):
-                            for cat in fv:
-                                keywords.append(_CAT_WORD.get(cat, cat.lower()))
-                        elif fk == "formality" and isinstance(fv, list):
-                            keywords.append(fv[0].lower())
-                        elif fk == "occasions" and isinstance(fv, list):
-                            keywords.append(f"for {fv[0].lower()}")
-                        elif fk == "colors" and isinstance(fv, list):
-                            keywords.extend(c.lower() for c in fv[:2])
-                        elif fk == "length" and isinstance(fv, list):
-                            keywords.append(fv[0].lower())
-                        elif fk == "materials" and isinstance(fv, list):
-                            keywords.append(fv[0].lower())
-                        elif fk == "patterns" and isinstance(fv, list):
-                            keywords.append(fv[0].lower())
-                        elif fk == "style_tags" and isinstance(fv, list):
-                            keywords.append(fv[0].lower())
-                        elif isinstance(fv, list) and fv:
-                            keywords.append(fv[0].lower())
-
-                    # Dedupe and build concise query
-                    seen = set()
-                    unique_kw = []
-                    for kw in keywords:
-                        if kw not in seen and kw not in orig_query.lower():
-                            seen.add(kw)
-                            unique_kw.append(kw)
-
-                    if unique_kw:
-                        new_query = f"{' '.join(unique_kw)} {orig_query}"
-                    else:
-                        new_query = orig_query
-
-                    # Build planner context from onboarding (same as initial search)
-                    selected_ids = [
-                        s.split("]")[0].replace("[", "").strip() for s in clusters
-                    ]
-                    ctx = build_planner_context(age, selected_ids, mn, mx, mod)
-
-                    # Full fresh search — no extra filters, just the enriched query
-                    response = do_search(
-                        query=new_query,
-                        planner_context=ctx,
+                    # Use /refine endpoint — applies filters as hard constraints,
+                    # skips the LLM planner (faster + filters are guaranteed to apply).
+                    response = do_refine(
+                        original_query=orig_query,
+                        selected_filters=merged_filters,
                         page=1,
                         page_size=30,
                         session_id=session_id,
                     )
+
+                    ctx = {}
 
                     if "error" in response:
                         return [
@@ -1147,11 +1093,12 @@ def create_app():
 
                     # Meta
                     meta = _search_meta_html(response)
+                    filter_summary = ", ".join(f"{k}={v}" for k, v in merged_filters.items())
                     meta += (
                         f'<div style="font-size:12px; color:#059669; margin-top:4px;">'
                         f'Answers: <b>{" + ".join(labels_used)}</b></div>'
                         f'<div style="font-size:12px; color:#374151; margin-top:2px;">'
-                        f'New query: <b>{new_query}</b></div>'
+                        f'Applied filters: <b>{filter_summary}</b></div>'
                     )
 
                     # Results grid
