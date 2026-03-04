@@ -242,6 +242,34 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # LLM Outfit Judge (Complete the Fit v3)
+    # ==========================================================================
+    llm_judge_enabled: bool = Field(
+        default=True,
+        description="Enable LLM pair judge for outfit reranking (falls back to TATTOO-only if disabled)"
+    )
+    llm_judge_model: str = Field(
+        default="gpt-4.1-mini",
+        description="OpenAI model for outfit pair judging"
+    )
+    llm_judge_timeout: float = Field(
+        default=15.0,
+        description="Timeout for LLM judge call in seconds"
+    )
+    llm_judge_top_k: int = Field(
+        default=20,
+        description="Number of top TATTOO candidates to send to LLM judge per category"
+    )
+    llm_judge_blend_tattoo: float = Field(
+        default=0.55,
+        description="Weight for TATTOO score in final blend (tattoo*W + llm*(1-W))"
+    )
+    llm_judge_blend_llm: float = Field(
+        default=0.45,
+        description="Weight for LLM judge score in final blend"
+    )
+
+    # ==========================================================================
     # Multimodal Embeddings
     # ==========================================================================
     multimodal_search_enabled: bool = Field(

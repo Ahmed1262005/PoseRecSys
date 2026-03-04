@@ -40,6 +40,10 @@ import numpy as np
 from supabase import Client
 
 from services.outfit_avoids import compute_avoid_penalties, filter_hard_avoids
+from services.outfit_judge import (
+    LLMPairJudge, JudgeResult, FitIntent,
+    derive_fit_intent, get_pair_judge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1546,8 +1550,9 @@ def _sig_overlap(a: Dict[str, Optional[str]], b: Dict[str, Optional[str]]) -> fl
 def _diverse_select(
     scored: List[Dict],
     diversity_lambda: float = 0.08,
+    quality_floor: float = 0.08,
 ) -> List[Dict]:
-    """Greedy MMR-style reranking for intra-result diversity.
+    """Greedy MMR-style reranking for intra-result diversity with quality floor.
 
     Picks items one-by-one.  For each slot after the first, the score is:
         adjusted = (1 - λ) * tattoo  -  λ * max_overlap_with_selected
@@ -1556,11 +1561,9 @@ def _diverse_select(
     already in the result list.  This pushes each next pick to be
     different in color, fabric, pattern, silhouette, and brand.
 
-    With λ=0.15, diversity is a light tiebreaker — accuracy dominates.
-    A candidate with 0.70 tattoo and 0.60 overlap still beats one with
-    0.65 tattoo and 0.0 overlap:
-      0.85*0.70 - 0.15*0.60 = 0.505  vs  0.85*0.65 - 0.15*0.0 = 0.5525
-    Close enough that the best-scoring items win unless they're near-clones.
+    Quality floor (v3): a candidate is only eligible if its raw tattoo
+    score is within ``quality_floor`` of the best score.  This prevents
+    MMR from drifting into low-quality "diverse" picks (generic neutrals).
     """
     if len(scored) <= 1:
         return scored
@@ -1570,6 +1573,7 @@ def _diverse_select(
     remaining = list(scored)
 
     # First pick: highest tattoo score (no diversity penalty)
+    best_score = remaining[0]["tattoo"]
     selected.append(remaining.pop(0))
     selected_sigs.append(_item_signature(selected[0]))
 
@@ -1578,6 +1582,9 @@ def _diverse_select(
         best_adjusted = -999.0
 
         for i, cand in enumerate(remaining):
+            # Quality floor: skip candidates too far below the best
+            if cand["tattoo"] < best_score - quality_floor:
+                continue
             cand_sig = _item_signature(cand)
             # Max overlap with any already-selected item
             max_overlap = max(
@@ -1588,6 +1595,10 @@ def _diverse_select(
             if adjusted > best_adjusted:
                 best_adjusted = adjusted
                 best_idx = i
+
+        # If no candidate passed the quality floor, relax and take the best remaining
+        if best_adjusted <= -999.0 and remaining:
+            best_idx = 0  # already sorted by tattoo desc
 
         picked = remaining.pop(best_idx)
         selected.append(picked)
@@ -2621,12 +2632,14 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.55*compat + 0.45*cosine + profile + avoids" if personalized
-                          else "0.55*compat + 0.45*cosine + avoids",
-                "engine": "tattoo_v2.3",
+                "fusion": "0.55*tattoo_norm + 0.45*llm_judge (blended)" if get_pair_judge()
+                          else ("0.55*compat + 0.45*cosine + profile + avoids" if personalized
+                                else "0.55*compat + 0.45*cosine + avoids"),
+                "engine": "tattoo_v3.0" if get_pair_judge() else "tattoo_v2.3",
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
                 "avoids": True,
+                "llm_judge": get_pair_judge() is not None,
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -3091,6 +3104,52 @@ class OutfitEngine:
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
 
+        # --- LLM pair judge rerank (v3) ---
+        # Take top K by tattoo, run through LLM judge, blend scores.
+        # Graceful: if judge is None or fails, scoring is unchanged.
+        judge = get_pair_judge()
+        if judge and scored:
+            try:
+                from config.settings import get_settings
+                _js = get_settings()
+                top_k_n = getattr(_js, "llm_judge_top_k", 20)
+                w_tattoo = getattr(_js, "llm_judge_blend_tattoo", 0.55)
+                w_llm = getattr(_js, "llm_judge_blend_llm", 0.45)
+            except Exception:
+                top_k_n, w_tattoo, w_llm = 20, 0.55, 0.45
+
+            intent = derive_fit_intent(source)
+            top_k = scored[:top_k_n]
+            rest = scored[top_k_n:]
+
+            try:
+                judge_results = judge.judge_batch(
+                    source, [s["profile"] for s in top_k], intent,
+                )
+            except Exception as e:
+                logger.warning("LLM judge batch failed, using tattoo-only: %s", e)
+                judge_results = {}
+
+            if judge_results:
+                for entry in top_k:
+                    pid = entry["profile"].product_id
+                    jr = judge_results.get(pid)
+                    if jr is not None:
+                        if jr.fail:
+                            entry["tattoo"] = -1.0
+                            entry["llm_fail"] = True
+                        else:
+                            tattoo_norm = max(0.0, min(10.0, entry["tattoo"] * 10.0))
+                            blended = (w_tattoo * tattoo_norm + w_llm * jr.overall) / 10.0
+                            entry["tattoo"] = blended
+                            entry["llm_overall"] = jr.overall
+                            entry["llm_tags"] = jr.tags
+
+                # Remove hard fails, re-sort top_k, merge back
+                top_k = [e for e in top_k if not e.get("llm_fail")]
+                top_k.sort(key=lambda x: x["tattoo"], reverse=True)
+                scored = top_k + rest
+
         # --- Greedy diverse selection (MMR-style) ---
         # Ensures the final list has visual variety: each next pick must
         # be sufficiently different from items already selected.
@@ -3136,6 +3195,10 @@ class OutfitEngine:
             result["profile_adjustment"] = entry["profile_adjustment"]
         if entry.get("avoid_adjustment"):
             result["avoid_adjustment"] = entry["avoid_adjustment"]
+        if entry.get("llm_overall") is not None:
+            result["llm_score"] = round(entry["llm_overall"], 1)
+        if entry.get("llm_tags"):
+            result["llm_tags"] = entry["llm_tags"]
         return result
 
     def _format_similar_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
