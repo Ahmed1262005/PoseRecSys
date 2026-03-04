@@ -190,6 +190,17 @@ def _make_rainy_weather():
 # Pipeline fixture — mocks Supabase, no SASRec, real everything else
 # =============================================================================
 
+_ALL_TEST_SESSION_IDS = [
+    "sess-test-001", "sess-diverse", "sess-dedup", "sess-brand-pref",
+    "sess-meta", "sess-learn-click", "sess-learn-skip", "sess-learn-multi",
+    "sess-learn-search", "sess-weather-cold", "sess-weather-meta",
+    "sess-age-genz", "sess-age-senior", "sess-age-meta",
+    "sess-cross-1", "sess-cross-2", "sess-excl-brand", "sess-no-crop",
+    "sess-page-dedup", "sess-seen-count", "sess-persist", "sess-persist-action",
+    "sess-iso-1", "sess-iso-2",
+]
+
+
 @pytest.fixture
 def pipeline():
     """Create a RecommendationPipeline with mocked Supabase and no SASRec."""
@@ -209,6 +220,13 @@ def pipeline():
         )
         pipe.candidate_module.get_user_seen_history = MagicMock(return_value=set())
         pipe.candidate_module.get_candidates_keyset = MagicMock(return_value=candidates)
+
+        # Clean up any stale Redis state from previous test runs.
+        # Session seen-items and scoring state persist in Redis across runs,
+        # which pollutes tests that expect fresh sessions.
+        for sid in _ALL_TEST_SESSION_IDS:
+            pipe.session_service.clear_session(sid)
+            pipe._scoring_backend.delete_scores(sid)
 
         yield pipe
 
@@ -283,6 +301,7 @@ class TestFullFeedPipeline:
             user_id="test-user-1",
             session_id="sess-meta",
             page_size=10,
+            debug=True,
         )
         meta = result["metadata"]
         assert "candidates_retrieved" in meta
@@ -395,6 +414,7 @@ class TestWeatherIntegration:
             session_id=session_id,
             page_size=30,
             user_metadata={"city": "Moscow", "country": "RU"},
+            debug=True,
         )
         # Find positions of winter vs summer items
         results = result["results"]
@@ -414,6 +434,7 @@ class TestWeatherIntegration:
             session_id="sess-weather-meta",
             page_size=10,
             user_metadata={"city": "London", "country": "GB"},
+            debug=True,
         )
         ctx_meta = result["metadata"].get("context_scoring")
         # Without real weather API key, we still get season-based scoring
@@ -462,6 +483,7 @@ class TestAgeScoring:
             user_id="test-user-1",
             session_id="sess-age-meta",
             page_size=10,
+            debug=True,
         )
         ctx = result["metadata"].get("context_scoring")
         if ctx and "error" not in ctx:

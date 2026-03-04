@@ -346,7 +346,7 @@ class TestSQLExclusion:
             "No seen history -> exclude_product_ids should be None"
 
     def test_brands_function_also_gets_exclude_ids(self):
-        """When preferred_brands is set, the _with_brands RPC should also get exclude_product_ids."""
+        """When preferred_brands is set, the unified RPC should get both preferred_brands and exclude_product_ids."""
         from recs.candidate_selection import CandidateSelectionModule
         from recs.models import HardFilters
 
@@ -363,23 +363,23 @@ class TestSQLExclusion:
         seen = _make_seen_ids(300)
         hard_filters = HardFilters(gender="female")
 
-        with patch.object(module, '_enrich_with_attributes', side_effect=lambda c: c):
-            module._retrieve_exploration_keyset(
-                hard_filters=hard_filters,
-                random_seed="test-seed",
-                cursor_score=None,
-                cursor_id=None,
-                limit=500,
-                preferred_brands=["Boohoo", "Princess Polly"],
-                exclude_ids=seen,
-            )
+        module._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed="test-seed",
+            cursor_score=None,
+            cursor_id=None,
+            limit=500,
+            preferred_brands=["Boohoo", "Princess Polly"],
+            exclude_ids=seen,
+        )
 
         rpc_call_args = mock_supabase.rpc.call_args
         rpc_name = rpc_call_args.args[0]
         rpc_params = rpc_call_args.args[1] if len(rpc_call_args.args) > 1 else {}
 
-        assert rpc_name == 'get_exploration_keyset_with_brands', \
-            f"Should call _with_brands variant, got {rpc_name}"
+        assert rpc_name == 'get_exploration_keyset', \
+            f"Should call unified get_exploration_keyset, got {rpc_name}"
+        assert rpc_params.get('preferred_brands') == ["Boohoo", "Princess Polly"]
         assert 'exclude_product_ids' in rpc_params
         assert len(rpc_params['exclude_product_ids']) == 300
 
@@ -409,7 +409,14 @@ class TestLargeSeenSets:
              "computed_occasion_scores": {}, "computed_style_scores": {},
              "computed_pattern_scores": {}, "original_price": None,
              "discount_percent": None, "is_on_sale": False, "is_new": False,
-             "created_at": "2025-01-01T00:00:00Z"}
+             "created_at": "2025-01-01T00:00:00Z",
+             "pa_occasions": ["casual"], "pa_pattern": "solid",
+             "pa_formality": "casual", "pa_color_family": "neutral",
+             "pa_seasons": ["all"], "pa_silhouette": None,
+             "pa_construction": None, "pa_coverage_level": None,
+             "pa_skin_exposure": None, "pa_coverage_details": None,
+             "pa_model_body_type": None, "pa_model_size_estimate": None,
+             "pa_style_tags": [], "pa_fit_type": None}
             for i in range(100)
         ]
         mock_rpc = MagicMock()
@@ -422,15 +429,14 @@ class TestLargeSeenSets:
         seen = _make_seen_ids(4999)  # Just under limit
         hard_filters = HardFilters(gender="female")
 
-        with patch.object(module, '_enrich_with_attributes', side_effect=lambda c: c):
-            result = module._retrieve_exploration_keyset(
-                hard_filters=hard_filters,
-                random_seed="test-seed",
-                cursor_score=None,
-                cursor_id=None,
-                limit=500,
-                exclude_ids=seen,
-            )
+        result = module._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed="test-seed",
+            cursor_score=None,
+            cursor_id=None,
+            limit=500,
+            exclude_ids=seen,
+        )
 
         rpc_params = mock_supabase.rpc.call_args.args[1]
         assert len(rpc_params['exclude_product_ids']) == 4999, \
@@ -456,15 +462,14 @@ class TestLargeSeenSets:
         seen = _make_seen_ids(5000)
         hard_filters = HardFilters(gender="female")
 
-        with patch.object(module, '_enrich_with_attributes', side_effect=lambda c: c):
-            module._retrieve_exploration_keyset(
-                hard_filters=hard_filters,
-                random_seed="test-seed",
-                cursor_score=None,
-                cursor_id=None,
-                limit=500,
-                exclude_ids=seen,
-            )
+        module._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed="test-seed",
+            cursor_score=None,
+            cursor_id=None,
+            limit=500,
+            exclude_ids=seen,
+        )
 
         rpc_params = mock_supabase.rpc.call_args.args[1]
         assert len(rpc_params['exclude_product_ids']) == 5000
@@ -506,7 +511,14 @@ class TestLargeSeenSets:
              "computed_occasion_scores": {}, "computed_style_scores": {},
              "computed_pattern_scores": {}, "original_price": None,
              "discount_percent": None, "is_on_sale": False, "is_new": False,
-             "created_at": "2025-01-01T00:00:00Z"}
+             "created_at": "2025-01-01T00:00:00Z",
+             "pa_occasions": ["casual"], "pa_pattern": "solid",
+             "pa_formality": "casual", "pa_color_family": "neutral",
+             "pa_seasons": ["all"], "pa_silhouette": None,
+             "pa_construction": None, "pa_coverage_level": None,
+             "pa_skin_exposure": None, "pa_coverage_details": None,
+             "pa_model_body_type": None, "pa_model_size_estimate": None,
+             "pa_style_tags": [], "pa_fit_type": None}
             for pid in maybe_overflow_ids + fresh_ids
         ]
         mock_rpc = MagicMock()
@@ -517,15 +529,14 @@ class TestLargeSeenSets:
         module.supabase = mock_supabase
         hard_filters = HardFilters(gender="female")
 
-        with patch.object(module, '_enrich_with_attributes', side_effect=lambda c: c):
-            result = module._retrieve_exploration_keyset(
-                hard_filters=hard_filters,
-                random_seed="test-seed",
-                cursor_score=None,
-                cursor_id=None,
-                limit=500,
-                exclude_ids=all_seen,
-            )
+        result = module._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed="test-seed",
+            cursor_score=None,
+            cursor_id=None,
+            limit=500,
+            exclude_ids=all_seen,
+        )
 
         # SQL should get exactly 5000
         rpc_params = mock_supabase.rpc.call_args.args[1]
@@ -572,15 +583,14 @@ class TestLargeSeenSets:
         seen = _make_seen_ids(7500)
         hard_filters = HardFilters(gender="female")
 
-        with patch.object(module, '_enrich_with_attributes', side_effect=lambda c: c):
-            module._retrieve_exploration_keyset(
-                hard_filters=hard_filters,
-                random_seed="test-seed",
-                cursor_score=None,
-                cursor_id=None,
-                limit=500,
-                exclude_ids=seen,
-            )
+        module._retrieve_exploration_keyset(
+            hard_filters=hard_filters,
+            random_seed="test-seed",
+            cursor_score=None,
+            cursor_id=None,
+            limit=500,
+            exclude_ids=seen,
+        )
 
         rpc_params = mock_supabase.rpc.call_args.args[1]
         assert len(rpc_params['exclude_product_ids']) == 5000, \

@@ -440,6 +440,17 @@ class VisionJudge:
             logger.debug("Vision judge: all %d candidates cached", len(candidates))
             return fail_ids
 
+        # Log URLs being sent for debugging image format issues
+        logger.info(
+            "Vision judge: source URL=%s",
+            source_url[:120],
+        )
+        for uc in uncached[:3]:
+            logger.info(
+                "Vision judge: candidate %s URL=%s",
+                uc.product_id, (uc.image_url or "")[:120],
+            )
+
         logger.info(
             "Vision judge: %d cached, %d to evaluate for source %s",
             len(candidates) - len(uncached), len(uncached), source_pid,

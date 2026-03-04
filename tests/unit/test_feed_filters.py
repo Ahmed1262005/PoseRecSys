@@ -383,7 +383,7 @@ class TestAttrParamsThreading:
             assert rpc_params[key] is None, f"Expected None for {key}, got {rpc_params[key]}"
 
     def test_preferred_brands_uses_brand_function(self):
-        """When preferred_brands is set, should use get_exploration_keyset_with_brands."""
+        """When preferred_brands is set, should use unified get_exploration_keyset with preferred_brands param."""
         module, mock_supabase = self._create_mock_candidate_module()
 
         from recs.candidate_selection import HardFilters
@@ -401,7 +401,9 @@ class TestAttrParamsThreading:
         mock_supabase.rpc.assert_called_once()
         call_args = mock_supabase.rpc.call_args
         rpc_name = call_args[0][0]
-        assert rpc_name == 'get_exploration_keyset_with_brands'
+        assert rpc_name == 'get_exploration_keyset'
+        rpc_params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get('params', {})
+        assert rpc_params.get('preferred_brands') == ['Zara', 'H&M']
 
     def test_exclude_ids_splits_at_sql_limit(self):
         """Seen history beyond SQL_EXCLUDE_IDS_LIMIT should be handled in Python."""

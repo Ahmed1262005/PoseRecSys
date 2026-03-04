@@ -610,8 +610,16 @@ class RecommendationPipeline:
                 cursor_id = cursor_obj.item_id
                 page = cursor_obj.page + 1
 
-        # Step 2: Load user state
-        user_state = self._load_user_state(user_id, anon_id, session_id)
+        # Step 2: Load user state + seen history in PARALLEL
+        # These are independent Supabase calls (~200-400ms each).
+        # Running them concurrently saves ~200-400ms per request.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_state = executor.submit(self._load_user_state, user_id, anon_id, session_id)
+            future_seen = executor.submit(self.candidate_module.get_user_seen_history, anon_id, user_id)
+            user_state = future_state.result()
+            db_seen_ids = future_seen.result()
+        db_history_count = len(db_seen_ids)
 
         # Override categories from request
         if categories:
@@ -700,9 +708,7 @@ class RecommendationPipeline:
                 scoring_weights=self.ranker.config.WARM_WEIGHTS if user_state.taste_vector else self.ranker.config.COLD_WEIGHTS
             )
 
-        # Step 4: Load DB seen history first (for SQL-level exclusion)
-        db_seen_ids = self.candidate_module.get_user_seen_history(anon_id, user_id)
-        db_history_count = len(db_seen_ids)
+        # Step 4: DB seen history already loaded in parallel (Step 2)
 
         # Calculate how many candidates to fetch
         # With SQL-level attribute filtering (JOIN product_attributes), no need for
@@ -854,7 +860,6 @@ class RecommendationPipeline:
             attr_exclude_length=_tc(exclude_length),
             attr_include_occasions=expanded_occasions,        # Already expanded with DB values
             attr_exclude_occasions=expanded_exclude_occasions,
-            hybrid_brand_fetch=will_bucket_brands,
         )
 
         # Step 5a: Session-Aware Retrieval (Contextual Recall)
@@ -1327,8 +1332,13 @@ class RecommendationPipeline:
                           f"cursor={cursor_obj.sort_mode}, request={sort_mode}. "
                           f"Resetting to page 1.")
 
-        # ----- Load user state (for hard filters from onboarding) -----
-        user_state = self._load_user_state(user_id, anon_id, session_id)
+        # ----- Load user state + seen history in PARALLEL -----
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_state = executor.submit(self._load_user_state, user_id, anon_id, session_id)
+            future_seen = executor.submit(self.candidate_module.get_user_seen_history, anon_id, user_id)
+            user_state = future_state.result()
+            db_seen_ids = future_seen.result()
 
         # Override categories from request
         if categories:
@@ -1434,8 +1444,7 @@ class RecommendationPipeline:
         expanded_occasions = _expand(include_occasions, _OCCASION_EXPANSION) if include_occasions else None
         expanded_exclude_occasions = _expand(exclude_occasions, _OCCASION_EXPANSION) if exclude_occasions else None
 
-        # ----- DB seen history (for SQL-level exclusion) -----
-        db_seen_ids = self.candidate_module.get_user_seen_history(anon_id, user_id)
+        # ----- DB seen history already loaded in parallel above -----
 
         # Fetch more than page_size to account for Python-level filtering
         has_python_filters = bool(
