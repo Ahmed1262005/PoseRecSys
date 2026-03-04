@@ -2721,9 +2721,9 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": ("0.55*compat + 0.45*cosine + profile + avoids" if personalized
-                           else "0.55*compat + 0.45*cosine + avoids"),
-                "engine": "tattoo_v3.1" if outfit_ranked else ("tattoo_v3.0" if get_pair_judge() else "tattoo_v2.3"),
+                "fusion": ("0.70*compat + 0.30*cosine + profile + avoids + style_adj" if personalized
+                           else "0.70*compat + 0.30*cosine + avoids + style_adj"),
+                "engine": "tattoo_v3.2" if outfit_ranked else ("tattoo_v3.1" if get_pair_judge() else "tattoo_v2.3"),
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
                 "avoids": True,
@@ -3160,8 +3160,17 @@ class OutfitEngine:
         # Profile adjustment (v2.2): additive term from ProfileScorer that
         # nudges items matching user preferences (brand, style, price) up
         # and coverage violations down.
-        W_COMPAT = 0.55
-        W_COSINE = 0.45
+        W_COMPAT = 0.70
+        W_COSINE = 0.30
+
+        # Outerwear styling heuristics (v3.2)
+        _STRUCTURED_OUTERWEAR = frozenset({
+            "blazer", "jacket", "coat", "trench", "trench coat",
+            "leather jacket", "denim jacket", "bomber", "parka",
+        })
+        _STRUCTURED_BONUS = 0.03
+        _KNIT_CARDIGAN_PENALTY = -0.06
+        source_is_knit = source.material_family == "knit"
 
         scored = []
         for cand in profiles:
@@ -3170,6 +3179,18 @@ class OutfitEngine:
             novelty = compute_novelty_score(source, cand)
             cosine = cand.similarity
             tattoo = W_COMPAT * compat + W_COSINE * cosine
+
+            # Outerwear styling adjustments (v3.2)
+            style_adj = 0.0
+            if target_broad == "outerwear":
+                cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
+                # Knit-on-knit penalty: knit source + cardigan = redundant
+                if source_is_knit and cand_l2 == "cardigan":
+                    style_adj += _KNIT_CARDIGAN_PENALTY
+                # Structured outerwear bonus: prefer jackets/blazers/coats
+                if cand_l2 in _STRUCTURED_OUTERWEAR:
+                    style_adj += _STRUCTURED_BONUS
+            tattoo += style_adj
 
             # Profile-aware adjustment (v2.2)
             profile_adj = 0.0
@@ -3189,6 +3210,7 @@ class OutfitEngine:
                 "cosine": cosine, "novelty": novelty, "dims": dims,
                 "profile_adjustment": round(profile_adj, 4),
                 "avoid_adjustment": round(avoid_adj, 4),
+                "style_adjustment": round(style_adj, 4),
             })
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
@@ -3233,6 +3255,25 @@ class OutfitEngine:
         # Ensures the final list has visual variety: each next pick must
         # be sufficiently different from items already selected.
         scored = _diverse_select(scored)
+
+        # --- Cardigan density cap (v3.2) ---
+        # Max 1 cardigan in outerwear results. Cardigans are stylistically
+        # neutral and dominate via high cosine similarity. Cap ensures
+        # blazers/jackets/coats surface. Extra cardigans pushed to the end.
+        if target_broad == "outerwear":
+            _MAX_CARDIGANS = 1
+            kept, overflow, card_count = [], [], 0
+            for entry in scored:
+                l2 = (entry["profile"].gemini_category_l2 or "").lower().strip()
+                if l2 == "cardigan":
+                    card_count += 1
+                    if card_count <= _MAX_CARDIGANS:
+                        kept.append(entry)
+                    else:
+                        overflow.append(entry)
+                else:
+                    kept.append(entry)
+            scored = kept + overflow
 
         return scored
 
