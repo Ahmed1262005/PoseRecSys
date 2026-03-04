@@ -20,6 +20,9 @@ from services.outfit_avoids import (
     _is_gym_piece,
     _is_activewear,
     _is_formal_piece,
+    # Lifestyle context classifiers
+    _has_active_context,
+    _has_polished_context,
     # Individual rule functions
     _check_A1, _check_A2, _check_A3,
     _check_B1,
@@ -31,6 +34,7 @@ from services.outfit_avoids import (
     _check_I1, _check_I2, _check_I3, _check_I4,
     _check_J1, _check_J2,
     _check_K1,
+    _check_L1, _check_L2,
 )
 
 
@@ -980,3 +984,350 @@ class TestK1StyleCoherence:
         )
         assert "K1" in triggered
         assert -0.02 < penalty < 0.0
+
+
+# ===========================================================================
+# Lifestyle context classifiers
+# ===========================================================================
+
+class TestActiveContext:
+    """Tests for _has_active_context() multi-signal detection."""
+
+    def test_activewear_style_tag(self):
+        """'activewear' style tag is a strong signal."""
+        p = _p(style_tags=["activewear"])
+        assert _has_active_context(p)
+
+    def test_athletic_style_tag(self):
+        """'athletic' style tag is a strong signal."""
+        p = _p(style_tags=["athletic"])
+        assert _has_active_context(p)
+
+    def test_sporty_alone_is_not_active(self):
+        """'sporty' style tag alone does NOT trigger active context."""
+        p = _p(style_tags=["sporty"])
+        assert not _has_active_context(p)
+
+    def test_sporty_with_technical_material(self):
+        """'sporty' + technical material = active context."""
+        p = _p(style_tags=["sporty"], material_family="technical")
+        assert _has_active_context(p)
+
+    def test_sporty_with_synthetic_stretch(self):
+        """'sporty' + synthetic_stretch = active context."""
+        p = _p(style_tags=["sporty"], material_family="synthetic_stretch")
+        assert _has_active_context(p)
+
+    def test_sporty_with_cotton(self):
+        """'sporty' + cotton does NOT trigger — just a casual sporty item."""
+        p = _p(style_tags=["sporty"], material_family="cotton")
+        assert not _has_active_context(p)
+
+    def test_workout_occasion(self):
+        """Workout occasion is a strong signal."""
+        p = _p(occasions=["workout"])
+        assert _has_active_context(p)
+
+    def test_gym_occasion(self):
+        p = _p(occasions=["gym"])
+        assert _has_active_context(p)
+
+    def test_yoga_occasion(self):
+        p = _p(occasions=["yoga"])
+        assert _has_active_context(p)
+
+    def test_everyday_occasion_not_active(self):
+        """Everyday is not an active context."""
+        p = _p(occasions=["everyday"])
+        assert not _has_active_context(p)
+
+    def test_activewear_l2(self):
+        """Performance legging L2 is a strong signal."""
+        p = _p(gemini_category_l2="performance legging")
+        assert _has_active_context(p)
+
+    def test_sports_bra_l2(self):
+        p = _p(gemini_category_l2="sports bra")
+        assert _has_active_context(p)
+
+    def test_regular_tank_not_active(self):
+        """A regular tank top is NOT active context."""
+        p = _p(gemini_category_l2="tank top")
+        assert not _has_active_context(p)
+
+    def test_name_keyword_active(self):
+        """'active' in name triggers active context."""
+        p = _p(name="Aspire Active Tank")
+        assert _has_active_context(p)
+
+    def test_name_keyword_performance(self):
+        p = _p(name="Performance Crop Top")
+        assert _has_active_context(p)
+
+    def test_name_keyword_sport(self):
+        p = _p(name="Sport Essentials Legging")
+        assert _has_active_context(p)
+
+    def test_name_keyword_training(self):
+        p = _p(name="Training Tank Black")
+        assert _has_active_context(p)
+
+    def test_normal_name_not_active(self):
+        """A regular product name is NOT active context."""
+        p = _p(name="Ribbed Knit Cardigan")
+        assert not _has_active_context(p)
+
+    def test_classic_not_active(self):
+        """Classic style tag is not active."""
+        p = _p(style_tags=["classic", "minimalist"])
+        assert not _has_active_context(p)
+
+    def test_multiple_signals_combine(self):
+        """Athletic tag + workout occasion = active (multiple signals)."""
+        p = _p(style_tags=["athletic"], occasions=["workout"])
+        assert _has_active_context(p)
+
+
+class TestPolishedContext:
+    """Tests for _has_polished_context() multi-signal detection."""
+
+    def test_classic_style(self):
+        p = _p(style_tags=["classic"])
+        assert _has_polished_context(p)
+
+    def test_minimalist_style(self):
+        p = _p(style_tags=["minimalist"])
+        assert _has_polished_context(p)
+
+    def test_chic_style(self):
+        p = _p(style_tags=["chic"])
+        assert _has_polished_context(p)
+
+    def test_elegant_style(self):
+        p = _p(style_tags=["elegant"])
+        assert _has_polished_context(p)
+
+    def test_formal_style(self):
+        p = _p(style_tags=["formal"])
+        assert _has_polished_context(p)
+
+    def test_high_formality_level(self):
+        """Formality level >= 3 (business casual+) is polished."""
+        p = _p(formality_level=3, style_tags=["casual"])
+        assert _has_polished_context(p)
+
+    def test_low_formality_not_polished(self):
+        """Formality level 1 with no polished styles is not polished."""
+        p = _p(formality_level=1, style_tags=["casual"])
+        assert not _has_polished_context(p)
+
+    def test_tailored_l2(self):
+        """Blazer L2 is polished."""
+        p = _p(gemini_category_l2="blazer", formality_level=2, style_tags=[])
+        assert _has_polished_context(p)
+
+    def test_office_occasion(self):
+        p = _p(occasions=["office"], formality_level=2, style_tags=[])
+        assert _has_polished_context(p)
+
+    def test_work_occasion(self):
+        p = _p(occasions=["work"], formality_level=2, style_tags=[])
+        assert _has_polished_context(p)
+
+    def test_sporty_not_polished(self):
+        """Sporty style is not polished."""
+        p = _p(style_tags=["sporty"], formality_level=1)
+        assert not _has_polished_context(p)
+
+    def test_bohemian_not_polished(self):
+        """Bohemian is not polished."""
+        p = _p(style_tags=["bohemian"], formality_level=2)
+        assert not _has_polished_context(p)
+
+
+# ===========================================================================
+# L: Lifestyle / Context Mismatch
+# ===========================================================================
+
+class TestL1LifestyleMismatch:
+    """Tests for L1: active candidate + polished source."""
+
+    def test_aspire_tank_with_tailored_pants(self):
+        """The exact scenario: athleisure tank + tailored wide-leg pant."""
+        src = _p(
+            name="Baccarat Mid Rise Wide Leg Belted Pant",
+            style_tags=["classic", "minimalist"],
+            formality_level=3,
+            gemini_category_l2="tailored trousers",
+            occasions=["work", "everyday"],
+        )
+        cand = _p(
+            name="Aspire Active Tank",
+            style_tags=["casual"],
+            gemini_category_l2="tank top",
+            occasions=["everyday"],
+        )
+        # Name contains "Active " → active context
+        assert _check_L1(src, cand) == -0.15
+
+    def test_activewear_tag_cand_polished_source(self):
+        """Candidate with 'activewear' tag + classic source."""
+        src = _p(style_tags=["classic", "elegant"], formality_level=3)
+        cand = _p(style_tags=["activewear"])
+        assert _check_L1(src, cand) == -0.15
+
+    def test_gym_occasion_cand_polished_source(self):
+        """Candidate with gym occasion + polished source."""
+        src = _p(style_tags=["minimalist"], formality_level=3)
+        cand = _p(occasions=["gym", "everyday"], style_tags=["casual"])
+        assert _check_L1(src, cand) == -0.15
+
+    def test_performance_name_cand_polished_source(self):
+        """Candidate with 'performance' in name + polished source."""
+        src = _p(style_tags=["classic"])
+        cand = _p(name="Performance Crop Top", style_tags=["casual"])
+        assert _check_L1(src, cand) == -0.15
+
+    def test_reverse_direction(self):
+        """Active source + polished candidate → -0.12 (smaller penalty)."""
+        src = _p(style_tags=["activewear"], occasions=["workout"])
+        cand = _p(style_tags=["classic", "elegant"], formality_level=4)
+        assert _check_L1(src, cand) == -0.12
+
+    def test_bridge_item_no_penalty(self):
+        """Candidate with BOTH active AND polished signals → no penalty."""
+        src = _p(style_tags=["classic"], formality_level=3)
+        cand = _p(
+            style_tags=["activewear", "chic"],  # bridge: both worlds
+            occasions=["workout", "office"],
+        )
+        # Candidate has polished context (chic + office), so bridge check passes
+        assert _check_L1(src, cand) == 0.0
+
+    def test_both_polished_no_penalty(self):
+        """Two polished items → no penalty."""
+        src = _p(style_tags=["classic"], formality_level=3)
+        cand = _p(style_tags=["elegant"], formality_level=4)
+        assert _check_L1(src, cand) == 0.0
+
+    def test_both_active_no_penalty(self):
+        """Two active items → no penalty."""
+        src = _p(style_tags=["activewear"], occasions=["gym"])
+        cand = _p(style_tags=["athletic"], occasions=["workout"])
+        assert _check_L1(src, cand) == 0.0
+
+    def test_casual_vs_polished_no_penalty(self):
+        """Plain casual item (not active) vs polished → no penalty."""
+        src = _p(style_tags=["classic"], formality_level=3)
+        cand = _p(style_tags=["casual"], formality_level=1)
+        assert _check_L1(src, cand) == 0.0
+
+    def test_sporty_alone_no_penalty(self):
+        """Sporty-only cand vs polished source → no L1 (K1 handles it)."""
+        src = _p(style_tags=["classic"], formality_level=3)
+        cand = _p(style_tags=["sporty"])
+        assert _check_L1(src, cand) == 0.0
+
+    def test_l1_in_pipeline(self):
+        """L1 fires through compute_avoid_penalties."""
+        src = _p(style_tags=["classic", "minimalist"], formality_level=3)
+        cand = _p(style_tags=["activewear"], occasions=["workout"])
+        penalty, triggered = compute_avoid_penalties(src, cand)
+        assert "L1" in triggered
+        assert penalty <= -0.15
+
+    def test_l1_override_by_athleisure(self):
+        """Athleisure user reduces L1 to 30%."""
+        src = _p(style_tags=["classic"], formality_level=3)
+        cand = _p(style_tags=["activewear"])
+        penalty, triggered = compute_avoid_penalties(
+            src, cand, user_styles={"athleisure"},
+        )
+        assert "L1" in triggered
+        # -0.15 * 0.3 = -0.045
+        assert -0.05 < penalty < 0.0
+
+    def test_l1_override_by_sporty_chic(self):
+        """Sporty chic user reduces L1 to 30%."""
+        src = _p(style_tags=["elegant"], formality_level=4)
+        cand = _p(style_tags=["athletic"], occasions=["gym"])
+        penalty, triggered = compute_avoid_penalties(
+            src, cand, user_styles={"sporty chic"},
+        )
+        assert "L1" in triggered
+        # Check penalty is reduced (not full -0.15)
+        assert penalty > -0.10
+
+
+class TestL2ActiveVsEvening:
+    """Tests for L2: active item paired with evening/dressy item."""
+
+    def test_activewear_cand_evening_source(self):
+        """Activewear candidate + evening source."""
+        src = _p(
+            formality_level=4, occasions=["formal event"],
+            style_tags=["glamorous"], gemini_category_l2="cocktail dress",
+        )
+        cand = _p(style_tags=["activewear"], occasions=["workout"])
+        assert _check_L2(src, cand) == -0.18
+
+    def test_gym_cand_gala_source(self):
+        """Gym-occasion candidate + gala-occasion source."""
+        src = _p(occasions=["gala"], formality_level=5)
+        cand = _p(occasions=["gym"], style_tags=["casual"])
+        assert _check_L2(src, cand) == -0.18
+
+    def test_reverse_active_src_evening_cand(self):
+        """Active source + evening candidate → -0.15."""
+        src = _p(style_tags=["activewear"], occasions=["workout"])
+        cand = _p(
+            formality_level=4, occasions=["formal event"],
+            style_tags=["glamorous"],
+        )
+        assert _check_L2(src, cand) == -0.15
+
+    def test_formal_evening_l2(self):
+        """Evening dress L2 triggers evening context."""
+        src = _p(gemini_category_l2="evening dress", formality_level=4)
+        cand = _p(style_tags=["athletic"])
+        assert _check_L2(src, cand) == -0.18
+
+    def test_casual_vs_evening_no_l2(self):
+        """Casual (not active) vs evening → no L2 penalty."""
+        src = _p(formality_level=4, occasions=["formal event"])
+        cand = _p(style_tags=["casual"], formality_level=1)
+        assert _check_L2(src, cand) == 0.0
+
+    def test_both_evening_no_penalty(self):
+        """Two evening items → no penalty."""
+        src = _p(formality_level=4, occasions=["formal event"])
+        cand = _p(formality_level=4, occasions=["gala"])
+        assert _check_L2(src, cand) == 0.0
+
+    def test_l2_in_pipeline(self):
+        """L2 fires through compute_avoid_penalties."""
+        src = _p(
+            formality_level=5, occasions=["gala"],
+            gemini_category_l2="gown",
+        )
+        cand = _p(style_tags=["activewear"], occasions=["gym"])
+        penalty, triggered = compute_avoid_penalties(src, cand)
+        assert "L2" in triggered
+        assert penalty <= -0.18
+
+    def test_l2_override_by_athleisure(self):
+        """Athleisure user reduces L2 to 30%."""
+        src = _p(formality_level=4, occasions=["formal event"])
+        cand = _p(style_tags=["activewear"])
+        penalty, triggered = compute_avoid_penalties(
+            src, cand, user_styles={"athleisure"},
+        )
+        assert "L2" in triggered
+        # -0.18 * 0.3 = -0.054
+        assert penalty > -0.10
+
+    def test_sporty_alone_no_l2(self):
+        """Sporty-only cand vs evening source → no L2 (K1 handles it)."""
+        src = _p(formality_level=4, occasions=["formal event"])
+        cand = _p(style_tags=["sporty"])
+        assert _check_L2(src, cand) == 0.0

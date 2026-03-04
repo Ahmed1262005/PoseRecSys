@@ -17,6 +17,7 @@ from services.outfit_judge import (
     _OCCASION_TO_BUCKET,
     _FITTED_SILS,
     _OVERSIZED_SILS,
+    _is_valid_image_url,
     build_vision_messages,
     build_outfit_ranking_messages,
     derive_fit_intent,
@@ -908,3 +909,167 @@ class TestApplyOutfitRanking:
         # entries[3] promoted to top, rest still present
         assert scored_by_cat["bottoms"][0]["profile"].product_id == "b3"
         assert len(scored_by_cat["bottoms"]) == 5
+
+
+# ===========================================================================
+# Image URL Validation
+# ===========================================================================
+
+class TestImageUrlValidation:
+    """Tests for _is_valid_image_url()."""
+
+    # --- Valid URLs ---
+
+    def test_jpg_extension(self):
+        url = "https://usepose.s3.us-east-1.amazonaws.com/products/test/primary.jpg"
+        assert _is_valid_image_url(url) is True
+
+    def test_jpeg_extension(self):
+        url = "https://cdn.example.com/image.jpeg"
+        assert _is_valid_image_url(url) is True
+
+    def test_png_extension(self):
+        url = "https://cdn.example.com/image.png"
+        assert _is_valid_image_url(url) is True
+
+    def test_webp_extension(self):
+        url = "https://cdn.example.com/image.webp"
+        assert _is_valid_image_url(url) is True
+
+    def test_gif_extension(self):
+        url = "https://cdn.example.com/image.gif"
+        assert _is_valid_image_url(url) is True
+
+    def test_s3_url_with_path(self):
+        """S3 URLs are our product images — always valid."""
+        url = "https://usepose.s3.us-east-1.amazonaws.com/products/abc/original_0_"
+        assert _is_valid_image_url(url) is True
+
+    def test_cloudfront_url(self):
+        """CloudFront CDN URLs are valid."""
+        url = "https://d1234.cloudfront.net/images/product.jpg"
+        assert _is_valid_image_url(url) is True
+
+    def test_scene7_with_fmt_jpeg(self):
+        """Dynamic image CDN with fmt=jpeg param."""
+        url = "https://s7d2.scene7.com/is/image/aeo/0577_9097_100_f?$plp-web-desktop$&fmt=jpeg"
+        assert _is_valid_image_url(url) is True
+
+    def test_scene7_with_fmt_png(self):
+        url = "https://s7d2.scene7.com/is/image/aeo/test?fmt=png"
+        assert _is_valid_image_url(url) is True
+
+    def test_jpg_with_query_string(self):
+        """JPG with query params should still be valid."""
+        url = "https://cdn.example.com/image.jpg?w=400&h=600"
+        assert _is_valid_image_url(url) is True
+
+    # --- Invalid URLs ---
+
+    def test_html_page_url(self):
+        """Aritzia product page URLs (.html) are NOT images."""
+        url = "https://www.aritzia.com/us/en/product/encourage-poplin-dress/131094-14396.html#main"
+        assert _is_valid_image_url(url) is False
+
+    def test_html_without_fragment(self):
+        url = "https://www.example.com/product/details.html"
+        assert _is_valid_image_url(url) is False
+
+    def test_htm_extension(self):
+        url = "https://www.example.com/page.htm"
+        assert _is_valid_image_url(url) is False
+
+    def test_php_page(self):
+        url = "https://www.example.com/image.php?id=123"
+        assert _is_valid_image_url(url) is False
+
+    def test_empty_string(self):
+        assert _is_valid_image_url("") is False
+
+    def test_none_like(self):
+        assert _is_valid_image_url("") is False
+
+    def test_non_http(self):
+        assert _is_valid_image_url("ftp://example.com/img.jpg") is False
+
+    def test_no_extension_no_hints(self):
+        """Dynamic URL with no extension and no format hint → invalid."""
+        url = "https://www.aritzia.com/is/image/Aritzia/13331036342_09?wid=1200&hei=1800"
+        assert _is_valid_image_url(url) is False
+
+    # --- Edge cases ---
+
+    def test_uppercase_extension(self):
+        """Case-insensitive extension check."""
+        url = "https://cdn.example.com/image.JPG"
+        assert _is_valid_image_url(url) is True
+
+    def test_s3_url_no_extension(self):
+        """S3 URL without extension is still valid (it's our CDN)."""
+        url = "https://usepose.s3.us-east-1.amazonaws.com/products/abc/original_0_"
+        assert _is_valid_image_url(url) is True
+
+
+class TestVisionJudgeUrlFiltering:
+    """Tests that the vision judge pre-filters invalid image URLs."""
+
+    def test_build_vision_messages_skips_bad_source(self):
+        """Source with .html URL → no image_url in messages."""
+        source = _p(
+            image_url="https://www.aritzia.com/product/test.html#main",
+        )
+        cand = _cand("c1", image_url="https://cdn.example.com/c1.jpg")
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_vision_messages(source, [cand], intent)
+        user_content = msgs[1]["content"]
+        # No image_url part for source
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        # Only the candidate image should be present
+        assert len(image_parts) == 1
+        assert "c1.jpg" in image_parts[0]["image_url"]["url"]
+
+    def test_build_vision_messages_skips_bad_candidate(self):
+        """Candidate with .html URL → no image_url for that candidate."""
+        source = _p(image_url="https://cdn.example.com/src.jpg")
+        good_cand = _cand("c1", image_url="https://cdn.example.com/c1.jpg")
+        bad_cand = _cand("c2", image_url="https://www.aritzia.com/product/bad.html")
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_vision_messages(source, [good_cand, bad_cand], intent)
+        user_content = msgs[1]["content"]
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        # Source + good candidate = 2 images
+        assert len(image_parts) == 2
+
+    def test_judge_batch_skips_invalid_source(self):
+        """judge_batch returns empty set when source URL is invalid."""
+        judge = VisionJudge(api_key="test-key")
+        source = _p(image_url="https://www.aritzia.com/product/test.html#main")
+        cand = _cand("c1", image_url="https://cdn.example.com/c1.jpg")
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        # Should return empty set without calling OpenAI
+        result = judge.judge_batch(source, [cand], intent)
+        assert result == set()
+
+    def test_judge_batch_filters_bad_candidates(self):
+        """judge_batch filters out candidates with bad image URLs."""
+        judge = VisionJudge(api_key="test-key")
+        source = _p(image_url="https://cdn.example.com/src.jpg")
+        good_cand = _cand("c1", image_url="https://cdn.example.com/c1.jpg")
+        bad_cand = _cand("c2", image_url="https://www.example.com/page.html")
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        # Mock the API call to return no fails
+        with patch.object(judge, "_call_vision", return_value=set()):
+            result = judge.judge_batch(source, [good_cand, bad_cand], intent)
+        assert result == set()
+
+    def test_rank_outfits_skips_invalid_source(self):
+        """rank_outfits returns None when source URL is invalid."""
+        judge = VisionJudge(api_key="test-key")
+        source = _p(image_url="https://www.example.com/product.html")
+        outfits = [
+            {"tops": _cand("t1")},
+            {"tops": _cand("t2")},
+        ]
+        intent = FitIntent("casual", "balanced", "casual", "pants", "mild")
+        result = judge.rank_outfits(source, outfits, intent)
+        assert result is None

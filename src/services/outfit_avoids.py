@@ -19,6 +19,7 @@ from typing import (
     TYPE_CHECKING,
     Callable,
     Dict,
+    FrozenSet,
     List,
     Optional,
     Set,
@@ -98,6 +99,39 @@ _REFINED_STYLES: Set[str] = {
 _SPORTY_STYLES: Set[str] = {"sporty", "streetwear"}
 
 # ============================================================================
+# Lifestyle / context constants (L-rules)
+# ============================================================================
+
+# Active / athleisure context signals
+# NOTE: "sporty" is intentionally excluded — it's a general style tag that
+# K1 already handles.  L-rules target the *lifestyle* context: items that
+# belong in a gym/yoga/running context, not just sporty-styled pieces.
+_ACTIVE_CONTEXT_STYLES: Set[str] = {
+    "activewear", "athletic",
+}
+_ACTIVE_CONTEXT_OCCASIONS: Set[str] = {
+    "workout", "gym", "exercise", "training",
+    "yoga", "running", "hiking",
+}
+_ACTIVE_NAME_SIGNALS: Tuple[str, ...] = (
+    "active ", "sport ", "athletic ", "performance ",
+    "training ", "gym ", "yoga ", "running ",
+)
+# Broad activewear L2 set (superset of _ACTIVEWEAR_L2 + _GYM_PIECE_L2)
+_ACTIVE_L2_BROAD: Set[str] = (
+    _ACTIVEWEAR_L2 | _GYM_PIECE_L2 | {"athletic tank", "sports tank"}
+)
+
+# Polished / tailored context signals
+_POLISHED_CONTEXT_STYLES: Set[str] = {
+    "classic", "minimalist", "chic", "elegant",
+    "preppy", "formal", "glamorous",
+}
+_POLISHED_CONTEXT_OCCASIONS: Set[str] = {
+    "office", "work", "business", "professional",
+}
+
+# ============================================================================
 # Style-override mappings
 # ============================================================================
 
@@ -107,8 +141,8 @@ _STYLE_OVERRIDES: Dict[str, Set[str]] = {
     "edgy":          {"F3", "B1", "HF2"},
     "punk":          {"F3", "B1", "HF2"},
     "grunge":        {"F3", "B1", "HF2"},
-    "athleisure":    {"C1", "C2", "HF3", "K1"},
-    "sporty chic":   {"C1", "C2", "HF3", "K1"},
+    "athleisure":    {"C1", "C2", "HF3", "K1", "L1", "L2"},
+    "sporty chic":   {"C1", "C2", "HF3", "K1", "L1", "L2"},
     "avant-garde":   {"E1", "E2", "E3"},
     "experimental":  {"E1", "E2", "E3"},
     "eclectic":      {"J1", "B1", "HF1", "K1"},
@@ -189,6 +223,61 @@ def _is_gym_piece(p: "AestheticProfile") -> bool:
 
 def _is_activewear(p: "AestheticProfile") -> bool:
     return _l2(p) in _ACTIVEWEAR_L2
+
+
+# ---- Lifestyle context classifiers (L-rules) ----
+
+def _has_active_context(p: "AestheticProfile") -> bool:
+    """Multi-signal detection of active / athleisure lifestyle context.
+
+    Returns True when the item carries active-lifestyle signals in
+    *any* of: style_tags, occasions, gemini_category_l2, or name.
+    Designed to catch items like 'Aspire Active Tank' that slip through
+    the narrower L2-only checks (HF3, C1, C2).
+
+    "Sporty" alone is NOT enough — it's a general style tag already
+    handled by K1 (-0.06).  For L-rules, "sporty" needs corroboration
+    from another active signal (material, occasion, name keyword).
+    """
+    # Strong signals: any ONE is sufficient
+    if _style_set(p) & _ACTIVE_CONTEXT_STYLES:
+        return True
+    if _occ_set(p) & _ACTIVE_CONTEXT_OCCASIONS:
+        return True
+    if _l2(p) in _ACTIVE_L2_BROAD:
+        return True
+    name = (getattr(p, "name", None) or "").lower()
+    if any(kw in name for kw in _ACTIVE_NAME_SIGNALS):
+        return True
+
+    # Weak signal: "sporty" style tag needs at least one supporting signal
+    if "sporty" in _style_set(p):
+        mat = getattr(p, "material_family", None)
+        if mat in {"technical", "synthetic_stretch", "neoprene"}:
+            return True
+
+    return False
+
+
+def _has_polished_context(p: "AestheticProfile") -> bool:
+    """Multi-signal detection of polished / tailored lifestyle context.
+
+    Returns True when the item carries classic/minimal/smart styling
+    signals via style_tags, formality level, or L2 garment type.
+    """
+    # Signal 1: Style tags
+    if _style_set(p) & _POLISHED_CONTEXT_STYLES:
+        return True
+    # Signal 2: Formality (business casual or above)
+    if getattr(p, "formality_level", 2) >= 3:
+        return True
+    # Signal 3: L2 in tailored set
+    if _l2(p) in _TAILORED_L2:
+        return True
+    # Signal 4: Occasions
+    if _occ_set(p) & _POLISHED_CONTEXT_OCCASIONS:
+        return True
+    return False
 
 
 def _is_formal_piece(p: "AestheticProfile") -> bool:
@@ -698,6 +787,62 @@ def _check_K1(src: "AestheticProfile", cand: "AestheticProfile") -> float:
     return 0.0
 
 
+# --- L: Lifestyle / context mismatch ----------------------------------------
+
+def _check_L1(src: "AestheticProfile", cand: "AestheticProfile") -> float:
+    """Active/athleisure candidate paired with polished/tailored source.
+
+    Catches items like 'Aspire Active Tank' that slip through narrow L2
+    checks (HF3, C1, C2) but are clearly wrong next to tailored pants
+    or classic blouses.  Uses multi-signal detection across style_tags,
+    occasions, gemini_category_l2, and product name.
+
+    Bridge items (carrying BOTH active AND polished signals, e.g. a
+    'sporty chic blazer') do NOT trigger — they intentionally span
+    both worlds.
+    """
+    # Direction 1: polished source + active candidate
+    if _has_polished_context(src) and _has_active_context(cand):
+        # Bridge check: skip if candidate also has polished signals
+        if not _has_polished_context(cand):
+            return -0.15
+    # Direction 2: active source + polished candidate
+    if _has_active_context(src) and _has_polished_context(cand):
+        # Bridge check: skip if candidate also has active signals
+        if not _has_active_context(cand):
+            return -0.12
+    return 0.0
+
+
+def _check_L2(src: "AestheticProfile", cand: "AestheticProfile") -> float:
+    """Active/athleisure item paired with evening/dressy item.
+
+    Prevents gym-adjacent pieces from surfacing next to cocktail dresses,
+    sequin tops, or other evening wear — even when their neutral colors
+    produce decent cosine/compat scores.
+    """
+    _EVENING_OCCASIONS: Set[str] = {
+        "formal event", "wedding guest", "gala", "cocktail", "black tie",
+    }
+
+    def _has_evening_context(p: "AestheticProfile") -> bool:
+        if _occ_set(p) & _EVENING_OCCASIONS:
+            return True
+        if getattr(p, "formality_level", 2) >= 4:
+            return True
+        if _l2(p) in _FORMAL_EVENING_L2:
+            return True
+        return False
+
+    if _has_evening_context(src) and _has_active_context(cand):
+        if not _has_evening_context(cand):
+            return -0.18
+    if _has_active_context(src) and _has_evening_context(cand):
+        if not _has_active_context(cand):
+            return -0.15
+    return 0.0
+
+
 # ============================================================================
 # Soft-rule registry
 # ============================================================================
@@ -736,6 +881,9 @@ _SOFT_RULES: List[Tuple[str, Callable]] = [
     ("J2", _check_J2),
     # K: Style-tag coherence
     ("K1", _check_K1),
+    # L: Lifestyle / context mismatch
+    ("L1", _check_L1),
+    ("L2", _check_L2),
 ]
 
 

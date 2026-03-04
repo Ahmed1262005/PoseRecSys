@@ -25,11 +25,54 @@ import threading
 import time as _time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from services.outfit_engine import AestheticProfile
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# 0. IMAGE URL VALIDATION
+# =============================================================================
+
+_VALID_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
+_IMAGE_FORMAT_PARAMS = frozenset({"fmt=jpeg", "fmt=jpg", "fmt=png", "fmt=webp", "fmt=gif"})
+
+
+def _is_valid_image_url(url: str) -> bool:
+    """Check if *url* points to a supported image for the OpenAI vision API.
+
+    Accepts:
+      - URLs ending in a known image extension (.jpg, .png, .webp, etc.)
+      - Dynamic image CDN URLs with explicit format params (e.g. fmt=jpeg)
+    Rejects:
+      - Empty / non-HTTP URLs
+      - HTML pages (.html, .htm)
+      - URLs with no extension and no format hint
+    """
+    if not url or not url.startswith("http"):
+        return False
+    # Strip fragment (e.g. #main) and query string for extension check
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    # Reject known non-image pages
+    if path.endswith((".html", ".htm", ".php", ".asp", ".aspx")):
+        return False
+    # Accept known image extensions
+    for ext in _VALID_IMAGE_EXTENSIONS:
+        if path.endswith(ext):
+            return True
+    # Accept dynamic image CDNs with explicit format params
+    query = (parsed.query or "").lower()
+    if any(p in query for p in _IMAGE_FORMAT_PARAMS):
+        return True
+    # Accept S3 / CloudFront URLs (our own product images)
+    host = parsed.hostname or ""
+    if "s3." in host or "cloudfront" in host:
+        return True
+    return False
 
 
 # =============================================================================
@@ -176,7 +219,7 @@ def build_vision_messages(
 
     # 2. Source image
     source_url = source.image_url or ""
-    if source_url:
+    if _is_valid_image_url(source_url):
         content_parts.append({
             "type": "image_url",
             "image_url": {"url": source_url, "detail": "low"},
@@ -195,7 +238,7 @@ def build_vision_messages(
             "type": "text",
             "text": f"\nCandidate {cand_id}:",
         })
-        if cand_url:
+        if _is_valid_image_url(cand_url):
             content_parts.append({
                 "type": "image_url",
                 "image_url": {"url": cand_url, "detail": "low"},
@@ -235,7 +278,7 @@ def build_outfit_ranking_messages(
         "text": intent.context_line() + "\n\nSOURCE garment (already owned):",
     })
     source_url = source.image_url or ""
-    if source_url:
+    if _is_valid_image_url(source_url):
         content_parts.append({
             "type": "image_url",
             "image_url": {"url": source_url, "detail": "low"},
@@ -253,7 +296,7 @@ def build_outfit_ranking_messages(
         })
         for cat, profile in outfit.items():
             img_url = profile.image_url or ""
-            if img_url:
+            if _is_valid_image_url(img_url):
                 content_parts.append({
                     "type": "text",
                     "text": f"{cat}:",
@@ -355,6 +398,26 @@ class VisionJudge:
         """
         if not candidates:
             return set()
+
+        # Pre-filter: skip if source image is invalid (would fail entire call)
+        source_url = source.image_url or ""
+        if not _is_valid_image_url(source_url):
+            logger.warning(
+                "Vision judge: source %s has invalid image URL, skipping",
+                source.product_id,
+            )
+            return set()
+
+        # Pre-filter: only send candidates with valid image URLs
+        valid_candidates = [c for c in candidates if _is_valid_image_url(c.image_url or "")]
+        if len(valid_candidates) < len(candidates):
+            logger.info(
+                "Vision judge: filtered %d/%d candidates with invalid image URLs",
+                len(candidates) - len(valid_candidates), len(candidates),
+            )
+        if not valid_candidates:
+            return set()
+        candidates = valid_candidates
 
         source_pid = source.product_id or ""
         intent_hash = intent.cache_key()
@@ -476,7 +539,33 @@ class VisionJudge:
         if len(outfits) <= 1:
             return None
 
-        messages = build_outfit_ranking_messages(source, outfits, intent)
+        # Pre-filter: skip if source image is invalid
+        source_url = source.image_url or ""
+        if not _is_valid_image_url(source_url):
+            logger.warning(
+                "Outfit ranking: source %s has invalid image URL, skipping",
+                source.product_id,
+            )
+            return None
+
+        # Pre-filter: remove outfits where ANY piece has an invalid image URL
+        valid_outfits: List[Dict[str, "AestheticProfile"]] = []
+        valid_indices: List[int] = []
+        for i, outfit in enumerate(outfits):
+            all_valid = all(
+                _is_valid_image_url(p.image_url or "")
+                for p in outfit.values()
+            )
+            if all_valid:
+                valid_outfits.append(outfit)
+                valid_indices.append(i)
+            else:
+                logger.debug("Outfit ranking: outfit %d has invalid image URL, skipping", i)
+
+        if len(valid_outfits) <= 1:
+            return None
+
+        messages = build_outfit_ranking_messages(source, valid_outfits, intent)
 
         for attempt in range(1 + self.max_retries):
             try:
@@ -491,7 +580,13 @@ class VisionJudge:
                 )
                 elapsed = _time.monotonic() - t0
                 content = response.choices[0].message.content or ""
-                ranking = self._parse_ranking_response(content, len(outfits))
+                ranking = self._parse_ranking_response(content, len(valid_outfits))
+                if ranking is not None:
+                    # Remap filtered indices back to original outfit positions,
+                    # then append any outfits that were excluded due to bad URLs.
+                    remapped = [valid_indices[r] for r in ranking]
+                    excluded = [i for i in range(len(outfits)) if i not in set(valid_indices)]
+                    ranking = remapped + excluded
                 logger.info(
                     "Outfit ranking: %.1fs, result=%s", elapsed, ranking,
                 )
