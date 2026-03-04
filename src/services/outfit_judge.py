@@ -1,22 +1,21 @@
 """
-LLM Pair Judge for Complete the Fit v3
-=======================================
+Vision-Based Pass/Fail Judge for Complete the Fit v3
+=====================================================
 
-Reranks outfit complement candidates using a structured LLM evaluation.
-Operates on the top-K candidates (by TATTOO score) from each target
-category, producing a 0-10 overall score per candidate that blends
-with the existing TATTOO score for final ranking.
+Sends source + candidate product images to gpt-4o-mini vision and asks
+which candidates visually CLASH with the source for the given occasion.
+Operates as a post-TATTOO filter: TATTOO ranks, vision judge vetoes.
 
 Components:
-  - FitIntent: derived from source product, describes what the outfit needs
+  - FitIntent: derived from source product, provides minimal text context
   - derive_fit_intent(): source AestheticProfile -> FitIntent
-  - LLMPairJudge: singleton OpenAI client with bounded LRU cache
-  - JudgeResult: structured output per candidate
+  - VisionJudge: singleton OpenAI client with bounded LRU cache
   - get_pair_judge(): thread-safe singleton accessor
 
 Integration:
-  Called from outfit_engine._score_category() after TATTOO scoring
-  and before MMR diversity selection.
+  Called from outfit_engine._score_category() after TATTOO scoring.
+  Returns set of product IDs that should be removed (visual clashes).
+  No score blending — TATTOO ranking is preserved for passing candidates.
 """
 
 import hashlib
@@ -24,8 +23,8 @@ import json
 import logging
 import threading
 import time as _time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.outfit_engine import AestheticProfile
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# 1. FIT INTENT  (derived from source product)
+# 1. FIT INTENT  (derived from source product — minimal context for prompt)
 # =============================================================================
 
 _OCCASION_TO_BUCKET = {
@@ -66,16 +65,20 @@ class FitIntent:
     occasion_target: str            # work | casual | going-out | event | active
     silhouette_intent: str          # balanced | oversized | fitted | layered
     vibe: str                       # primary style tag
-    statement_target: float         # 0.0-1.0
+    source_category: str            # e.g. "Jogger", "Blouse"
     warmth_target: str              # hot | mild | cold | any
-    source_is_basic: bool
-    source_statement_level: float
 
     def cache_key(self) -> str:
-        """Short hash for cache keying — buckets statement_target to 0.1."""
-        bucket = round(self.statement_target, 1)
-        raw = f"{self.occasion_target}:{self.silhouette_intent}:{self.vibe}:{bucket}:{self.warmth_target}"
+        """Short hash for cache keying."""
+        raw = f"{self.occasion_target}:{self.silhouette_intent}:{self.vibe}:{self.warmth_target}"
         return hashlib.md5(raw.encode()).hexdigest()[:8]
+
+    def context_line(self) -> str:
+        """One-line text context for the vision prompt."""
+        return (
+            f"Source: {self.occasion_target} {self.source_category.lower()}. "
+            f"Building a {self.occasion_target} outfit with {self.vibe} style."
+        )
 
 
 def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
@@ -85,7 +88,7 @@ def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
     for occ in (source.occasions or []):
         bucket = _OCCASION_TO_BUCKET.get(occ.lower().strip(), "casual")
         occasion_counts[bucket] = occasion_counts.get(bucket, 0) + 1
-    occasion_target = max(occasion_counts, key=occasion_counts.get) if occasion_counts else "casual"
+    occasion_target = max(occasion_counts, key=lambda k: occasion_counts[k]) if occasion_counts else "casual"
 
     # Silhouette intent
     sil = (source.silhouette or "").lower().strip()
@@ -102,15 +105,8 @@ def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
     # Vibe
     vibe = (source.primary_style or "casual").lower().strip()
 
-    # Statement target (inverse of source)
-    src_strength = source.style_strength
-    source_is_basic = src_strength < 0.35
-    if source_is_basic:
-        statement_target = 0.5 + (0.35 - src_strength) * 0.5
-    elif src_strength >= 0.70:
-        statement_target = max(0.10, 0.40 - (src_strength - 0.70) * 1.0)
-    else:
-        statement_target = 0.40
+    # Source category
+    source_category = source.gemini_category_l2 or source.category or "item"
 
     # Warmth target
     warmth_target = source.temp_band or "mild"
@@ -119,116 +115,180 @@ def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
         occasion_target=occasion_target,
         silhouette_intent=silhouette_intent,
         vibe=vibe,
-        statement_target=round(statement_target, 2),
+        source_category=source_category,
         warmth_target=warmth_target,
-        source_is_basic=source_is_basic,
-        source_statement_level=round(src_strength, 2),
     )
 
 
 # =============================================================================
-# 2. JUDGE RESULT
-# =============================================================================
-
-@dataclass
-class JudgeResult:
-    """Structured output from the LLM pair judge for one candidate."""
-    overall: float          # 0-10
-    fail: bool              # True = hard disqualification
-    tags: List[str] = field(default_factory=list)
-
-
-# =============================================================================
-# 3. PROMPT CONSTRUCTION
+# 2. PROMPT
 # =============================================================================
 
 _SYSTEM_PROMPT = (
-    "You are a strict fashion outfit compatibility evaluator. You score how well "
-    "each candidate garment complements a source garment to form a complete outfit.\n\n"
-    "Return ONLY valid JSON matching this exact schema:\n"
-    '{"results": [{"id": "<candidate_id>", "overall": <0-10>, "fail": <true|false>, '
-    '"tags": ["<tag>", ...]}]}\n\n'
-    "SCORING RUBRIC (apply strictly, overall = weighted blend of these):\n"
-    "- Occasion/formality alignment (weight 0.25): same occasion bucket = good, "
-    "gym+formal = fail\n"
-    "- Silhouette balance (weight 0.20): fitted+wide = good, oversized+oversized = bad, "
-    "consider the silhouette_intent\n"
-    "- Fabric coherence (weight 0.20): texture contrast is good (denim+silk, knit+leather), "
-    "same-material same-color = bad\n"
-    "- Style coherence (weight 0.15): adjacent styles = good (classic+minimalist), "
-    "clash = bad (romantic+sporty)\n"
-    "- Color harmony (weight 0.10): neutral+color = good, competing brights = bad, "
-    "do NOT default neutrals to high scores\n"
-    "- Pattern balance (weight 0.10): solid+print = good, print+print = bad, "
-    "two solids = acceptable but not exciting\n\n"
-    "HARD FAILS (set fail=true, overall=0):\n"
-    "- Strong occasion mismatch (gym vs formal, loungewear vs office event)\n"
-    "- Near-identical item to source (same category_l2 + same color + same fabric)\n\n"
-    "ANTI-NEUTRALITY RULE:\n"
-    "- If the source is basic (statement_level < 0.35), penalize candidates that are "
-    "also plain/neutral/basic UNLESS they are a perfect occasion+silhouette match. "
-    "Score all-basic combos no higher than 5.\n"
-    "- A 'basic' item: solid pattern, neutral color, low statement_level, no texture interest.\n\n"
-    "STATEMENT BALANCE RULE:\n"
-    "- If the source is a statement piece (statement_level > 0.70), prefer basic/supporting "
-    "complements. Score two competing statement pieces no higher than 4.\n"
-    "- Respect the statement_target: higher = wants more visual interest, lower = wants basics.\n\n"
-    "TAGS (include 1-3 from this list):\n"
-    "occasion_match, silhouette_balance, fabric_contrast, style_coherence, "
-    "color_harmony, too_basic, too_busy, occasion_clash, great_complement, "
-    "statement_conflict, good_contrast, season_mismatch"
+    "You are a fashion outfit visual compatibility judge. "
+    "You will see a SOURCE garment image followed by CANDIDATE garment images. "
+    "Your job: identify which candidates would visually CLASH with the source "
+    "when worn together as an outfit.\n\n"
+    "CLASH means:\n"
+    "- Colors that fight each other (e.g. competing neon brights)\n"
+    "- Wildly mismatched formality (gym shorts with a silk blouse)\n"
+    "- Clashing patterns (busy print + busy print)\n"
+    "- Same exact look as the source (redundant, not complementary)\n"
+    "- Textures/fabrics that look wrong together\n\n"
+    "Most candidates should PASS. Only flag clear visual clashes.\n"
+    "When in doubt, PASS. We want to remove bad matches, not be picky.\n\n"
+    "Return ONLY valid JSON: {\"fail\": [\"id_of_clashing_candidate\", ...]}\n"
+    "If all candidates pass, return: {\"fail\": []}"
+)
+
+_OUTFIT_RANKING_PROMPT = (
+    "You are a fashion stylist ranking complete outfit combinations. "
+    "You will see a SOURCE garment, then several OUTFIT OPTIONS. "
+    "Each option shows the garments that would complete the outfit.\n\n"
+    "Rank from BEST to WORST. A great outfit has:\n"
+    "- Color story: intentional palette, not everything matching\n"
+    "- Texture contrast: e.g. knit + denim, silk + leather, linen + structured cotton\n"
+    "- Balanced proportions: mix of fitted and relaxed\n"
+    "- Style intent: looks deliberately styled, not randomly safe\n\n"
+    "A mediocre outfit:\n"
+    "- Everything the same color/texture (boring)\n"
+    "- All safe neutrals with no visual interest\n"
+    "- Looks like separate items, not a curated outfit\n\n"
+    "Return ONLY valid JSON: {\"ranking\": [3, 1, 2, ...]}\n"
+    "Numbers are outfit indices (1-based), best to worst. Rank ALL outfits."
 )
 
 
-def _profile_to_judge_dict(profile: "AestheticProfile") -> Dict[str, Any]:
-    """Extract only the attributes the LLM judge needs. No names, brands, or prices."""
-    return {
-        "category_l2": profile.gemini_category_l2 or "",
-        "formality": profile.formality or "",
-        "silhouette": profile.silhouette or "",
-        "fabric": profile.material_family or profile.apparent_fabric or "",
-        "color": profile.color_family or profile.primary_color or "",
-        "pattern": profile.pattern or "",
-        "statement_level": round(profile.style_strength, 2),
-        "occasions": (profile.occasions or [])[:3],
-        "seasons": (profile.seasons or [])[:3],
-        "texture": profile.texture or "",
-        "sheen": profile.sheen or "",
-        "length": profile.length or "",
-    }
-
-
-def build_judge_payload(
+def build_vision_messages(
     source: "AestheticProfile",
     candidates: List["AestheticProfile"],
     intent: FitIntent,
-) -> Dict[str, Any]:
-    """Build the structured user-message payload for the LLM judge."""
-    return {
-        "intent": {
-            "occasion": intent.occasion_target,
-            "silhouette": intent.silhouette_intent,
-            "vibe": intent.vibe,
-            "statement_target": intent.statement_target,
-            "warmth": intent.warmth_target,
-        },
-        "source": _profile_to_judge_dict(source),
-        "candidates": [
-            {"id": c.product_id or f"cand_{i}", **_profile_to_judge_dict(c)}
-            for i, c in enumerate(candidates)
-        ],
-    }
+) -> List[Dict[str, Any]]:
+    """Build the OpenAI messages array with images for the vision judge."""
+    # User message content parts: text context + source image + candidate images
+    content_parts: List[Dict[str, Any]] = []
+
+    # 1. Text context line
+    content_parts.append({
+        "type": "text",
+        "text": intent.context_line() + "\n\nSOURCE garment:",
+    })
+
+    # 2. Source image
+    source_url = source.image_url or ""
+    if source_url:
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": source_url, "detail": "low"},
+        })
+
+    # 3. Candidate images with IDs
+    content_parts.append({
+        "type": "text",
+        "text": "\nCANDIDATE garments to evaluate:",
+    })
+
+    for i, cand in enumerate(candidates):
+        cand_url = cand.image_url or ""
+        cand_id = cand.product_id or f"cand_{i}"
+        content_parts.append({
+            "type": "text",
+            "text": f"\nCandidate {cand_id}:",
+        })
+        if cand_url:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": cand_url, "detail": "low"},
+            })
+
+    # 4. Final instruction
+    content_parts.append({
+        "type": "text",
+        "text": (
+            "\n\nWhich candidates visually CLASH with the source for "
+            f"a {intent.occasion_target} outfit? Return JSON: "
+            '{"fail": ["id1", "id2", ...]} or {"fail": []} if all pass.'
+        ),
+    })
+
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": content_parts},
+    ]
+
+
+def build_outfit_ranking_messages(
+    source: "AestheticProfile",
+    outfits: List[Dict[str, "AestheticProfile"]],
+    intent: FitIntent,
+) -> List[Dict[str, Any]]:
+    """Build OpenAI messages to rank complete outfit combinations.
+
+    Each outfit is a dict mapping category -> AestheticProfile.
+    The judge sees the source image + all pieces for each outfit option.
+    """
+    content_parts: List[Dict[str, Any]] = []
+
+    # 1. Context + source image
+    content_parts.append({
+        "type": "text",
+        "text": intent.context_line() + "\n\nSOURCE garment (already owned):",
+    })
+    source_url = source.image_url or ""
+    if source_url:
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": source_url, "detail": "low"},
+        })
+
+    # 2. Each outfit option
+    content_parts.append({
+        "type": "text",
+        "text": "\nHere are the outfit options to complete the look:",
+    })
+    for i, outfit in enumerate(outfits, 1):
+        content_parts.append({
+            "type": "text",
+            "text": f"\n--- OUTFIT {i} ---",
+        })
+        for cat, profile in outfit.items():
+            img_url = profile.image_url or ""
+            if img_url:
+                content_parts.append({
+                    "type": "text",
+                    "text": f"{cat}:",
+                })
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": img_url, "detail": "low"},
+                })
+
+    # 3. Final instruction
+    content_parts.append({
+        "type": "text",
+        "text": (
+            f"\nRank these {len(outfits)} outfits from BEST to WORST styled "
+            "with the source garment. Prefer intentional contrast and styling "
+            "over safe matching. Return JSON: "
+            '{"ranking": [best_idx, ..., worst_idx]} (1-indexed)'
+        ),
+    })
+
+    return [
+        {"role": "system", "content": _OUTFIT_RANKING_PROMPT},
+        {"role": "user", "content": content_parts},
+    ]
 
 
 # =============================================================================
-# 4. LLM PAIR JUDGE
+# 3. VISION JUDGE
 # =============================================================================
 
-class LLMPairJudge:
-    """Reranks outfit candidates using a structured LLM evaluation.
+class VisionJudge:
+    """Post-TATTOO vision filter that vetoes visually clashing candidates.
 
     Singleton — accessed via get_pair_judge().
-    Uses the same OpenAI API key as the query planner.
+    Uses gpt-4o-mini with image inputs.
     Bounded in-memory LRU cache for results.
     """
 
@@ -237,8 +297,8 @@ class LLMPairJudge:
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4.1-mini",
-        timeout: float = 15.0,
+        model: str = "gpt-4o-mini",
+        timeout: float = 20.0,
         max_retries: int = 1,
     ):
         from openai import OpenAI
@@ -247,12 +307,12 @@ class LLMPairJudge:
         self.timeout = timeout
         self.max_retries = max_retries
 
-        self._cache: Dict[str, JudgeResult] = {}
+        self._cache: Dict[str, bool] = {}     # key -> True means FAIL
         self._cache_order: List[str] = []
         self._cache_lock = threading.Lock()
 
         logger.info(
-            "LLMPairJudge initialized: model=%s, timeout=%.1fs, cache_size=%d",
+            "VisionJudge initialized: model=%s, timeout=%.1fs, cache_size=%d",
             model, timeout, self._CACHE_SIZE,
         )
 
@@ -264,11 +324,11 @@ class LLMPairJudge:
     def _make_cache_key(source_pid: str, cand_pid: str, intent_hash: str) -> str:
         return f"{source_pid}:{cand_pid}:{intent_hash}"
 
-    def _cache_get(self, key: str) -> Optional[JudgeResult]:
+    def _cache_get(self, key: str) -> Optional[bool]:
         with self._cache_lock:
             return self._cache.get(key)
 
-    def _cache_put(self, key: str, value: JudgeResult) -> None:
+    def _cache_put(self, key: str, value: bool) -> None:
         with self._cache_lock:
             if key in self._cache:
                 return
@@ -287,150 +347,218 @@ class LLMPairJudge:
         source: "AestheticProfile",
         candidates: List["AestheticProfile"],
         intent: FitIntent,
-    ) -> Dict[str, JudgeResult]:
-        """Score a batch of candidates against source with intent context.
+    ) -> Set[str]:
+        """Evaluate candidates visually against source.
 
-        Returns {product_id: JudgeResult} for all candidates.
-        On LLM failure, returns only cached results (graceful degradation).
+        Returns set of product IDs that FAIL (should be removed).
+        On LLM failure, returns empty set (graceful degradation = keep all).
         """
         if not candidates:
-            return {}
+            return set()
 
         source_pid = source.product_id or ""
         intent_hash = intent.cache_key()
 
         # Separate cached from uncached
-        results: Dict[str, JudgeResult] = {}
+        fail_ids: Set[str] = set()
         uncached: List["AestheticProfile"] = []
-        uncached_keys: List[str] = []
 
         for cand in candidates:
             cand_pid = cand.product_id or ""
             key = self._make_cache_key(source_pid, cand_pid, intent_hash)
             cached = self._cache_get(key)
             if cached is not None:
-                results[cand_pid] = cached
+                if cached:  # True = fail
+                    fail_ids.add(cand_pid)
             else:
                 uncached.append(cand)
-                uncached_keys.append(key)
 
         if not uncached:
-            logger.debug("LLM judge: all %d candidates cached", len(candidates))
-            return results
+            logger.debug("Vision judge: all %d candidates cached", len(candidates))
+            return fail_ids
 
         logger.info(
-            "LLM judge: %d cached, %d to evaluate for source %s",
-            len(results), len(uncached), source_pid,
+            "Vision judge: %d cached, %d to evaluate for source %s",
+            len(candidates) - len(uncached), len(uncached), source_pid,
         )
 
-        # Build payload and call LLM
-        payload = build_judge_payload(source, uncached, intent)
-        user_message = json.dumps(payload, separators=(",", ":"))
+        # Build messages and call LLM
+        messages = build_vision_messages(source, uncached, intent)
+        new_fails = self._call_vision(messages)
 
-        llm_results = self._call_llm(user_message)
-
-        # Match results back to candidates
-        result_by_id: Dict[str, JudgeResult] = {}
-        for jr_dict in llm_results:
-            cid = str(jr_dict.get("id", ""))
-            overall = jr_dict.get("overall", 5.0)
-            fail = jr_dict.get("fail", False)
-            tags = jr_dict.get("tags", [])
-            if not isinstance(overall, (int, float)):
-                overall = 5.0
-            overall = max(0.0, min(10.0, float(overall)))
-            if not isinstance(fail, bool):
-                fail = False
-            if not isinstance(tags, list):
-                tags = []
-            result_by_id[cid] = JudgeResult(overall=overall, fail=fail, tags=tags)
-
-        # Populate cache and results
-        for cand, key in zip(uncached, uncached_keys):
+        # Populate cache
+        for cand in uncached:
             cand_pid = cand.product_id or ""
-            jr = result_by_id.get(cand_pid)
-            if jr is None:
-                jr = JudgeResult(overall=5.0, fail=False, tags=["missing_from_llm"])
-            self._cache_put(key, jr)
-            results[cand_pid] = jr
+            key = self._make_cache_key(source_pid, cand_pid, intent_hash)
+            is_fail = cand_pid in new_fails
+            self._cache_put(key, is_fail)
+            if is_fail:
+                fail_ids.add(cand_pid)
 
-        return results
+        return fail_ids
 
     # ------------------------------------------------------------------
-    # LLM call (with retry)
+    # Vision call (with retry)
     # ------------------------------------------------------------------
 
-    def _call_llm(self, user_message: str) -> List[Dict]:
-        """Call OpenAI and parse the JSON response.
-        On failure returns empty list (graceful degradation).
+    def _call_vision(self, messages: List[Dict]) -> Set[str]:
+        """Call OpenAI vision API and parse the fail list.
+        On failure returns empty set (graceful degradation = keep all).
         """
         for attempt in range(1 + self.max_retries):
             try:
                 t0 = _time.monotonic()
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message},
-                    ],
+                    messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0.0,
-                    max_tokens=2000,
+                    max_tokens=500,
                     timeout=self.timeout,
                 )
                 elapsed = _time.monotonic() - t0
                 content = response.choices[0].message.content or ""
-                parsed = self._parse_response(content)
+                fails = self._parse_response(content)
                 logger.info(
-                    "LLM judge call: %.1fs, %d results parsed",
-                    elapsed, len(parsed),
+                    "Vision judge call: %.1fs, %d fails",
+                    elapsed, len(fails),
                 )
-                return parsed
+                return fails
             except Exception as e:
                 logger.warning(
-                    "LLM judge call failed (attempt %d/%d): %s",
+                    "Vision judge call failed (attempt %d/%d): %s",
                     attempt + 1, 1 + self.max_retries, e,
                 )
                 if attempt < self.max_retries:
                     _time.sleep(2.0 * (attempt + 1))
 
-        logger.error("LLM judge: all attempts failed, returning empty results")
-        return []
+        logger.error("Vision judge: all attempts failed, keeping all candidates")
+        return set()
 
     @staticmethod
-    def _parse_response(content: str) -> List[Dict]:
-        """Parse LLM JSON response into list of result dicts."""
+    def _parse_response(content: str) -> Set[str]:
+        """Parse LLM JSON response into set of fail IDs."""
         try:
             data = json.loads(content)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("LLM judge: invalid JSON: %.200s", content)
-            return []
+            logger.warning("Vision judge: invalid JSON: %.200s", content)
+            return set()
 
         if isinstance(data, dict):
-            results = data.get("results")
-            if isinstance(results, list):
-                return results
-            # Flat dict with candidate IDs as keys
-            if all(isinstance(v, dict) for v in data.values()):
-                return [{"id": k, **v} for k, v in data.items()]
+            fail_list = data.get("fail", [])
+            if isinstance(fail_list, list):
+                return {str(x) for x in fail_list if x}
 
-        if isinstance(data, list):
-            return data
+        logger.warning("Vision judge: unexpected structure: %.200s", content)
+        return set()
 
-        logger.warning("LLM judge: unexpected structure: %.200s", content)
-        return []
+    # ------------------------------------------------------------------
+    # Outfit-level ranking
+    # ------------------------------------------------------------------
+
+    def rank_outfits(
+        self,
+        source: "AestheticProfile",
+        outfits: List[Dict[str, "AestheticProfile"]],
+        intent: FitIntent,
+    ) -> Optional[List[int]]:
+        """Rank complete outfit combinations by visual styling quality.
+
+        Args:
+            source: the source product (already owned)
+            outfits: list of outfit combos, each mapping category -> AestheticProfile
+            intent: derived fit intent for prompt context
+
+        Returns:
+            0-indexed list of outfit indices ordered best->worst,
+            or None if ranking fails (preserve TATTOO order).
+        """
+        if len(outfits) <= 1:
+            return None
+
+        messages = build_outfit_ranking_messages(source, outfits, intent)
+
+        for attempt in range(1 + self.max_retries):
+            try:
+                t0 = _time.monotonic()
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                    max_tokens=200,
+                    timeout=self.timeout,
+                )
+                elapsed = _time.monotonic() - t0
+                content = response.choices[0].message.content or ""
+                ranking = self._parse_ranking_response(content, len(outfits))
+                logger.info(
+                    "Outfit ranking: %.1fs, result=%s", elapsed, ranking,
+                )
+                return ranking
+            except Exception as e:
+                logger.warning(
+                    "Outfit ranking failed (attempt %d/%d): %s",
+                    attempt + 1, 1 + self.max_retries, e,
+                )
+                if attempt < self.max_retries:
+                    _time.sleep(2.0 * (attempt + 1))
+
+        logger.error("Outfit ranking: all attempts failed, keeping TATTOO order")
+        return None
+
+    @staticmethod
+    def _parse_ranking_response(content: str, n_outfits: int) -> Optional[List[int]]:
+        """Parse ranking JSON into 0-indexed list of outfit indices."""
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Outfit ranking: invalid JSON: %.200s", content)
+            return None
+
+        if not isinstance(data, dict):
+            logger.warning("Outfit ranking: not a dict: %.200s", content)
+            return None
+
+        ranking = data.get("ranking", [])
+        if not isinstance(ranking, list):
+            logger.warning("Outfit ranking: 'ranking' not a list: %.200s", content)
+            return None
+
+        # Convert 1-indexed to 0-indexed, validate
+        indices: List[int] = []
+        seen: Set[int] = set()
+        for r in ranking:
+            try:
+                idx = int(r) - 1
+                if 0 <= idx < n_outfits and idx not in seen:
+                    indices.append(idx)
+                    seen.add(idx)
+            except (ValueError, TypeError):
+                continue
+
+        if not indices:
+            logger.warning("Outfit ranking: no valid indices parsed")
+            return None
+
+        # Fill in any omitted indices at the end (preserve their order)
+        for i in range(n_outfits):
+            if i not in seen:
+                indices.append(i)
+
+        return indices
 
 
 # =============================================================================
-# 5. SINGLETON
+# 4. SINGLETON
 # =============================================================================
 
-_judge: Optional[LLMPairJudge] = None
+_judge: Optional[VisionJudge] = None
 _judge_lock = threading.Lock()
 
 
-def get_pair_judge() -> Optional[LLMPairJudge]:
-    """Get or create LLMPairJudge singleton. Returns None if disabled or no API key."""
+def get_pair_judge() -> Optional[VisionJudge]:
+    """Get or create VisionJudge singleton. Returns None if disabled or no API key."""
     global _judge
     if _judge is None:
         with _judge_lock:
@@ -440,14 +568,14 @@ def get_pair_judge() -> Optional[LLMPairJudge]:
                     settings = get_settings()
                     api_key = settings.openai_api_key
                     if not api_key or not getattr(settings, "llm_judge_enabled", True):
-                        logger.info("LLM pair judge disabled (no API key or disabled)")
+                        logger.info("Vision judge disabled (no API key or disabled)")
                         return None
-                    model = getattr(settings, "llm_judge_model", "gpt-4.1-mini")
-                    timeout = getattr(settings, "llm_judge_timeout", 15.0)
-                    _judge = LLMPairJudge(
+                    model = getattr(settings, "llm_judge_model", "gpt-4o-mini")
+                    timeout = getattr(settings, "llm_judge_timeout", 20.0)
+                    _judge = VisionJudge(
                         api_key=api_key, model=model, timeout=timeout,
                     )
                 except Exception as e:
-                    logger.warning("Failed to init LLM pair judge: %s", e)
+                    logger.warning("Failed to init vision judge: %s", e)
                     return None
     return _judge

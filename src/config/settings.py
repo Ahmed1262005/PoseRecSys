@@ -242,31 +242,23 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
-    # LLM Outfit Judge (Complete the Fit v3)
+    # Vision Judge (Complete the Fit v3 — pass/fail image filter)
     # ==========================================================================
     llm_judge_enabled: bool = Field(
         default=True,
-        description="Enable LLM pair judge for outfit reranking (falls back to TATTOO-only if disabled)"
+        description="Enable vision judge for outfit filtering (falls back to TATTOO-only if disabled)"
     )
     llm_judge_model: str = Field(
-        default="gpt-4.1-mini",
-        description="OpenAI model for outfit pair judging"
+        default="gpt-4o-mini",
+        description="OpenAI vision model for outfit visual clash detection"
     )
     llm_judge_timeout: float = Field(
-        default=15.0,
-        description="Timeout for LLM judge call in seconds"
+        default=20.0,
+        description="Timeout for vision judge call in seconds"
     )
     llm_judge_top_k: int = Field(
-        default=20,
-        description="Number of top TATTOO candidates to send to LLM judge per category"
-    )
-    llm_judge_blend_tattoo: float = Field(
-        default=0.55,
-        description="Weight for TATTOO score in final blend (tattoo*W + llm*(1-W))"
-    )
-    llm_judge_blend_llm: float = Field(
-        default=0.45,
-        description="Weight for LLM judge score in final blend"
+        default=10,
+        description="Number of top TATTOO candidates to send to vision judge per category"
     )
 
     # ==========================================================================

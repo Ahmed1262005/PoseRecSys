@@ -1,8 +1,7 @@
-"""Unit tests for the LLM Pair Judge (Complete the Fit v3).
+"""Unit tests for the Vision Pass/Fail Judge (Complete the Fit v3).
 
-Uses SimpleNamespace mocks to avoid importing the real AestheticProfile
-dataclass (which would pull in heavy ML dependencies).  All OpenAI calls
-are mocked — no real API key needed.
+Uses SimpleNamespace mocks — no real OpenAI API key needed.
+All vision API calls are mocked.
 """
 
 import json
@@ -12,14 +11,14 @@ from unittest.mock import MagicMock, patch
 
 from services.outfit_judge import (
     FitIntent,
-    JudgeResult,
-    LLMPairJudge,
+    VisionJudge,
     _SYSTEM_PROMPT,
+    _OUTFIT_RANKING_PROMPT,
     _OCCASION_TO_BUCKET,
     _FITTED_SILS,
     _OVERSIZED_SILS,
-    _profile_to_judge_dict,
-    build_judge_payload,
+    build_vision_messages,
+    build_outfit_ranking_messages,
     derive_fit_intent,
     get_pair_judge,
 )
@@ -30,66 +29,46 @@ from services.outfit_judge import (
 # ===========================================================================
 
 def _p(**kwargs) -> SimpleNamespace:
-    """Create a mock AestheticProfile with sensible defaults."""
     defaults = {
-        "product_id": "src-001",
-        "name": "Test Top",
-        "brand": "TestBrand",
-        "category": "tops",
-        "broad_category": "tops",
-        "price": 50.0,
-        "image_url": "https://example.com/img.jpg",
-        "gemini_category_l1": "Tops",
-        "gemini_category_l2": "blouse",
-        "formality": "casual",
-        "formality_level": 2,
-        "occasions": ["everyday"],
-        "style_tags": ["casual"],
-        "pattern": "solid",
-        "fit_type": "regular",
-        "color_family": "black",
-        "primary_color": "black",
-        "secondary_colors": [],
-        "seasons": ["spring", "fall"],
-        "silhouette": "regular",
-        "apparent_fabric": "cotton",
-        "texture": "smooth",
-        "coverage_level": "moderate",
-        "sheen": "matte",
-        "rise": None,
-        "leg_shape": None,
-        "stretch": None,
-        "length": "regular",
-        "is_bridge": False,
-        "primary_style": "casual",
-        "style_strength": 0.35,
-        "material_family": "cotton",
-        "texture_intensity": "smooth",
-        "shine_level": "matte",
-        "fabric_weight": "mid",
-        "layer_role": "base",
-        "temp_band": "mild",
-        "color_saturation": "medium",
-        "similarity": 0.5,
+        "product_id": "src-001", "name": "Test Top", "brand": "TestBrand",
+        "category": "tops", "broad_category": "tops", "price": 50.0,
+        "image_url": "https://cdn.example.com/src.jpg",
+        "gemini_category_l1": "Tops", "gemini_category_l2": "blouse",
+        "formality": "casual", "formality_level": 2,
+        "occasions": ["everyday"], "style_tags": ["casual"],
+        "pattern": "solid", "fit_type": "regular",
+        "color_family": "black", "primary_color": "black",
+        "secondary_colors": [], "seasons": ["spring", "fall"],
+        "silhouette": "regular", "apparent_fabric": "cotton",
+        "texture": "smooth", "coverage_level": "moderate",
+        "sheen": "matte", "rise": None, "leg_shape": None,
+        "stretch": None, "length": "regular", "is_bridge": False,
+        "primary_style": "casual", "style_strength": 0.35,
+        "material_family": "cotton", "texture_intensity": "smooth",
+        "shine_level": "matte", "fabric_weight": "mid",
+        "layer_role": "base", "temp_band": "mild",
+        "color_saturation": "medium", "similarity": 0.5,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
 
 def _cand(pid="cand-001", **kwargs):
-    """Create a candidate mock with distinct defaults from the source."""
-    return _p(
+    defaults = dict(
         product_id=pid, name=f"Candidate {pid}",
+        image_url=f"https://cdn.example.com/{pid}.jpg",
         broad_category="bottoms", gemini_category_l1="Bottoms",
         gemini_category_l2="jeans", color_family="blue",
         primary_color="blue", apparent_fabric="denim",
-        material_family="denim", texture="textured", **kwargs,
+        material_family="denim", texture="textured",
     )
+    defaults.update(kwargs)
+    return _p(**defaults)
 
 
-def _mock_openai_response(results):
-    """Build a mock OpenAI chat completion response."""
-    content = json.dumps({"results": results})
+def _mock_vision_response(fail_ids):
+    """Build a mock OpenAI vision response with a fail list."""
+    content = json.dumps({"fail": fail_ids})
     message = MagicMock()
     message.content = content
     choice = MagicMock()
@@ -101,9 +80,8 @@ def _mock_openai_response(results):
 
 @pytest.fixture
 def judge():
-    """Create a judge with a mocked OpenAI client."""
     with patch("openai.OpenAI"):
-        j = LLMPairJudge(api_key="test-key", model="test-model", timeout=5.0)
+        j = VisionJudge(api_key="test-key", model="gpt-4o-mini", timeout=5.0)
     return j
 
 
@@ -114,468 +92,347 @@ def judge():
 class TestFitIntentDerivation:
 
     def test_casual_occasion_default(self):
-        intent = derive_fit_intent(_p(occasions=[]))
-        assert intent.occasion_target == "casual"
+        assert derive_fit_intent(_p(occasions=[])).occasion_target == "casual"
 
     def test_work_occasion(self):
-        intent = derive_fit_intent(_p(occasions=["office", "meeting"]))
-        assert intent.occasion_target == "work"
+        assert derive_fit_intent(_p(occasions=["office", "meeting"])).occasion_target == "work"
 
     def test_going_out_occasion(self):
-        intent = derive_fit_intent(_p(occasions=["date night", "party", "club"]))
-        assert intent.occasion_target == "going-out"
+        assert derive_fit_intent(_p(occasions=["party", "club"])).occasion_target == "going-out"
 
     def test_event_occasion(self):
-        intent = derive_fit_intent(_p(occasions=["wedding", "gala"]))
-        assert intent.occasion_target == "event"
+        assert derive_fit_intent(_p(occasions=["wedding", "gala"])).occasion_target == "event"
 
     def test_active_occasion(self):
-        intent = derive_fit_intent(_p(occasions=["gym", "workout", "yoga"]))
-        assert intent.occasion_target == "active"
+        assert derive_fit_intent(_p(occasions=["gym", "workout"])).occasion_target == "active"
 
     def test_majority_occasion_wins(self):
-        intent = derive_fit_intent(_p(occasions=["office", "meeting", "date night"]))
-        assert intent.occasion_target == "work"
+        assert derive_fit_intent(_p(occasions=["office", "meeting", "party"])).occasion_target == "work"
 
     def test_unknown_occasion_maps_casual(self):
-        intent = derive_fit_intent(_p(occasions=["unknown_event", "mystery"]))
-        assert intent.occasion_target == "casual"
+        assert derive_fit_intent(_p(occasions=["unknown_thing"])).occasion_target == "casual"
 
     def test_fitted_silhouette(self):
-        intent = derive_fit_intent(_p(silhouette="fitted"))
-        assert intent.silhouette_intent == "fitted"
+        assert derive_fit_intent(_p(silhouette="fitted")).silhouette_intent == "fitted"
 
     def test_oversized_silhouette(self):
-        intent = derive_fit_intent(_p(silhouette="oversized"))
-        assert intent.silhouette_intent == "oversized"
+        assert derive_fit_intent(_p(silhouette="oversized")).silhouette_intent == "oversized"
 
-    def test_outerwear_silhouette_layered(self):
-        intent = derive_fit_intent(_p(silhouette="regular", gemini_category_l1="outerwear"))
-        assert intent.silhouette_intent == "layered"
+    def test_outerwear_layered(self):
+        assert derive_fit_intent(_p(silhouette="regular", gemini_category_l1="outerwear")).silhouette_intent == "layered"
 
-    def test_regular_silhouette_balanced(self):
-        intent = derive_fit_intent(_p(silhouette="regular", gemini_category_l1="Tops"))
-        assert intent.silhouette_intent == "balanced"
+    def test_regular_balanced(self):
+        assert derive_fit_intent(_p(silhouette="regular", gemini_category_l1="Tops")).silhouette_intent == "balanced"
 
     def test_vibe_from_primary_style(self):
-        intent = derive_fit_intent(_p(primary_style="Bohemian"))
-        assert intent.vibe == "bohemian"
+        assert derive_fit_intent(_p(primary_style="Bohemian")).vibe == "bohemian"
 
     def test_vibe_default_casual(self):
-        intent = derive_fit_intent(_p(primary_style=None))
-        assert intent.vibe == "casual"
+        assert derive_fit_intent(_p(primary_style=None)).vibe == "casual"
+
+    def test_source_category_from_l2(self):
+        assert derive_fit_intent(_p(gemini_category_l2="Jogger")).source_category == "Jogger"
+
+    def test_warmth_from_temp_band(self):
+        assert derive_fit_intent(_p(temp_band="cold")).warmth_target == "cold"
+
+    def test_warmth_default_mild(self):
+        assert derive_fit_intent(_p(temp_band=None)).warmth_target == "mild"
 
 
 # ===========================================================================
-# 2. STATEMENT LEVEL mapping
-# ===========================================================================
-
-class TestStatementLevel:
-
-    def test_basic_source_high_statement_target(self):
-        intent = derive_fit_intent(_p(style_strength=0.10))
-        assert intent.source_is_basic is True
-        assert intent.statement_target > 0.5
-
-    def test_statement_source_low_statement_target(self):
-        intent = derive_fit_intent(_p(style_strength=0.90))
-        assert intent.source_is_basic is False
-        assert intent.statement_target < 0.30
-
-    def test_mid_range_balanced(self):
-        intent = derive_fit_intent(_p(style_strength=0.50))
-        assert intent.source_is_basic is False
-        assert intent.statement_target == 0.40
-
-    def test_basic_boundary_035(self):
-        intent = derive_fit_intent(_p(style_strength=0.35))
-        assert intent.source_is_basic is False
-
-    def test_basic_boundary_034(self):
-        intent = derive_fit_intent(_p(style_strength=0.34))
-        assert intent.source_is_basic is True
-
-    def test_source_statement_level_stored(self):
-        intent = derive_fit_intent(_p(style_strength=0.42))
-        assert intent.source_statement_level == 0.42
-
-
-# ===========================================================================
-# 3. FIT INTENT cache key
+# 2. FIT INTENT cache key + context line
 # ===========================================================================
 
 class TestFitIntentCacheKey:
 
     def test_same_intent_same_key(self):
-        a = FitIntent("work", "fitted", "classic", 0.5, "mild", False, 0.5)
-        b = FitIntent("work", "fitted", "classic", 0.5, "mild", False, 0.5)
+        a = FitIntent("work", "fitted", "classic", "Blouse", "mild")
+        b = FitIntent("work", "fitted", "classic", "Blouse", "mild")
         assert a.cache_key() == b.cache_key()
 
     def test_different_intent_different_key(self):
-        a = FitIntent("work", "fitted", "classic", 0.5, "mild", False, 0.5)
-        b = FitIntent("casual", "oversized", "bohemian", 0.8, "hot", True, 0.2)
+        a = FitIntent("work", "fitted", "classic", "Blouse", "mild")
+        b = FitIntent("casual", "oversized", "bohemian", "Jogger", "hot")
         assert a.cache_key() != b.cache_key()
 
-    def test_statement_bucketing_same(self):
-        a = FitIntent("work", "fitted", "classic", 0.53, "mild", False, 0.5)
-        b = FitIntent("work", "fitted", "classic", 0.47, "mild", False, 0.5)
-        assert a.cache_key() == b.cache_key()
-
-    def test_statement_bucket_different(self):
-        a = FitIntent("work", "fitted", "classic", 0.44, "mild", False, 0.5)
-        b = FitIntent("work", "fitted", "classic", 0.56, "mild", False, 0.5)
-        assert a.cache_key() != b.cache_key()
-
-    def test_cache_key_is_8_hex_chars(self):
-        key = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.5).cache_key()
+    def test_cache_key_is_8_hex(self):
+        key = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild").cache_key()
         assert len(key) == 8
         assert all(c in "0123456789abcdef" for c in key)
 
+    def test_context_line_contains_occasion(self):
+        intent = FitIntent("work", "fitted", "classic", "Blouse", "mild")
+        line = intent.context_line()
+        assert "work" in line
+        assert "blouse" in line
+        assert "classic" in line
+
 
 # ===========================================================================
-# 4. PROMPT BUILDING
+# 3. VISION MESSAGE BUILDING
 # ===========================================================================
 
-class TestPromptBuilding:
+class TestVisionMessages:
 
-    def test_no_name_in_judge_dict(self):
-        d = _profile_to_judge_dict(_p(name="My Fancy Blouse"))
-        assert "name" not in d
-        assert "My Fancy Blouse" not in str(d)
+    def test_message_structure(self):
+        msgs = build_vision_messages(_p(), [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+        assert isinstance(msgs[1]["content"], list)
 
-    def test_no_brand_in_judge_dict(self):
-        d = _profile_to_judge_dict(_p(brand="Gucci"))
-        assert "brand" not in d
-        assert "Gucci" not in str(d)
+    def test_source_image_included(self):
+        src = _p(image_url="https://cdn.example.com/source.jpg")
+        msgs = build_vision_messages(src, [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        image_parts = [p for p in msgs[1]["content"] if p.get("type") == "image_url"]
+        urls = [p["image_url"]["url"] for p in image_parts]
+        assert "https://cdn.example.com/source.jpg" in urls
 
-    def test_no_price_in_judge_dict(self):
-        d = _profile_to_judge_dict(_p(price=199.99))
-        assert "price" not in d
+    def test_candidate_images_included(self):
+        c1 = _cand("c1")
+        c2 = _cand("c2")
+        msgs = build_vision_messages(_p(), [c1, c2], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        image_parts = [p for p in msgs[1]["content"] if p.get("type") == "image_url"]
+        # 1 source + 2 candidates = 3 images
+        assert len(image_parts) == 3
 
-    def test_judge_dict_has_expected_keys(self):
-        d = _profile_to_judge_dict(_p())
-        expected = {
-            "category_l2", "formality", "silhouette", "fabric", "color",
-            "pattern", "statement_level", "occasions", "seasons",
-            "texture", "sheen", "length",
-        }
-        assert set(d.keys()) == expected
+    def test_all_images_low_detail(self):
+        msgs = build_vision_messages(_p(), [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        image_parts = [p for p in msgs[1]["content"] if p.get("type") == "image_url"]
+        for part in image_parts:
+            assert part["image_url"]["detail"] == "low"
 
-    def test_occasions_capped_at_3(self):
-        d = _profile_to_judge_dict(_p(occasions=["a", "b", "c", "d", "e"]))
-        assert len(d["occasions"]) == 3
+    def test_candidate_id_in_text(self):
+        msgs = build_vision_messages(_p(), [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        text_parts = [p["text"] for p in msgs[1]["content"] if p.get("type") == "text"]
+        full_text = " ".join(text_parts)
+        assert "c1" in full_text
 
-    def test_seasons_capped_at_3(self):
-        d = _profile_to_judge_dict(_p(seasons=["spring", "summer", "fall", "winter"]))
-        assert len(d["seasons"]) == 3
+    def test_context_line_in_message(self):
+        intent = FitIntent("work", "fitted", "classic", "Blouse", "mild")
+        msgs = build_vision_messages(_p(), [_cand("c1")], intent)
+        text_parts = [p["text"] for p in msgs[1]["content"] if p.get("type") == "text"]
+        full_text = " ".join(text_parts)
+        assert "work" in full_text
 
-    def test_fabric_falls_back_to_apparent(self):
-        d = _profile_to_judge_dict(_p(material_family=None, apparent_fabric="silk"))
-        assert d["fabric"] == "silk"
+    def test_no_name_or_brand_in_message(self):
+        src = _p(name="My Fancy Blouse", brand="Gucci")
+        msgs = build_vision_messages(src, [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        text_parts = [p["text"] for p in msgs[1]["content"] if p.get("type") == "text"]
+        full_text = " ".join(text_parts)
+        assert "My Fancy Blouse" not in full_text
+        assert "Gucci" not in full_text
 
-    def test_color_falls_back_to_primary(self):
-        d = _profile_to_judge_dict(_p(color_family=None, primary_color="emerald"))
-        assert d["color"] == "emerald"
+    def test_no_price_in_message(self):
+        src = _p(price=199.99)
+        msgs = build_vision_messages(src, [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        text_parts = [p["text"] for p in msgs[1]["content"] if p.get("type") == "text"]
+        full_text = " ".join(text_parts)
+        assert "199" not in full_text
 
-    def test_build_payload_structure(self):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        payload = build_judge_payload(_p(), [_cand("c1"), _cand("c2")], intent)
-        assert "intent" in payload
-        assert "source" in payload
-        assert "candidates" in payload
-        assert len(payload["candidates"]) == 2
-        assert payload["candidates"][0]["id"] == "c1"
-        assert payload["candidates"][1]["id"] == "c2"
+    def test_missing_source_image_skips_image_part(self):
+        src = _p(image_url="")
+        msgs = build_vision_messages(src, [_cand("c1")], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        image_parts = [p for p in msgs[1]["content"] if p.get("type") == "image_url"]
+        # Only candidate image, no source image
+        assert len(image_parts) == 1
 
-    def test_payload_intent_matches(self):
-        intent = FitIntent("work", "fitted", "classic", 0.6, "cold", False, 0.5)
-        payload = build_judge_payload(_p(), [_cand()], intent)
-        assert payload["intent"]["occasion"] == "work"
-        assert payload["intent"]["silhouette"] == "fitted"
-        assert payload["intent"]["vibe"] == "classic"
-        assert payload["intent"]["statement_target"] == 0.6
-        assert payload["intent"]["warmth"] == "cold"
-
-    def test_candidate_id_fallback_index(self):
+    def test_missing_candidate_image_skips_image_part(self):
         c = _cand("c1")
-        c.product_id = None
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        payload = build_judge_payload(_p(), [c], intent)
-        assert payload["candidates"][0]["id"] == "cand_0"
+        c.image_url = ""
+        msgs = build_vision_messages(_p(), [c], FitIntent("casual", "balanced", "casual", "T-Shirt", "mild"))
+        image_parts = [p for p in msgs[1]["content"] if p.get("type") == "image_url"]
+        # Only source image, no candidate image
+        assert len(image_parts) == 1
 
 
 # ===========================================================================
-# 5. SYSTEM PROMPT content checks
+# 4. SYSTEM PROMPT
 # ===========================================================================
 
 class TestSystemPrompt:
 
-    def test_scoring_rubric_present(self):
-        assert "SCORING RUBRIC" in _SYSTEM_PROMPT
+    def test_clash_definition_present(self):
+        assert "CLASH" in _SYSTEM_PROMPT
 
-    def test_hard_fail_rules_present(self):
-        assert "HARD FAILS" in _SYSTEM_PROMPT
+    def test_pass_bias_present(self):
+        assert "PASS" in _SYSTEM_PROMPT
+        assert "When in doubt" in _SYSTEM_PROMPT
 
-    def test_anti_neutrality_rule_present(self):
-        assert "ANTI-NEUTRALITY RULE" in _SYSTEM_PROMPT
-
-    def test_statement_balance_rule_present(self):
-        assert "STATEMENT BALANCE RULE" in _SYSTEM_PROMPT
-
-    def test_json_schema_in_prompt(self):
-        assert '"results"' in _SYSTEM_PROMPT
-        assert '"overall"' in _SYSTEM_PROMPT
+    def test_json_schema_present(self):
         assert '"fail"' in _SYSTEM_PROMPT
-        assert '"tags"' in _SYSTEM_PROMPT
 
-    def test_tags_list_in_prompt(self):
-        for tag in ["occasion_match", "silhouette_balance", "fabric_contrast",
-                     "style_coherence", "color_harmony", "too_basic", "too_busy",
-                     "occasion_clash", "great_complement", "statement_conflict"]:
-            assert tag in _SYSTEM_PROMPT, f"Missing tag: {tag}"
-
-    def test_weight_sum_equals_one(self):
-        assert 0.25 + 0.20 + 0.20 + 0.15 + 0.10 + 0.10 == pytest.approx(1.0)
+    def test_no_scoring_rubric(self):
+        """No weighted scoring dimensions — this is pass/fail only."""
+        assert "weight 0.25" not in _SYSTEM_PROMPT
+        assert "SCORING RUBRIC" not in _SYSTEM_PROMPT
 
 
 # ===========================================================================
-# 6. RESPONSE PARSING
+# 5. RESPONSE PARSING
 # ===========================================================================
 
 class TestResponseParsing:
 
-    def test_valid_results_array(self):
-        content = json.dumps({"results": [
-            {"id": "c1", "overall": 7.5, "fail": False, "tags": ["occasion_match"]},
-            {"id": "c2", "overall": 3.0, "fail": True, "tags": ["occasion_clash"]},
-        ]})
-        parsed = LLMPairJudge._parse_response(content)
-        assert len(parsed) == 2
-        assert parsed[0]["id"] == "c1"
-        assert parsed[1]["fail"] is True
+    def test_valid_fail_list(self):
+        content = json.dumps({"fail": ["c1", "c3"]})
+        assert VisionJudge._parse_response(content) == {"c1", "c3"}
 
-    def test_empty_results_array(self):
-        assert LLMPairJudge._parse_response(json.dumps({"results": []})) == []
+    def test_empty_fail_list(self):
+        content = json.dumps({"fail": []})
+        assert VisionJudge._parse_response(content) == set()
 
     def test_malformed_json(self):
-        assert LLMPairJudge._parse_response("not valid json {{{") == []
+        assert VisionJudge._parse_response("not json {{{") == set()
 
     def test_none_content(self):
-        assert LLMPairJudge._parse_response(None) == []
+        assert VisionJudge._parse_response(None) == set()
 
-    def test_flat_dict_format(self):
-        content = json.dumps({
-            "c1": {"overall": 8.0, "fail": False, "tags": ["great_complement"]},
-            "c2": {"overall": 2.0, "fail": True, "tags": ["occasion_clash"]},
-        })
-        parsed = LLMPairJudge._parse_response(content)
-        assert len(parsed) == 2
-        assert {r["id"] for r in parsed} == {"c1", "c2"}
+    def test_missing_fail_key(self):
+        content = json.dumps({"something": "else"})
+        assert VisionJudge._parse_response(content) == set()
 
-    def test_bare_list_format(self):
-        content = json.dumps([{"id": "c1", "overall": 6.0, "fail": False, "tags": []}])
-        parsed = LLMPairJudge._parse_response(content)
-        assert len(parsed) == 1
-        assert parsed[0]["id"] == "c1"
+    def test_fail_not_list(self):
+        content = json.dumps({"fail": "c1"})
+        assert VisionJudge._parse_response(content) == set()
 
-    def test_unexpected_structure(self):
-        assert LLMPairJudge._parse_response('"just a string"') == []
-
-    def test_results_key_not_list(self):
-        """'results' is not a list and mixed value types -> empty list."""
-        content = json.dumps({"results": "not_a_list", "c1": {"overall": 5}})
-        parsed = LLMPairJudge._parse_response(content)
-        # "not_a_list" is a string (not dict) so flat-dict check fails -> empty
-        assert parsed == []
+    def test_fail_with_nulls_filtered(self):
+        content = json.dumps({"fail": ["c1", None, "", "c2"]})
+        parsed = VisionJudge._parse_response(content)
+        assert parsed == {"c1", "c2"}
 
 
 # ===========================================================================
-# 7. JUDGE BATCH — core scoring
+# 6. JUDGE BATCH
 # ===========================================================================
 
 class TestJudgeBatch:
 
-    def test_empty_candidates_returns_empty(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        assert judge.judge_batch(_p(), [], intent) == {}
+    def test_empty_candidates(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        assert judge.judge_batch(_p(), [], intent) == set()
 
-    def test_normal_scoring(self, judge):
-        c1, c2 = _cand("c1"), _cand("c2")
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 7.5, "fail": False, "tags": ["occasion_match"]},
-            {"id": "c2", "overall": 4.0, "fail": False, "tags": ["too_basic"]},
-        ])
-        results = judge.judge_batch(_p(), [c1, c2], intent)
-        assert results["c1"].overall == 7.5
-        assert results["c1"].fail is False
-        assert results["c1"].tags == ["occasion_match"]
-        assert results["c2"].overall == 4.0
+    def test_all_pass(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response([])
+        result = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
+        assert result == set()
 
-    def test_fail_candidate_flagged(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 0, "fail": True, "tags": ["occasion_clash"]},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].fail is True
-        assert results["c1"].overall == 0.0
+    def test_some_fail(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["c2"])
+        result = judge.judge_batch(_p(), [_cand("c1"), _cand("c2"), _cand("c3")], intent)
+        assert result == {"c2"}
 
-    def test_missing_candidate_gets_default(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 8.0, "fail": False, "tags": ["great_complement"]},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
-        assert results["c1"].overall == 8.0
-        assert results["c2"].overall == 5.0
-        assert "missing_from_llm" in results["c2"].tags
+    def test_all_fail(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["c1", "c2"])
+        result = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
+        assert result == {"c1", "c2"}
 
-    def test_overall_clamped_to_0_10(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 15.0, "fail": False, "tags": []},
-            {"id": "c2", "overall": -3.0, "fail": False, "tags": []},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
-        assert results["c1"].overall == 10.0
-        assert results["c2"].overall == 0.0
-
-    def test_non_numeric_overall_defaults_to_5(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": "high", "fail": False, "tags": []},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].overall == 5.0
-
-    def test_non_bool_fail_defaults_to_false(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 6.0, "fail": "yes", "tags": []},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].fail is False
-
-    def test_non_list_tags_defaults_to_empty(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 6.0, "fail": False, "tags": "occasion_match"},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].tags == []
+    def test_unknown_id_in_fail_ignored(self, judge):
+        """If LLM returns an ID not in the candidates, it's stored in cache but doesn't cause errors."""
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["unknown_id"])
+        result = judge.judge_batch(_p(), [_cand("c1")], intent)
+        # c1 is not in the fail list, so passes
+        assert "c1" not in result
 
 
 # ===========================================================================
-# 8. CACHE behavior
+# 7. CACHE
 # ===========================================================================
 
 class TestCache:
 
-    def test_cache_hit_skips_llm_call(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 7.0, "fail": False, "tags": ["good_contrast"]},
-        ])
+    def test_cache_hit_skips_llm(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["c1"])
         judge.judge_batch(_p(), [_cand("c1")], intent)
         assert judge.client.chat.completions.create.call_count == 1
+        # Second call — cached
         judge.judge_batch(_p(), [_cand("c1")], intent)
         assert judge.client.chat.completions.create.call_count == 1
 
+    def test_cached_fail_remembered(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["c1"])
+        judge.judge_batch(_p(), [_cand("c1")], intent)
+        # Second call — c1 still fails from cache
+        result = judge.judge_batch(_p(), [_cand("c1")], intent)
+        assert result == {"c1"}
+
+    def test_cached_pass_remembered(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response([])
+        judge.judge_batch(_p(), [_cand("c1")], intent)
+        result = judge.judge_batch(_p(), [_cand("c1")], intent)
+        assert result == set()
+
     def test_cache_miss_different_source(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 7.0, "fail": False, "tags": []},
-        ])
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response([])
         judge.judge_batch(_p(product_id="src-a"), [_cand("c1")], intent)
         judge.judge_batch(_p(product_id="src-b"), [_cand("c1")], intent)
         assert judge.client.chat.completions.create.call_count == 2
 
-    def test_cache_eviction_at_capacity(self, judge):
-        judge._CACHE_SIZE = 3
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        src = _p()
-        for i in range(3):
-            judge.client.chat.completions.create.return_value = _mock_openai_response([
-                {"id": f"c{i}", "overall": float(i), "fail": False, "tags": []},
-            ])
-            judge.judge_batch(src, [_cand(f"c{i}")], intent)
-        assert len(judge._cache) == 3
-        calls_after_fill = judge.client.chat.completions.create.call_count
-
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c3", "overall": 9.0, "fail": False, "tags": []},
-        ])
-        judge.judge_batch(src, [_cand("c3")], intent)
-        assert len(judge._cache) == 3
-
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c0", "overall": 1.0, "fail": False, "tags": []},
-        ])
-        judge.judge_batch(src, [_cand("c0")], intent)
-        assert judge.client.chat.completions.create.call_count > calls_after_fill + 1
-
-    def test_intent_hash_bucketing_in_cache(self, judge):
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 7.0, "fail": False, "tags": []},
-        ])
-        judge.judge_batch(_p(), [_cand("c1")],
-                          FitIntent("work", "fitted", "classic", 0.5, "cold", False, 0.5))
-        judge.judge_batch(_p(), [_cand("c1")],
-                          FitIntent("casual", "oversized", "bohemian", 0.8, "hot", True, 0.2))
-        assert judge.client.chat.completions.create.call_count == 2
-
     def test_mixed_cached_and_uncached(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c1", "overall": 7.0, "fail": False, "tags": ["good"]},
-        ])
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        # Cache c1
+        judge.client.chat.completions.create.return_value = _mock_vision_response(["c1"])
         judge.judge_batch(_p(), [_cand("c1")], intent)
-        judge.client.chat.completions.create.return_value = _mock_openai_response([
-            {"id": "c2", "overall": 5.0, "fail": False, "tags": ["ok"]},
-        ])
-        results = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
+        # Batch with c1 (cached fail) + c2 (uncached)
+        judge.client.chat.completions.create.return_value = _mock_vision_response([])
+        result = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
         assert judge.client.chat.completions.create.call_count == 2
-        assert results["c1"].overall == 7.0
-        assert results["c2"].overall == 5.0
+        assert result == {"c1"}  # c1 from cache, c2 passes
+
+    def test_cache_eviction(self, judge):
+        judge._CACHE_SIZE = 2
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.return_value = _mock_vision_response([])
+        judge.judge_batch(_p(), [_cand("c0")], intent)
+        judge.judge_batch(_p(), [_cand("c1")], intent)
+        assert len(judge._cache) == 2
+        # Add c2 -> evicts c0
+        judge.judge_batch(_p(), [_cand("c2")], intent)
+        assert len(judge._cache) == 2
+        # c0 evicted -> needs new call
+        calls_before = judge.client.chat.completions.create.call_count
+        judge.judge_batch(_p(), [_cand("c0")], intent)
+        assert judge.client.chat.completions.create.call_count > calls_before
 
 
 # ===========================================================================
-# 9. GRACEFUL DEGRADATION
+# 8. GRACEFUL DEGRADATION
 # ===========================================================================
 
 class TestGracefulDegradation:
 
-    def test_llm_exception_returns_defaults(self, judge):
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.side_effect = Exception("API timeout")
-        results = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
-        assert results["c1"].overall == 5.0
-        assert results["c1"].tags == ["missing_from_llm"]
-        assert results["c2"].overall == 5.0
+    def test_exception_returns_empty(self, judge):
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.side_effect = Exception("timeout")
+        result = judge.judge_batch(_p(), [_cand("c1"), _cand("c2")], intent)
+        assert result == set()  # keep all
 
     def test_retry_on_failure(self, judge):
         judge.max_retries = 1
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        good_response = _mock_openai_response([
-            {"id": "c1", "overall": 8.0, "fail": False, "tags": ["great_complement"]},
-        ])
-        judge.client.chat.completions.create.side_effect = [
-            Exception("transient error"), good_response,
-        ]
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        good = _mock_vision_response(["c1"])
+        judge.client.chat.completions.create.side_effect = [Exception("err"), good]
         with patch("services.outfit_judge._time.sleep"):
-            results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].overall == 8.0
+            result = judge.judge_batch(_p(), [_cand("c1")], intent)
+        assert result == {"c1"}
         assert judge.client.chat.completions.create.call_count == 2
 
     def test_all_retries_exhausted(self, judge):
         judge.max_retries = 1
-        intent = FitIntent("casual", "balanced", "casual", 0.4, "mild", False, 0.35)
-        judge.client.chat.completions.create.side_effect = Exception("persistent failure")
+        intent = FitIntent("casual", "balanced", "casual", "T-Shirt", "mild")
+        judge.client.chat.completions.create.side_effect = Exception("persistent")
         with patch("services.outfit_judge._time.sleep"):
-            results = judge.judge_batch(_p(), [_cand("c1")], intent)
-        assert results["c1"].overall == 5.0
-        assert results["c1"].tags == ["missing_from_llm"]
+            result = judge.judge_batch(_p(), [_cand("c1")], intent)
+        assert result == set()  # keep all
 
     def test_get_pair_judge_no_api_key(self):
         import services.outfit_judge as oj
@@ -611,84 +468,18 @@ class TestGracefulDegradation:
             mock_settings = MagicMock()
             mock_settings.openai_api_key = "sk-test-key"
             mock_settings.llm_judge_enabled = True
-            mock_settings.llm_judge_model = "gpt-4.1-mini"
-            mock_settings.llm_judge_timeout = 15.0
+            mock_settings.llm_judge_model = "gpt-4o-mini"
+            mock_settings.llm_judge_timeout = 20.0
             with patch("config.settings.get_settings", return_value=mock_settings), \
                  patch("openai.OpenAI"):
-                assert isinstance(get_pair_judge(), LLMPairJudge)
-        finally:
-            oj._judge = original
-
-    def test_get_pair_judge_import_error(self):
-        import services.outfit_judge as oj
-        original = oj._judge
-        oj._judge = None
-        try:
-            with patch("config.settings.get_settings",
-                       side_effect=ImportError("no settings")):
-                assert get_pair_judge() is None
+                result = get_pair_judge()
+                assert isinstance(result, VisionJudge)
         finally:
             oj._judge = original
 
 
 # ===========================================================================
-# 10. SCORE BLENDING math
-# ===========================================================================
-
-class TestScoreBlending:
-
-    def test_blend_both_high(self):
-        blended = (0.55 * 8.5 + 0.45 * 9.0) / 10.0
-        assert blended == pytest.approx(0.8725)
-
-    def test_blend_low_tattoo_high_llm(self):
-        blended = (0.55 * 3.0 + 0.45 * 9.0) / 10.0
-        assert blended == pytest.approx(0.57)
-
-    def test_blend_high_tattoo_low_llm(self):
-        blended = (0.55 * 9.0 + 0.45 * 2.0) / 10.0
-        assert blended == pytest.approx(0.585)
-
-    def test_blend_both_zero(self):
-        assert (0.55 * 0.0 + 0.45 * 0.0) / 10.0 == 0.0
-
-    def test_blend_both_max(self):
-        assert (0.55 * 10.0 + 0.45 * 10.0) / 10.0 == pytest.approx(1.0)
-
-    def test_blend_weights_sum_to_one(self):
-        assert 0.55 + 0.45 == pytest.approx(1.0)
-
-    def test_tattoo_norm_clamped_high(self):
-        assert max(0.0, min(10.0, 1.2 * 10.0)) == 10.0
-
-    def test_tattoo_norm_clamped_low(self):
-        assert max(0.0, min(10.0, -0.1 * 10.0)) == 0.0
-
-    def test_fail_removes_candidate(self):
-        entry = {"tattoo": 0.75, "profile": _cand("c1")}
-        jr = JudgeResult(overall=0.0, fail=True, tags=["occasion_clash"])
-        if jr.fail:
-            entry["tattoo"] = -1.0
-            entry["llm_fail"] = True
-        assert entry["tattoo"] == -1.0
-        assert entry["llm_fail"] is True
-
-
-# ===========================================================================
-# 11. WARMTH TARGET
-# ===========================================================================
-
-class TestWarmthTarget:
-
-    def test_warmth_from_temp_band(self):
-        assert derive_fit_intent(_p(temp_band="cold")).warmth_target == "cold"
-
-    def test_warmth_default_mild(self):
-        assert derive_fit_intent(_p(temp_band=None)).warmth_target == "mild"
-
-
-# ===========================================================================
-# 12. OCCASION BUCKET completeness
+# 9. OCCASION BUCKETS + SILHOUETTE SETS
 # ===========================================================================
 
 class TestOccasionBuckets:
@@ -696,11 +487,7 @@ class TestOccasionBuckets:
     def test_all_buckets_represented(self):
         assert set(_OCCASION_TO_BUCKET.values()) == {"active", "work", "going-out", "event", "casual"}
 
-    def test_no_empty_values(self):
-        for k, v in _OCCASION_TO_BUCKET.items():
-            assert v, f"Empty bucket for key: {k}"
-
-    def test_known_occasions_mapped(self):
+    def test_known_occasions(self):
         assert _OCCASION_TO_BUCKET["gym"] == "active"
         assert _OCCASION_TO_BUCKET["office"] == "work"
         assert _OCCASION_TO_BUCKET["party"] == "going-out"
@@ -708,17 +495,416 @@ class TestOccasionBuckets:
         assert _OCCASION_TO_BUCKET["brunch"] == "casual"
 
 
-# ===========================================================================
-# 13. SILHOUETTE SET completeness
-# ===========================================================================
-
 class TestSilhouetteSets:
 
-    def test_fitted_and_oversized_disjoint(self):
+    def test_disjoint(self):
         assert _FITTED_SILS.isdisjoint(_OVERSIZED_SILS)
 
-    def test_fitted_non_empty(self):
+    def test_non_empty(self):
         assert len(_FITTED_SILS) > 0
-
-    def test_oversized_non_empty(self):
         assert len(_OVERSIZED_SILS) > 0
+
+
+# ===========================================================================
+# OUTFIT RANKING
+# ===========================================================================
+
+def _mock_ranking_response(ranking):
+    """Build a mock OpenAI response with a ranking list."""
+    content = json.dumps({"ranking": ranking})
+    message = MagicMock()
+    message.content = content
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
+    return response
+
+
+def _outfit(cats_and_pids):
+    """Build a mock outfit dict: {cat: AestheticProfile, ...}."""
+    return {
+        cat: _cand(pid=pid, broad_category=cat)
+        for cat, pid in cats_and_pids.items()
+    }
+
+
+class TestOutfitRankingPrompt:
+
+    def test_prompt_rewards_contrast(self):
+        assert "contrast" in _OUTFIT_RANKING_PROMPT.lower()
+
+    def test_prompt_penalizes_boring(self):
+        lower = _OUTFIT_RANKING_PROMPT.lower()
+        assert "boring" in lower or "mediocre" in lower
+
+    def test_prompt_requests_json(self):
+        assert '{"ranking":' in _OUTFIT_RANKING_PROMPT
+
+    def test_prompt_ranks_all(self):
+        assert "Rank ALL" in _OUTFIT_RANKING_PROMPT
+
+
+class TestOutfitRankingMessages:
+
+    def _make_outfits(self):
+        return [
+            {"bottoms": _cand("b1"), "outerwear": _cand("o1")},
+            {"bottoms": _cand("b2"), "outerwear": _cand("o2")},
+        ]
+
+    def test_structure(self):
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+    def test_system_prompt_is_ranking_prompt(self):
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        assert msgs[0]["content"] == _OUTFIT_RANKING_PROMPT
+
+    def test_source_image_included(self):
+        source = _p(image_url="https://cdn.example.com/source.jpg")
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        images = [
+            p for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        source_urls = [img["image_url"]["url"] for img in images]
+        assert "https://cdn.example.com/source.jpg" in source_urls
+
+    def test_all_outfit_images_low_detail(self):
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        images = [
+            p for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        for img in images:
+            assert img["image_url"]["detail"] == "low"
+
+    def test_outfit_labels_present(self):
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        text_parts = [
+            p["text"] for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        full_text = " ".join(text_parts)
+        assert "OUTFIT 1" in full_text
+        assert "OUTFIT 2" in full_text
+
+    def test_image_count(self):
+        """Source + 2 outfits × 2 pieces = 5 images."""
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        images = [
+            p for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        assert len(images) == 5  # 1 source + 2*2 outfit pieces
+
+    def test_missing_source_image(self):
+        source = _p(image_url="")
+        outfits = self._make_outfits()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        images = [
+            p for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
+        # Only outfit piece images, no source
+        assert len(images) == 4
+
+    def test_context_line_in_message(self):
+        source = _p()
+        outfits = self._make_outfits()
+        intent = FitIntent("work", "fitted", "minimal", "Shirt", "mild")
+        msgs = build_outfit_ranking_messages(source, outfits, intent)
+        text_parts = [
+            p["text"] for p in msgs[1]["content"]
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        full_text = " ".join(text_parts)
+        assert "work" in full_text.lower()
+
+
+class TestParseRankingResponse:
+
+    def test_valid_ranking(self):
+        result = VisionJudge._parse_ranking_response(
+            '{"ranking": [3, 1, 2]}', n_outfits=3,
+        )
+        assert result == [2, 0, 1]  # 0-indexed
+
+    def test_single_winner(self):
+        result = VisionJudge._parse_ranking_response(
+            '{"ranking": [2]}', n_outfits=3,
+        )
+        # [1] + fill in [0, 2]
+        assert result[0] == 1  # winner is outfit index 1
+
+    def test_invalid_json(self):
+        result = VisionJudge._parse_ranking_response("not json", n_outfits=3)
+        assert result is None
+
+    def test_not_a_dict(self):
+        result = VisionJudge._parse_ranking_response("[1, 2, 3]", n_outfits=3)
+        assert result is None
+
+    def test_no_ranking_key(self):
+        result = VisionJudge._parse_ranking_response('{"result": [1, 2]}', n_outfits=2)
+        assert result is None
+
+    def test_ranking_not_a_list(self):
+        result = VisionJudge._parse_ranking_response('{"ranking": "1,2,3"}', n_outfits=3)
+        assert result is None
+
+    def test_out_of_range_filtered(self):
+        result = VisionJudge._parse_ranking_response(
+            '{"ranking": [1, 99, 2]}', n_outfits=2,
+        )
+        assert result == [0, 1]
+
+    def test_duplicates_filtered(self):
+        result = VisionJudge._parse_ranking_response(
+            '{"ranking": [2, 2, 1]}', n_outfits=2,
+        )
+        assert result == [1, 0]
+
+    def test_fills_missing_indices(self):
+        result = VisionJudge._parse_ranking_response(
+            '{"ranking": [3]}', n_outfits=4,
+        )
+        assert result[0] == 2  # winner
+        assert set(result) == {0, 1, 2, 3}  # all present
+
+    def test_empty_ranking_list(self):
+        result = VisionJudge._parse_ranking_response('{"ranking": []}', n_outfits=3)
+        assert result is None
+
+
+class TestRankOutfits:
+
+    def test_single_outfit_returns_none(self, judge):
+        source = _p()
+        outfits = [{"bottoms": _cand("b1")}]
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        result = judge.rank_outfits(source, outfits, intent)
+        assert result is None
+
+    def test_empty_outfits_returns_none(self, judge):
+        source = _p()
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        result = judge.rank_outfits(source, [], intent)
+        assert result is None
+
+    def test_successful_ranking(self, judge):
+        source = _p()
+        outfits = [
+            {"bottoms": _cand("b1"), "outerwear": _cand("o1")},
+            {"bottoms": _cand("b2"), "outerwear": _cand("o2")},
+            {"bottoms": _cand("b3"), "outerwear": _cand("o3")},
+        ]
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        judge.client.chat.completions.create.return_value = _mock_ranking_response([2, 3, 1])
+        result = judge.rank_outfits(source, outfits, intent)
+        assert result == [1, 2, 0]
+
+    def test_api_failure_returns_none(self, judge):
+        source = _p()
+        outfits = [
+            {"bottoms": _cand("b1")},
+            {"bottoms": _cand("b2")},
+        ]
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        judge.client.chat.completions.create.side_effect = Exception("API down")
+        result = judge.rank_outfits(source, outfits, intent)
+        assert result is None
+
+    def test_malformed_response_returns_none(self, judge):
+        source = _p()
+        outfits = [
+            {"bottoms": _cand("b1")},
+            {"bottoms": _cand("b2")},
+        ]
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        # Return garbage JSON
+        msg = MagicMock()
+        msg.content = '{"oops": true}'
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        judge.client.chat.completions.create.return_value = resp
+        result = judge.rank_outfits(source, outfits, intent)
+        assert result is None
+
+    def test_uses_json_mode(self, judge):
+        source = _p()
+        outfits = [
+            {"bottoms": _cand("b1")},
+            {"bottoms": _cand("b2")},
+        ]
+        intent = FitIntent("casual", "balanced", "casual", "blouse", "mild")
+        judge.client.chat.completions.create.return_value = _mock_ranking_response([1, 2])
+        judge.rank_outfits(source, outfits, intent)
+        call_kwargs = judge.client.chat.completions.create.call_args[1]
+        assert call_kwargs["response_format"] == {"type": "json_object"}
+
+
+# ===========================================================================
+# ENGINE HELPERS: combo generation + ranking application
+# ===========================================================================
+
+from services.outfit_engine import _generate_outfit_combos, _apply_outfit_ranking
+
+
+def _scored_entry(pid, tattoo=0.8, cat="bottoms"):
+    """Build a minimal scored dict matching _score_category output."""
+    profile = _cand(pid=pid, broad_category=cat)
+    return {
+        "profile": profile,
+        "tattoo": tattoo,
+        "compat": tattoo * 0.6,
+        "cosine": tattoo * 0.4,
+        "dims": {},
+    }
+
+
+class TestGenerateOutfitCombos:
+
+    def test_empty_input(self):
+        assert _generate_outfit_combos({}) == []
+
+    def test_single_category(self):
+        scored = {"bottoms": [_scored_entry("b1"), _scored_entry("b2")]}
+        combos = _generate_outfit_combos(scored, top_per_cat=2, max_combos=6)
+        assert len(combos) == 2
+        assert "bottoms" in combos[0]
+
+    def test_two_categories_cartesian(self):
+        scored = {
+            "bottoms": [_scored_entry("b1", 0.9), _scored_entry("b2", 0.7)],
+            "outerwear": [_scored_entry("o1", 0.85, "outerwear"), _scored_entry("o2", 0.6, "outerwear")],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=2, max_combos=6)
+        assert len(combos) == 4  # 2 × 2
+        # Best combo should be the one with highest avg tattoo
+        best = combos[0]
+        assert best["bottoms"]["profile"].product_id == "b1"
+        assert best["outerwear"]["profile"].product_id == "o1"
+
+    def test_max_combos_capped(self):
+        scored = {
+            "bottoms": [_scored_entry(f"b{i}", 0.9 - i*0.05) for i in range(4)],
+            "outerwear": [_scored_entry(f"o{i}", 0.8 - i*0.05, "outerwear") for i in range(4)],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=4, max_combos=6)
+        assert len(combos) == 6  # Capped at 6 from 16
+
+    def test_top_per_cat_limits(self):
+        scored = {
+            "bottoms": [_scored_entry(f"b{i}") for i in range(10)],
+            "outerwear": [_scored_entry(f"o{i}", cat="outerwear") for i in range(10)],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=2, max_combos=6)
+        assert len(combos) == 4  # 2 × 2
+
+    def test_sorted_by_avg_tattoo_desc(self):
+        scored = {
+            "bottoms": [_scored_entry("b1", 0.5), _scored_entry("b2", 0.9)],
+            "outerwear": [_scored_entry("o1", 0.5, "outerwear"), _scored_entry("o2", 0.9, "outerwear")],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=2, max_combos=4)
+        # Best avg = (0.9+0.9)/2=0.9, worst = (0.5+0.5)/2=0.5
+        assert combos[0]["bottoms"]["profile"].product_id == "b2"
+        assert combos[0]["outerwear"]["profile"].product_id == "o2"
+
+    def test_three_categories(self):
+        scored = {
+            "bottoms": [_scored_entry("b1", 0.8)],
+            "outerwear": [_scored_entry("o1", 0.7, "outerwear")],
+            "footwear": [_scored_entry("f1", 0.6, "footwear")],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=1, max_combos=6)
+        assert len(combos) == 1
+        assert set(combos[0].keys()) == {"bottoms", "outerwear", "footwear"}
+
+    def test_empty_category_excluded(self):
+        scored = {
+            "bottoms": [_scored_entry("b1", 0.8)],
+            "outerwear": [],
+        }
+        combos = _generate_outfit_combos(scored, top_per_cat=2, max_combos=6)
+        assert len(combos) == 1
+        assert "outerwear" not in combos[0]
+
+
+class TestApplyOutfitRanking:
+
+    def test_winner_promoted_to_top(self):
+        b1 = _scored_entry("b1", 0.7)
+        b2 = _scored_entry("b2", 0.9)
+        o1 = _scored_entry("o1", 0.7, "outerwear")
+        o2 = _scored_entry("o2", 0.9, "outerwear")
+
+        scored_by_cat = {
+            "bottoms": [b2, b1],   # b2 is TATTOO #1
+            "outerwear": [o2, o1], # o2 is TATTOO #1
+        }
+
+        combos = [
+            {"bottoms": b2, "outerwear": o2},  # combo 0: TATTOO favorite
+            {"bottoms": b1, "outerwear": o1},  # combo 1
+        ]
+
+        # Vision says combo 1 (the underdog) is best
+        ranking = [1, 0]
+        _apply_outfit_ranking(scored_by_cat, combos, ranking)
+
+        # b1 and o1 should now be at position 0
+        assert scored_by_cat["bottoms"][0]["profile"].product_id == "b1"
+        assert scored_by_cat["outerwear"][0]["profile"].product_id == "o1"
+
+    def test_winner_already_on_top(self):
+        b1 = _scored_entry("b1", 0.9)
+        b2 = _scored_entry("b2", 0.7)
+
+        scored_by_cat = {"bottoms": [b1, b2]}
+        combos = [{"bottoms": b1}, {"bottoms": b2}]
+        ranking = [0, 1]  # TATTOO order confirmed
+        _apply_outfit_ranking(scored_by_cat, combos, ranking)
+        assert scored_by_cat["bottoms"][0]["profile"].product_id == "b1"
+
+    def test_empty_ranking_no_change(self):
+        b1 = _scored_entry("b1", 0.9)
+        scored_by_cat = {"bottoms": [b1]}
+        combos = [{"bottoms": b1}]
+        _apply_outfit_ranking(scored_by_cat, combos, [])
+        assert scored_by_cat["bottoms"][0]["profile"].product_id == "b1"
+
+    def test_preserves_rest_of_list(self):
+        entries = [_scored_entry(f"b{i}", 0.9 - i*0.1) for i in range(5)]
+        scored_by_cat = {"bottoms": list(entries)}
+        combos = [{"bottoms": entries[0]}, {"bottoms": entries[3]}]
+        # Vision picks combo 1 (entry[3]) as best
+        ranking = [1, 0]
+        _apply_outfit_ranking(scored_by_cat, combos, ranking)
+        # entries[3] promoted to top, rest still present
+        assert scored_by_cat["bottoms"][0]["profile"].product_id == "b3"
+        assert len(scored_by_cat["bottoms"]) == 5

@@ -41,7 +41,7 @@ from supabase import Client
 
 from services.outfit_avoids import compute_avoid_penalties, filter_hard_avoids
 from services.outfit_judge import (
-    LLMPairJudge, JudgeResult, FitIntent,
+    VisionJudge, FitIntent,
     derive_fit_intent, get_pair_judge,
 )
 
@@ -1514,6 +1514,66 @@ def compute_novelty_score(
 
 
 # ---------------------------------------------------------------------------
+# OUTFIT COMBO GENERATION + RANKING HELPERS
+# ---------------------------------------------------------------------------
+
+def _generate_outfit_combos(
+    scored_by_cat: Dict[str, List[Dict]],
+    top_per_cat: int = 3,
+    max_combos: int = 6,
+) -> List[Dict[str, Dict]]:
+    """Generate top outfit combinations from per-category scored lists.
+
+    Takes top N per category, computes cartesian product,
+    scores by average TATTOO, returns top max_combos.
+    """
+    import itertools
+
+    cats = [cat for cat in scored_by_cat if scored_by_cat[cat]]
+    if not cats:
+        return []
+
+    cat_tops = {cat: scored_by_cat[cat][:top_per_cat] for cat in cats}
+    all_options = [cat_tops[cat] for cat in cats]
+
+    combos: list = []
+    for combo_tuple in itertools.product(*all_options):
+        combo = dict(zip(cats, combo_tuple))
+        avg_tattoo = sum(e["tattoo"] for e in combo_tuple) / len(combo_tuple)
+        combos.append((avg_tattoo, combo))
+
+    combos.sort(key=lambda x: x[0], reverse=True)
+    return [c[1] for c in combos[:max_combos]]
+
+
+def _apply_outfit_ranking(
+    scored_by_cat: Dict[str, List[Dict]],
+    combos: List[Dict[str, Dict]],
+    ranking: List[int],
+) -> None:
+    """Promote items from the best-ranked outfit to top of each category list.
+
+    Mutates scored_by_cat in place: moves the winning item in each category
+    to position 0 so it becomes the top pick.
+    """
+    if not ranking:
+        return
+
+    best_combo = combos[ranking[0]]
+
+    for cat, entry in best_combo.items():
+        if cat not in scored_by_cat:
+            continue
+        pid = entry["profile"].product_id
+        cat_list = scored_by_cat[cat]
+        for i, e in enumerate(cat_list):
+            if e["profile"].product_id == pid:
+                if i > 0:
+                    cat_list.insert(0, cat_list.pop(i))
+                break
+
+
+# ---------------------------------------------------------------------------
 # GREEDY DIVERSE SELECTION (MMR-style)
 # ---------------------------------------------------------------------------
 
@@ -2590,6 +2650,35 @@ class OutfitEngine:
                     user_styles,
                 )
 
+        # --- Outfit ranking (v3.1) ---
+        # After per-category scoring + veto, rank complete outfit combos
+        # to prefer styled compositions over safe catalog pairings.
+        # Only runs when building a full outfit (≥2 categories, not paginated feed).
+        outfit_ranked = False
+        judge = get_pair_judge()
+        if judge and len(scored_by_cat) >= 2 and not target_category:
+            try:
+                intent = derive_fit_intent(source)
+                combos = _generate_outfit_combos(
+                    scored_by_cat, top_per_cat=3, max_combos=6,
+                )
+                if len(combos) > 1:
+                    # Extract AestheticProfile objects for the judge
+                    profile_combos = [
+                        {cat: entry["profile"] for cat, entry in combo.items()}
+                        for combo in combos
+                    ]
+                    ranking = judge.rank_outfits(source, profile_combos, intent)
+                    if ranking:
+                        _apply_outfit_ranking(scored_by_cat, combos, ranking)
+                        outfit_ranked = True
+                        logger.info(
+                            "Outfit ranking applied: best combo index=%d of %d",
+                            ranking[0], len(combos),
+                        )
+            except Exception as e:
+                logger.warning("Outfit ranking failed, keeping TATTOO order: %s", e)
+
         # Assemble results (preserve target_broads order)
         for target_broad in target_broads:
             scored = scored_by_cat.get(target_broad, [])
@@ -2632,14 +2721,14 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": "0.55*tattoo_norm + 0.45*llm_judge (blended)" if get_pair_judge()
-                          else ("0.55*compat + 0.45*cosine + profile + avoids" if personalized
-                                else "0.55*compat + 0.45*cosine + avoids"),
-                "engine": "tattoo_v3.0" if get_pair_judge() else "tattoo_v2.3",
+                "fusion": ("0.55*compat + 0.45*cosine + profile + avoids" if personalized
+                           else "0.55*compat + 0.45*cosine + avoids"),
+                "engine": "tattoo_v3.1" if outfit_ranked else ("tattoo_v3.0" if get_pair_judge() else "tattoo_v2.3"),
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
                 "avoids": True,
-                "llm_judge": get_pair_judge() is not None,
+                "vision_judge": get_pair_judge() is not None,
+                "outfit_ranking": outfit_ranked,
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -3104,50 +3193,40 @@ class OutfitEngine:
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
 
-        # --- LLM pair judge rerank (v3) ---
-        # Take top K by tattoo, run through LLM judge, blend scores.
-        # Graceful: if judge is None or fails, scoring is unchanged.
+        # --- Vision judge filter (v3) ---
+        # Take top K by tattoo, send images to gpt-4o-mini, remove clashes.
+        # TATTOO ranking preserved — no score blending. Pure pass/fail.
+        # Graceful: if judge is None or fails, all candidates kept.
         judge = get_pair_judge()
         if judge and scored:
             try:
                 from config.settings import get_settings
                 _js = get_settings()
-                top_k_n = getattr(_js, "llm_judge_top_k", 20)
-                w_tattoo = getattr(_js, "llm_judge_blend_tattoo", 0.55)
-                w_llm = getattr(_js, "llm_judge_blend_llm", 0.45)
+                top_k_n = getattr(_js, "llm_judge_top_k", 10)
             except Exception:
-                top_k_n, w_tattoo, w_llm = 20, 0.55, 0.45
+                top_k_n = 10
 
             intent = derive_fit_intent(source)
             top_k = scored[:top_k_n]
             rest = scored[top_k_n:]
 
             try:
-                judge_results = judge.judge_batch(
+                fail_ids = judge.judge_batch(
                     source, [s["profile"] for s in top_k], intent,
                 )
             except Exception as e:
-                logger.warning("LLM judge batch failed, using tattoo-only: %s", e)
-                judge_results = {}
+                logger.warning("Vision judge failed, keeping all: %s", e)
+                fail_ids = set()
 
-            if judge_results:
+            if fail_ids:
+                logger.info(
+                    "Vision judge removed %d/%d candidates: %s",
+                    len(fail_ids), len(top_k), fail_ids,
+                )
                 for entry in top_k:
-                    pid = entry["profile"].product_id
-                    jr = judge_results.get(pid)
-                    if jr is not None:
-                        if jr.fail:
-                            entry["tattoo"] = -1.0
-                            entry["llm_fail"] = True
-                        else:
-                            tattoo_norm = max(0.0, min(10.0, entry["tattoo"] * 10.0))
-                            blended = (w_tattoo * tattoo_norm + w_llm * jr.overall) / 10.0
-                            entry["tattoo"] = blended
-                            entry["llm_overall"] = jr.overall
-                            entry["llm_tags"] = jr.tags
-
-                # Remove hard fails, re-sort top_k, merge back
-                top_k = [e for e in top_k if not e.get("llm_fail")]
-                top_k.sort(key=lambda x: x["tattoo"], reverse=True)
+                    if entry["profile"].product_id in fail_ids:
+                        entry["vision_fail"] = True
+                top_k = [e for e in top_k if not e.get("vision_fail")]
                 scored = top_k + rest
 
         # --- Greedy diverse selection (MMR-style) ---
@@ -3195,10 +3274,7 @@ class OutfitEngine:
             result["profile_adjustment"] = entry["profile_adjustment"]
         if entry.get("avoid_adjustment"):
             result["avoid_adjustment"] = entry["avoid_adjustment"]
-        if entry.get("llm_overall") is not None:
-            result["llm_score"] = round(entry["llm_overall"], 1)
-        if entry.get("llm_tags"):
-            result["llm_tags"] = entry["llm_tags"]
+        result["vision_pass"] = not entry.get("vision_fail", False)
         return result
 
     def _format_similar_item(self, entry: Dict, rank: int) -> Dict[str, Any]:
