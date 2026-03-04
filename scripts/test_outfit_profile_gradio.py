@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Gradio test UI for Profile-Aware Outfit Recommendations (v2.2).
+Gradio test UI for Profile-Aware Outfit Recommendations (v3.1).
 
 Side-by-side comparison: baseline (no profile) vs personalized (with profile).
-Exercises the cluster complement prompts + ProfileScorer integration.
+TATTOO v3.1 scoring, outfit avoids, vision judge (gpt-4o-mini per-item veto +
+outfit ranking), cluster complement prompts, and ProfileScorer integration.
 
 Tabs:
   1. Complete the Fit — compare baseline vs personalized outfit
@@ -124,14 +125,16 @@ CUSTOM_CSS = """
     box-shadow: 0 0 0 2px rgba(16,185,129,0.15);
 }
 .card img.card-img {
-    width: 100%; height: 320px; object-fit: cover; object-position: top;
-    background: #f8f9fa;
+    width: 100%; height: 320px; object-fit: contain;
+    background: #f9fafb;
+    border-bottom: 1px solid #f3f4f6;
 }
 .card .card-img-placeholder {
     width: 100%; height: 320px;
-    background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+    background: #f3f4f6;
     display: flex; align-items: center; justify-content: center;
     color: #9ca3af; font-size: 13px;
+    border-bottom: 1px solid #f3f4f6;
 }
 .card .card-body { padding: 10px 12px; }
 .card .card-name {
@@ -166,7 +169,8 @@ CUSTOM_CSS = """
     overflow: hidden; background: #f8f9fa;
 }
 .hero-source .hero-img-wrap img {
-    width: 100%; height: 100%; object-fit: cover; object-position: top;
+    width: 100%; height: 100%; object-fit: contain;
+    background: #f9fafb;
 }
 .hero-source .hero-details {
     flex: 1; padding: 24px 24px 24px 0;
@@ -278,6 +282,47 @@ CUSTOM_CSS = """
     background: #ede9fe; border: 1px solid #c4b5fd; border-radius: 8px;
     padding: 10px 14px; margin: 8px 0; font-size: 12px; color: #4c1d95;
 }
+
+/* ══════════════════════════════════════════════════════════════
+   DARK MODE
+   ══════════════════════════════════════════════════════════════ */
+.dark .card {
+    background: #1e293b; color: #e2e8f0;
+    border-color: #334155;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.dark .card-personalized { border-color: #7c3aed; }
+.dark .card-new { border-color: #059669; box-shadow: 0 0 0 2px rgba(16,185,129,0.25); }
+.dark .card img.card-img { background: #0f172a; border-color: #1e293b; }
+.dark .card .card-img-placeholder { background: #0f172a; border-color: #1e293b; color: #475569; }
+.dark .card .card-name { color: #f1f5f9; }
+.dark .card .card-brand { color: #94a3b8; }
+.dark .card .card-price { color: #f1f5f9; }
+.dark .card .card-cat { color: #64748b; }
+.dark .card .card-scores { color: #a5b4fc; border-color: #334155; }
+.dark .dim-bar .dim-label { color: #94a3b8; }
+.dark .dim-bar .dim-track { background: #334155; }
+.dark .dim-bar .dim-val { color: #64748b; }
+
+.dark .hero-source {
+    background: #1e293b; border-color: #818cf8;
+    box-shadow: 0 4px 20px rgba(129,140,248,0.15);
+}
+.dark .hero-source .hero-img-wrap { background: #0f172a; }
+.dark .hero-source .hero-img-wrap img { background: #0f172a; }
+.dark .hero-source .hero-name { color: #f1f5f9; }
+.dark .hero-source .hero-brand { color: #94a3b8; }
+.dark .hero-source .hero-price { color: #f1f5f9; }
+.dark .hero-source .hero-meta { color: #64748b; }
+.dark .hero-source .hero-meta span { background: #334155; color: #94a3b8; }
+
+.dark .section-title { color: #e2e8f0; border-color: #334155; }
+.dark .comparison-header.header-baseline { background: #334155; color: #e2e8f0; }
+.dark .comparison-header.header-personalized { background: #2e1065; color: #c4b5fd; }
+.dark .info-box { background: #052e16; border-color: #166534; color: #86efac; }
+.dark .warn-box { background: #422006; border-color: #a16207; color: #fde68a; }
+.dark .diff-summary { background: #2e1065; border-color: #7c3aed; color: #c4b5fd; }
+.dark .prompt-box { background: #1e293b; border-color: #334155; color: #e2e8f0; }
 """
 
 DIM_LABELS = {
@@ -955,12 +1000,13 @@ def _random_and_compare_similar(
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Outfit Engine v2.2 - Profile Testing") as demo:
-        gr.Markdown("# Outfit Engine v2.2 - Profile-Aware Testing")
+    with gr.Blocks(title="Outfit Engine v3.1 - Profile Testing") as demo:
+        gr.Markdown("# Outfit Engine v3.1 + Vision Judge - Profile-Aware Testing")
         gr.Markdown(
             "Side-by-side comparison: **Baseline** (no profile) vs **Personalized** "
             "(with cluster prompts + ProfileScorer). "
-            "Select brands/personas, pick a category, hit **Random Product & Compare**."
+            "TATTOO scoring + avoids + vision judge (per-item veto + outfit ranking). "
+            "Select clusters/personas, pick a category, hit **Random Product & Compare**."
         )
 
         # ---- Shared profile controls ----
@@ -999,7 +1045,7 @@ def build_ui() -> gr.Blocks:
             with gr.TabItem("Complete the Fit"):
                 with gr.Row():
                     outfit_cat = gr.Dropdown(
-                        choices=["", "Tops", "Bottoms", "Dresses", "Outerwear"],
+                        choices=["", "Tops", "Bottoms", "Outerwear"],
                         value="",
                         label="Random from category (blank = any)",
                     )
@@ -1037,7 +1083,7 @@ def build_ui() -> gr.Blocks:
             with gr.TabItem("Similar Items"):
                 with gr.Row():
                     similar_cat = gr.Dropdown(
-                        choices=["", "Tops", "Bottoms", "Dresses", "Outerwear"],
+                        choices=["", "Tops", "Bottoms", "Outerwear"],
                         value="",
                         label="Random from category (blank = any)",
                     )
@@ -1079,7 +1125,7 @@ def build_ui() -> gr.Blocks:
                 )
                 with gr.Row():
                     explore_cat = gr.Dropdown(
-                        choices=["tops", "bottoms", "dresses", "outerwear"],
+                        choices=["tops", "bottoms", "outerwear"],
                         value="tops",
                         label="Target category",
                     )

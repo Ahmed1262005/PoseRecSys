@@ -73,6 +73,8 @@ def search_products(query: str, category: str, brand: str, limit: int = 20) -> L
     if category and category != "All":
         # Filter by Gemini's category_l1 (the source of truth)
         q = q.eq("product_attributes.category_l1", category.capitalize())
+    else:
+        q = q.in_("product_attributes.category_l1", ["Tops", "Bottoms", "Outerwear"])
     if brand and brand != "All":
         q = q.eq("brand", brand)
     if query:
@@ -93,16 +95,29 @@ def search_products(query: str, category: str, brand: str, limit: int = 20) -> L
 def get_random_products(category: str = "All", limit: int = 12) -> List[Dict]:
     """
     Get random products, filtered by Gemini category_l1 (not unreliable DB field).
+    Uses a random offset into the result set so each call returns different items.
     """
+    import random
+
     q = SUPABASE.table("products").select(
         "id, name, brand, category, price, primary_image_url, base_color, "
-        "product_attributes!inner(category_l1)"
+        "product_attributes!inner(category_l1)",
+        count="exact",
     ).eq("in_stock", True)
 
     if category and category != "All":
         q = q.eq("product_attributes.category_l1", category.capitalize())
+    else:
+        q = q.in_("product_attributes.category_l1", ["Tops", "Bottoms", "Outerwear"])
 
-    result = q.limit(limit).execute()
+    # Get total count first, then fetch from a random offset
+    pool_size = limit * 5
+    count_result = q.limit(1).execute()
+    total = count_result.count or 500
+    max_offset = max(0, total - pool_size)
+    offset = random.randint(0, max_offset) if max_offset > 0 else 0
+
+    result = q.offset(offset).limit(pool_size).execute()
 
     products = []
     for row in (result.data or []):
@@ -110,7 +125,9 @@ def get_random_products(category: str = "All", limit: int = 12) -> List[Dict]:
         gemini_l1 = attrs.get("category_l1", row.get("category", ""))
         row["category"] = gemini_l1.lower() if gemini_l1 else row.get("category", "")
         products.append(row)
-    return products
+
+    random.shuffle(products)
+    return products[:limit]
 
 
 # =============================================================================
