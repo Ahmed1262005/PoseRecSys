@@ -918,6 +918,8 @@ def get_random_product(category_filter: str = "") -> str:
         )
         if category_filter:
             q = q.eq("category_l1", category_filter)
+        else:
+            q = q.in_("category_l1", ["Tops", "Bottoms", "Outerwear"])
         # Grab a batch and pick randomly
         result = q.limit(200).execute()
         if not result.data:
