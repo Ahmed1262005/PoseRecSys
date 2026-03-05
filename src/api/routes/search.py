@@ -16,7 +16,7 @@ import time
 import threading
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from core.auth import require_auth, SupabaseUser
 from core.logging import get_logger
@@ -58,6 +58,7 @@ router = APIRouter(prefix="/api/search", tags=["Search"])
 )
 def hybrid_search(
     request: HybridSearchRequest,
+    background_tasks: BackgroundTasks,
     user: SupabaseUser = Depends(require_auth),
 ) -> HybridSearchResponse:
     """
@@ -115,6 +116,18 @@ def hybrid_search(
         )
     except Exception:
         pass  # Non-fatal — don't let search signal wiring break search
+
+    # Log search impressions in background (non-blocking)
+    product_ids = [r.product_id for r in result.results]
+    if product_ids:
+        analytics = get_search_analytics()
+        background_tasks.add_task(
+            analytics.log_impressions,
+            query=request.query,
+            product_ids=product_ids,
+            page=request.page,
+            user_id=user.id,
+        )
 
     return result
 
@@ -189,6 +202,7 @@ def _build_refined_query(original_query: str, selected_filters: dict) -> str:
 )
 def refine_search(
     request: SearchRefineRequest,
+    background_tasks: BackgroundTasks,
     user: SupabaseUser = Depends(require_auth),
 ) -> HybridSearchResponse:
     """
@@ -259,6 +273,18 @@ def refine_search(
             )
         except Exception:
             pass
+
+        # Log impressions in background
+        _product_ids = [r.product_id for r in result.results]
+        if _product_ids:
+            _analytics = get_search_analytics()
+            background_tasks.add_task(
+                _analytics.log_impressions,
+                query=request.original_query,
+                product_ids=_product_ids,
+                page=request.page,
+                user_id=user.id,
+            )
 
         return result
 
@@ -356,6 +382,18 @@ def refine_search(
         )
     except Exception:
         pass
+
+    # Log impressions in background
+    _fb_product_ids = [r.product_id for r in result.results]
+    if _fb_product_ids:
+        _fb_analytics = get_search_analytics()
+        background_tasks.add_task(
+            _fb_analytics.log_impressions,
+            query=request.original_query,
+            product_ids=_fb_product_ids,
+            page=request.page,
+            user_id=user.id,
+        )
 
     return result
 

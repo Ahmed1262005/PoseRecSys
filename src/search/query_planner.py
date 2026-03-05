@@ -265,7 +265,54 @@ def _build_system_prompt() -> str:
    - "no VPL" (visible panty lines) → Bottoms/Dresses with thicker/structured fabric
    - "works with a strapless bra" → Tops/Dresses with Strapless/Off-Shoulder neckline
    - "hides bra" → Tops/Dresses with opaque mode
-   NEVER set category_l1 to "Intimates" — it does not exist in our catalog.
+    NEVER set category_l1 to "Intimates" — it does not exist in our catalog.
+
+10. **Decompose trend/aesthetic references into visual attributes.**
+    Users often search with cultural trend terms instead of product keywords. These terms describe
+    a visual AESTHETIC, not a product name. You MUST translate them into concrete visual attributes
+    for filters AND rich descriptive semantic_queries. The algolia_query should contain ONLY the
+    garment type keyword (e.g., "coat", "dress", "top").
+
+    Common trend/aesthetic terms and their visual decomposition:
+
+    - **"mob wife" / "mob boss wife" / "mafia wife"** → The iconic mob wife aesthetic:
+      patterns: ["Animal Print"], materials: ["Faux Leather", "Wool", "Velvet"],
+      fit_type: ["Oversized"], colors: ["Black", "Brown", "Cream", "Burgundy"],
+      style_tags: ["Glamorous", "Edgy"]. Semantic queries should describe oversized faux fur coats,
+      leopard print, dramatic silhouettes, dark luxurious fabrics, gold hardware, bold statement pieces.
+
+    - **"old money" / "quiet luxury" / "stealth wealth"** → Understated elegance:
+      materials: ["Wool", "Cotton", "Silk"], colors: ["Beige", "Navy Blue", "White", "Cream", "Gray"],
+      style_tags: ["Classic", "Minimalist", "Preppy"], formality: ["Smart Casual", "Business Casual"].
+      Semantic queries should describe tailored cashmere, neutral tones, structured blazers, clean lines.
+
+    - **"clean girl" / "that girl"** → Effortless minimal style:
+      patterns: ["Solid"], colors: ["White", "Beige", "Black", "Brown"],
+      materials: ["Cotton", "Knit", "Jersey"], style_tags: ["Minimalist", "Modern"],
+      fit_type: ["Fitted", "Slim"]. Semantic queries should describe sleek basics, neutral tones,
+      minimal jewelry-friendly silhouettes.
+
+    - **"coquette" / "feminine" / "balletcore"** → Delicate romantic style:
+      patterns: ["Solid", "Floral"], colors: ["Pink", "White", "Cream", "Light Blue"],
+      materials: ["Lace", "Satin", "Chiffon", "Silk"], style_tags: ["Romantic"],
+      neckline: ["Sweetheart", "Square", "V-Neck"]. Semantic queries should describe bows, ribbons,
+      soft pastels, delicate fabrics, ballet-inspired silhouettes.
+
+    - **"dark feminine" / "dark academia"** → Moody intellectual aesthetic:
+      colors: ["Black", "Burgundy", "Brown", "Navy Blue", "Olive"],
+      materials: ["Wool", "Knit", "Faux Leather", "Velvet"], style_tags: ["Edgy", "Vintage"],
+      patterns: ["Plaid", "Solid"]. Semantic queries should describe structured dark fabrics,
+      layered academic looks, gothic romantic elements.
+
+    - **"coastal grandmother" / "coastal chic"** → Relaxed elegant seaside style:
+      colors: ["White", "Beige", "Light Blue", "Navy Blue", "Cream"],
+      materials: ["Linen", "Cotton", "Knit"], style_tags: ["Classic", "Minimalist"],
+      fit_type: ["Relaxed", "Regular"]. Semantic queries should describe linen trousers,
+      cable-knit sweaters, breezy white shirts, neutral seaside elegance.
+
+    For ANY trend term not listed above, apply the same principle: think about what that
+    aesthetic LOOKS like visually, then decompose it into concrete patterns, materials, colors,
+    fit_type, and style_tags. Put the rich visual description in semantic_queries.
 
 ## SECTION 2: OUTPUT FORMAT
 
@@ -395,6 +442,15 @@ Example for "red midi dress" (specific — fewer needed):
 "semantic_queries": [
   "a red satin midi dress with a fitted bodice and flowing skirt",
   "a red knit bodycon midi dress with long sleeves, elegant and fitted"
+]
+```
+
+Example for "mob wife coat" (trend/aesthetic — see Principle 10):
+```json
+"semantic_queries": [
+  "oversized luxurious faux fur coat in leopard animal print, bold dramatic glamorous mob wife style",
+  "long structured black wool coat with dramatic oversized silhouette, dark luxurious power dressing",
+  "oversized shaggy fur coat in dark brown or cream, vintage Hollywood glamour statement outerwear"
 ]
 ```
 
@@ -1021,7 +1077,7 @@ class QueryPlanner:
                     # tokens thinking (which was causing 40-66s latencies).
                     api_params["max_completion_tokens"] = 8192
                 else:
-                    api_params["temperature"] = 0.0
+                    api_params["temperature"] = 0.15
                     api_params["max_tokens"] = 1600
 
                 response = self.client.chat.completions.create(**api_params)
@@ -1295,7 +1351,7 @@ class QueryPlanner:
                 if is_reasoning_model:
                     api_params["max_completion_tokens"] = 8192
                 else:
-                    api_params["temperature"] = 0.0
+                    api_params["temperature"] = 0.15
                     api_params["max_tokens"] = 1600
 
                 response = self.client.chat.completions.create(**api_params)

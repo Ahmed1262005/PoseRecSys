@@ -388,6 +388,7 @@ class HybridSearchService:
                     queries=_queries_to_run,
                     request=semantic_request,
                     limit_per_query=max(fetch_size // len(_queries_to_run), 30),
+                    user_id=user_id,
                 )
                 qcount = len(_queries_to_run)
             else:
@@ -395,6 +396,7 @@ class HybridSearchService:
                     query=_queries_to_run[0],
                     request=semantic_request,
                     limit=fetch_size,
+                    user_id=user_id,
                 )
                 qcount = 1
             return results, qcount, int((time.time() - t0) * 1000)
@@ -614,6 +616,18 @@ class HybridSearchService:
                     patterns=name_exclusions,
                 )
 
+        # Step 5.5: Load impression counts for soft demotion
+        impression_counts: Optional[Dict[str, int]] = None
+        if user_id:
+            try:
+                _raw_counts = self.analytics.load_impression_counts(
+                    user_id=user_id,
+                )
+                if isinstance(_raw_counts, dict) and _raw_counts:
+                    impression_counts = _raw_counts
+            except Exception:
+                pass  # Non-fatal — skip demotion if load fails
+
         # Step 6: Rerank with session/profile + context scoring
         # For EXACT brand queries, disable brand diversity cap — the user
         # explicitly searched for that brand and expects all results from it.
@@ -624,6 +638,7 @@ class HybridSearchService:
             seen_ids=seen_ids,
             user_context=user_context,
             session_scores=session_scores,
+            impression_counts=impression_counts,
         )
         if brand_cap is not None:
             rerank_kwargs["max_per_brand"] = brand_cap
@@ -972,12 +987,41 @@ class HybridSearchService:
     # FashionCLIP Semantic Search
     # =========================================================================
 
+    # Embedding perturbation for cross-user retrieval diversity.
+    # Small Gaussian noise seeded per user_id causes different users to
+    # get slightly different nearest-neighbor results from pgvector.
+    _PERTURBATION_SIGMA = 0.02
+
+    def _perturb_embedding(
+        self,
+        embedding: np.ndarray,
+        user_id: Optional[str],
+    ) -> np.ndarray:
+        """Add small user-seeded noise to a query embedding for diversity.
+
+        The perturbation is deterministic per user so the same user gets
+        consistent results within a session, but different users diverge.
+        Returns the original embedding unchanged if no user_id.
+        """
+        if not user_id:
+            return embedding
+        seed = hash(user_id) % (2**32)
+        rng = np.random.default_rng(seed)
+        noise = rng.normal(0, self._PERTURBATION_SIGMA, embedding.shape)
+        perturbed = embedding + noise
+        # Re-normalize to unit length (cosine similarity requires it)
+        norm = np.linalg.norm(perturbed)
+        if norm > 0:
+            perturbed = perturbed / norm
+        return perturbed.astype(embedding.dtype)
+
     def _search_semantic(
         self,
         query: str,
         request: HybridSearchRequest,
         limit: int = 100,
         query_embedding: Optional[np.ndarray] = None,
+        user_id: Optional[str] = None,
     ) -> List[dict]:
         """
         Search using FashionCLIP + pgvector and return normalized results.
@@ -992,8 +1036,16 @@ class HybridSearchService:
             request: Full search request with filters.
             limit: Max results.
             query_embedding: Pre-computed FashionCLIP embedding (skips encode_text).
+            user_id: User ID for seeding embedding perturbation (diversity).
         """
         settings = get_settings()
+
+        # Apply per-user embedding perturbation for retrieval diversity.
+        # If no pre-computed embedding, encode first so we can perturb.
+        if user_id:
+            if query_embedding is None:
+                query_embedding = self.semantic_engine.encode_text(query)
+            query_embedding = self._perturb_embedding(query_embedding, user_id)
 
         # Try multimodal search first
         if settings.multimodal_search_enabled:
@@ -1021,6 +1073,7 @@ class HybridSearchService:
         queries: List[str],
         request: HybridSearchRequest,
         limit_per_query: int = 50,
+        user_id: Optional[str] = None,
     ) -> List[dict]:
         """
         Run multiple diverse semantic queries in parallel and merge results.
@@ -1059,6 +1112,7 @@ class HybridSearchService:
             results = self._search_semantic(
                 query=query, request=request, limit=limit_per_query,
                 query_embedding=embeddings[idx],
+                user_id=user_id,
             )
             return idx, results
 
