@@ -24,7 +24,7 @@ from services.outfit_avoids import (
     _has_active_context,
     _has_polished_context,
     # Individual rule functions
-    _check_A1, _check_A2, _check_A3,
+    _check_A1, _check_A2, _check_A3, _check_A4,
     _check_B1,
     _check_C1, _check_C2,
     _check_D1,
@@ -352,6 +352,151 @@ class TestRuleA_Layering:
         src = _p(temp_band="cold", layer_role="base")
         cand = _p(temp_band="hot", layer_role="base")
         assert _check_A3(src, cand) == 0.0
+
+
+class TestRuleA4_FlimsyOuterwear:
+    """A4: Flimsy outerwear over lightweight top — no layering purpose."""
+
+    def test_knit_cardigan_over_tank_top(self):
+        """Knit cardigan over a partial-coverage tank → -0.12."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Tank Top",
+            coverage_level="Partial", fabric_weight="light",
+            apparent_fabric="Cotton",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="light",
+        )
+        assert _check_A4(src, cand) == pytest.approx(-0.12)
+
+    def test_knit_cardigan_over_partial_top(self):
+        """Knit cardigan over a partial-coverage top with mid weight → -0.12."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Top",
+            coverage_level="Partial", fabric_weight="mid",
+            apparent_fabric="Cotton",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="",
+        )
+        assert _check_A4(src, cand) == pytest.approx(-0.12)
+
+    def test_crochet_shrug_over_camisole(self):
+        """Crochet shrug over camisole → -0.12."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Camisole",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Shrug",
+            apparent_fabric="Crochet", fabric_weight="light",
+        )
+        assert _check_A4(src, cand) == pytest.approx(-0.12)
+
+    def test_blazer_over_tank_no_penalty(self):
+        """Structured blazer over tank top → no penalty (not flimsy)."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Tank Top",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Blazer",
+            apparent_fabric="Cotton", fabric_weight="mid",
+        )
+        assert _check_A4(src, cand) == 0.0
+
+    def test_denim_jacket_over_top_no_penalty(self):
+        """Denim jacket over lightweight top → no penalty."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Top",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Denim Jacket",
+            apparent_fabric="Denim", fabric_weight="mid",
+        )
+        assert _check_A4(src, cand) == 0.0
+
+    def test_heavy_wool_cardigan_no_penalty(self):
+        """Heavy wool cardigan → no penalty (provides warmth)."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Top",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Wool", fabric_weight="heavy",
+        )
+        assert _check_A4(src, cand) == 0.0
+
+    def test_cardigan_over_sweater_no_penalty(self):
+        """Cardigan over a sweater (not lightweight top) → no penalty."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Sweater",
+            coverage_level="Full", fabric_weight="mid",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="light",
+        )
+        assert _check_A4(src, cand) == 0.0
+
+    def test_symmetric_direction(self):
+        """Rule fires in both directions."""
+        top = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Crop Top",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cardi = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="light",
+        )
+        assert _check_A4(top, cardi) == pytest.approx(-0.12)
+        assert _check_A4(cardi, top) == pytest.approx(-0.12)
+
+    def test_both_outerwear_no_penalty(self):
+        """Two outerwear items → no penalty (neither is a lightweight top)."""
+        jacket = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Blazer",
+            apparent_fabric="Cotton", fabric_weight="mid",
+        )
+        cardi = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="light",
+        )
+        assert _check_A4(jacket, cardi) == 0.0
+
+    def test_bottoms_not_affected(self):
+        """Bottoms source → no penalty (not a lightweight top)."""
+        src = _p(
+            gemini_category_l1="Bottoms", gemini_category_l2="Shorts",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Cardigan",
+            apparent_fabric="Knit", fabric_weight="light",
+        )
+        assert _check_A4(src, cand) == 0.0
+
+    def test_null_attributes_no_crash(self):
+        """Missing attributes don't crash."""
+        src = _p(gemini_category_l1=None, gemini_category_l2=None, coverage_level=None, fabric_weight=None)
+        cand = _p(gemini_category_l1=None, gemini_category_l2=None, apparent_fabric=None, fabric_weight=None)
+        assert _check_A4(src, cand) == 0.0
+
+    def test_kimono_over_tube_top(self):
+        """Lightweight kimono over tube top → -0.12."""
+        src = _p(
+            gemini_category_l1="Tops", gemini_category_l2="Tube Top",
+            coverage_level="Partial", fabric_weight="light",
+        )
+        cand = _p(
+            gemini_category_l1="Outerwear", gemini_category_l2="Kimono",
+            apparent_fabric="Chiffon", fabric_weight="light",
+        )
+        assert _check_A4(src, cand) == pytest.approx(-0.12)
 
 
 class TestRuleB_Formality:

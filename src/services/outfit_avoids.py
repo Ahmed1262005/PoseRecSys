@@ -411,6 +411,81 @@ def _check_A3(src: "AestheticProfile", cand: "AestheticProfile") -> float:
     return 0.0
 
 
+# Lightweight outerwear L2 types that add no real structure / warmth
+_FLIMSY_OUTER_L2: Set[str] = {
+    "cardigan", "shrug", "bolero", "cape", "poncho", "kimono",
+    "open cardigan", "cropped cardigan",
+}
+
+# Light fabrics that signal the outerwear won't add meaningful layering
+_LIGHT_FABRICS: Set[str] = {
+    "knit", "crochet", "lace", "chiffon", "mesh", "net",
+    "sheer", "gauze", "open knit", "lightweight knit",
+}
+
+# Lightweight top L2 types (sources that need structured outerwear)
+_LIGHTWEIGHT_TOP_L2: Set[str] = {
+    "top", "tank top", "tank", "camisole", "crop top", "tube top",
+    "bralette", "bandeau", "halter top", "off-shoulder top",
+    "strapless top", "bustier", "t-shirt",
+}
+
+
+def _check_A4(src: "AestheticProfile", cand: "AestheticProfile") -> float:
+    """Flimsy outerwear over lightweight top — no layering purpose.
+
+    When the source is a lightweight/minimal top and the outerwear
+    candidate is equally lightweight (knit cardigan, shrug, etc.),
+    the pairing doesn't create a purposeful outfit layer.  A stylist
+    would reach for structured outerwear (blazer, jacket, coat) instead.
+
+    Only fires when:
+      - One item is a lightweight top (Partial coverage OR known light L2)
+      - The other is outerwear with a flimsy L2 AND light/knit fabric
+    """
+    def _is_lightweight_top(p: "AestheticProfile") -> bool:
+        l1 = (getattr(p, "gemini_category_l1", None) or "").lower().strip()
+        if l1 not in ("tops", ""):
+            return False
+        l2 = _l2(p)
+        cov = (getattr(p, "coverage_level", None) or "").lower().strip()
+        fw = (getattr(p, "fabric_weight", None) or "").lower().strip()
+        # Explicitly lightweight top
+        if l2 in _LIGHTWEIGHT_TOP_L2:
+            return True
+        # Partial coverage with light/mid weight
+        if cov == "partial" and fw in ("light", "mid", ""):
+            return True
+        return False
+
+    def _is_flimsy_outerwear(p: "AestheticProfile") -> bool:
+        l1 = (getattr(p, "gemini_category_l1", None) or "").lower().strip()
+        if l1 != "outerwear":
+            return False
+        l2 = _l2(p)
+        if l2 not in _FLIMSY_OUTER_L2:
+            return False
+        # Check fabric — must also be lightweight material
+        fabric = (getattr(p, "apparent_fabric", None) or "").lower().strip()
+        mat = (getattr(p, "material_family", None) or "").lower().strip()
+        fw = (getattr(p, "fabric_weight", None) or "").lower().strip()
+        # Heavy cardigans (wool, cashmere, chunky) are fine
+        if fw == "heavy":
+            return False
+        if fabric in _LIGHT_FABRICS or mat in _LIGHT_FABRICS:
+            return True
+        # Unknown fabric + lightweight category → still flimsy
+        if fw in ("light", "") and l2 in _FLIMSY_OUTER_L2:
+            return True
+        return False
+
+    if _is_lightweight_top(src) and _is_flimsy_outerwear(cand):
+        return -0.12
+    if _is_lightweight_top(cand) and _is_flimsy_outerwear(src):
+        return -0.12
+    return 0.0
+
+
 # --- B: Formality distance -----------------------------------------------
 
 def _check_B1(src: "AestheticProfile", cand: "AestheticProfile") -> float:
@@ -852,6 +927,7 @@ _SOFT_RULES: List[Tuple[str, Callable]] = [
     ("A1", _check_A1),
     ("A2", _check_A2),
     ("A3", _check_A3),
+    ("A4", _check_A4),
     # B: Formality distance
     ("B1", _check_B1),
     # C: Sporty ↔ tailored

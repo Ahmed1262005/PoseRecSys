@@ -79,6 +79,65 @@ def _is_valid_image_url(url: str) -> bool:
     return False
 
 
+# AVIF magic-bytes detection — AVIF files have "ftyp" at byte offset 4.
+# Some retailers (Mango, Garage, Old Navy, Dynamite, Ba&sh) serve AVIF
+# images with .jpg extensions and image/jpeg content-type headers.
+# OpenAI vision API does NOT support AVIF → instant 400 error.
+_AVIF_FTYP = b"ftyp"
+_AVIF_BRANDS = frozenset({b"avif", b"avis", b"mif1", b"msf1"})
+
+# Thread-safe cache: url → bool (True = supported, False = AVIF/bad)
+_format_cache: Dict[str, bool] = {}
+_format_cache_lock = threading.Lock()
+_FORMAT_CACHE_SIZE = 512
+
+
+def _is_supported_image_format(url: str, timeout: float = 3.0) -> bool:
+    """Check that the actual image bytes are in a format OpenAI accepts.
+
+    Downloads only the first 32 bytes (HTTP range request) and checks
+    for AVIF magic bytes.  Falls back to True (optimistic) on any
+    network error — better to let OpenAI reject one image than to
+    block all candidates on a slow CDN.
+
+    Results are cached in-memory for the process lifetime.
+    """
+    if not url:
+        return False
+
+    with _format_cache_lock:
+        cached = _format_cache.get(url)
+    if cached is not None:
+        return cached
+
+    supported = True  # optimistic default
+    try:
+        import requests as _req
+        resp = _req.get(
+            url, headers={"Range": "bytes=0-31"}, timeout=timeout, stream=True,
+        )
+        # Accept 200 (full) or 206 (partial)
+        if resp.status_code in (200, 206):
+            data = resp.content[:32]
+            if len(data) >= 12 and data[4:8] == _AVIF_FTYP:
+                brand = data[8:12]
+                if brand in _AVIF_BRANDS:
+                    logger.info("AVIF detected (brand=%s): %s", brand, url[:80])
+                    supported = False
+    except Exception:
+        pass  # network error → optimistic, let OpenAI try
+
+    with _format_cache_lock:
+        if len(_format_cache) >= _FORMAT_CACHE_SIZE:
+            # Evict ~25% of oldest entries (dict insertion order)
+            keys = list(_format_cache.keys())
+            for k in keys[:_FORMAT_CACHE_SIZE // 4]:
+                _format_cache.pop(k, None)
+        _format_cache[url] = supported
+
+    return supported
+
+
 # =============================================================================
 # 1. FIT INTENT  (derived from source product — minimal context for prompt)
 # =============================================================================
@@ -450,7 +509,7 @@ class StylistJudge:
         if not candidates:
             return None
 
-        # Pre-filter: skip if source image is invalid
+        # Pre-filter: skip if source image is invalid or unsupported format
         source_url = source.image_url or ""
         if not _is_valid_image_url(source_url):
             logger.warning(
@@ -458,13 +517,23 @@ class StylistJudge:
                 source.product_id,
             )
             return None
+        if not _is_supported_image_format(source_url):
+            logger.warning(
+                "Stylist rerank: source %s has unsupported format (AVIF?), skipping",
+                source.product_id,
+            )
+            return None
 
-        # Pre-filter: only send candidates with valid image URLs
-        valid = [c for c in candidates if _is_valid_image_url(c.image_url or "")]
+        # Pre-filter: only send candidates with valid, supported image URLs
+        valid = [
+            c for c in candidates
+            if _is_valid_image_url(c.image_url or "")
+            and _is_supported_image_format(c.image_url or "")
+        ]
         skipped = len(candidates) - len(valid)
         if skipped:
             logger.info(
-                "Stylist rerank: filtered %d/%d candidates (invalid URLs)",
+                "Stylist rerank: filtered %d/%d candidates (invalid/AVIF URLs)",
                 skipped, len(candidates),
             )
         if not valid:
@@ -600,18 +669,25 @@ class StylistJudge:
             return None
 
         source_url = source.image_url or ""
-        if not _is_valid_image_url(source_url):
+        if not _is_valid_image_url(source_url) or not _is_supported_image_format(source_url):
             logger.warning(
-                "Outfit ranking: source %s has invalid image URL, skipping",
+                "Outfit ranking: source %s has invalid/unsupported image, skipping",
                 source.product_id,
             )
             return None
 
-        # Pre-filter outfits with invalid image URLs
+        # Pre-filter outfits with invalid or unsupported-format image URLs
+        def _outfit_images_ok(outfit: Dict[str, "AestheticProfile"]) -> bool:
+            return all(
+                _is_valid_image_url(p.image_url or "")
+                and _is_supported_image_format(p.image_url or "")
+                for p in outfit.values()
+            )
+
         valid_outfits: List[Dict[str, "AestheticProfile"]] = []
         valid_indices: List[int] = []
         for i, outfit in enumerate(outfits):
-            if all(_is_valid_image_url(p.image_url or "") for p in outfit.values()):
+            if _outfit_images_ok(outfit):
                 valid_outfits.append(outfit)
                 valid_indices.append(i)
 

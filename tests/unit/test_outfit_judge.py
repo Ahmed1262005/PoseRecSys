@@ -18,7 +18,10 @@ from services.outfit_judge import (
     _OCCASION_TO_BUCKET,
     _FITTED_SILS,
     _OVERSIZED_SILS,
+    _AVIF_FTYP,
+    _AVIF_BRANDS,
     _is_valid_image_url,
+    _is_supported_image_format,
     build_rerank_messages,
     build_vision_messages,
     build_outfit_ranking_messages,
@@ -1291,3 +1294,87 @@ class TestJudgeUrlFiltering:
         intent = FitIntent("casual", "balanced", "casual", "pants", "mild")
         result = judge.rank_outfits(source, outfits, intent)
         assert result is None
+
+
+# ===========================================================================
+# 14. AVIF Detection
+# ===========================================================================
+
+class TestAvifDetection:
+    """Tests for _is_supported_image_format() AVIF magic-byte detection."""
+
+    def test_avif_constants_defined(self):
+        assert _AVIF_FTYP == b"ftyp"
+        assert b"avif" in _AVIF_BRANDS
+        assert b"mif1" in _AVIF_BRANDS
+
+    def test_avif_detected_via_mock(self):
+        """AVIF file bytes → detected as unsupported."""
+        # Build minimal AVIF header: [size(4)][ftyp(4)][brand(4)]
+        avif_header = b"\x00\x00\x00\x1c" + b"ftyp" + b"avif" + b"\x00" * 20
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 206
+                mock_resp.content = avif_header
+                mock_get.return_value = mock_resp
+                assert _is_supported_image_format("https://cdn.example.com/img.jpg") is False
+
+    def test_jpeg_passes(self):
+        """Real JPEG header → supported."""
+        jpeg_header = b"\xff\xd8\xff\xe0" + b"\x00" * 28
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 206
+                mock_resp.content = jpeg_header
+                mock_get.return_value = mock_resp
+                assert _is_supported_image_format("https://cdn.example.com/img.jpg") is True
+
+    def test_png_passes(self):
+        """PNG header → supported."""
+        png_header = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.content = png_header
+                mock_get.return_value = mock_resp
+                assert _is_supported_image_format("https://cdn.example.com/img.png") is True
+
+    def test_network_error_optimistic(self):
+        """Network error → optimistic True (don't block all candidates)."""
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get", side_effect=Exception("timeout")):
+                assert _is_supported_image_format("https://cdn.example.com/img.jpg") is True
+
+    def test_empty_url_returns_false(self):
+        assert _is_supported_image_format("") is False
+
+    def test_cache_hit(self):
+        """Cached result is returned without network call."""
+        url = "https://cdn.example.com/cached.jpg"
+        with patch("services.outfit_judge._format_cache", {url: False}):
+            # No requests.get mock — would fail if called
+            assert _is_supported_image_format(url) is False
+
+    def test_mif1_brand_detected(self):
+        """AVIF with mif1 brand → unsupported."""
+        avif_header = b"\x00\x00\x00\x1c" + b"ftyp" + b"mif1" + b"\x00" * 20
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 206
+                mock_resp.content = avif_header
+                mock_get.return_value = mock_resp
+                assert _is_supported_image_format("https://cdn.example.com/img.jpg") is False
+
+    def test_short_response_optimistic(self):
+        """Response too short to check → optimistic True."""
+        with patch("services.outfit_judge._format_cache", {}):
+            with patch("requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 206
+                mock_resp.content = b"\xff\xd8"  # only 2 bytes
+                mock_get.return_value = mock_resp
+                assert _is_supported_image_format("https://cdn.example.com/img.jpg") is True
