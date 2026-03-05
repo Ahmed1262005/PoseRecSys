@@ -322,6 +322,24 @@ class HybridSearchService:
         else:
             algolia_filters = self._build_algolia_filters(request)
 
+        # Step 2d: Boost cluster brands in Algolia retrieval.
+        # When the user has a profile with preferred brands, add their
+        # cluster brands as optionalFilters.  This gives cluster-appropriate
+        # brands a ranking boost at retrieval level — increasing the chance
+        # they appear in the candidate pool for reranking.
+        # Skip when user explicitly filtered by brand (already constrained).
+        if user_profile and not request.brands:
+            cluster_brand_filters = self._build_cluster_brand_filters(user_profile)
+            if cluster_brand_filters:
+                if algolia_optional_filters is None:
+                    algolia_optional_filters = []
+                algolia_optional_filters.extend(cluster_brand_filters)
+                logger.info(
+                    "Added cluster brand optionalFilters",
+                    cluster_brands=len(cluster_brand_filters),
+                    total_optional=len(algolia_optional_filters),
+                )
+
         # Step 3+4: Run Algolia + Semantic search
         # For SPECIFIC/VAGUE intent, both searches are independent so we run
         # them in parallel.  For EXACT intent, semantic only runs if Algolia
@@ -1195,14 +1213,19 @@ class HybridSearchService:
 
         # Merge + dedup: keep highest semantic_score per product_id.
         # Track which query each product came from for interleaving.
+        # Also count how many queries each product appeared in — products
+        # found by multiple overlapping queries are more likely to truly
+        # match the specific detail the user asked for.
         seen: Dict[str, dict] = {}  # product_id -> best result dict
         query_assignments: Dict[str, int] = {}  # product_id -> query index
+        overlap_counts: Dict[str, int] = defaultdict(int)  # product_id -> # queries
 
         for q_idx, results in enumerate(results_per_query):
             for item in results:
                 pid = item.get("product_id")
                 if not pid:
                     continue
+                overlap_counts[pid] += 1
                 existing = seen.get(pid)
                 if existing is None:
                     seen[pid] = item
@@ -1215,6 +1238,31 @@ class HybridSearchService:
 
         if not seen:
             return []
+
+        # Multi-query overlap boost: products found by 2+ queries get
+        # a semantic_score bonus.  When all semantic queries describe
+        # the same detail (e.g., "zipped pockets" from 3 angles), items
+        # matching multiple phrasings are far more likely to actually
+        # have that detail.  Boost = 0.03 per extra query hit.
+        _OVERLAP_BOOST_PER_HIT = 0.03
+        num_queries = len(queries)
+        overlap_boosted = 0
+        for pid, count in overlap_counts.items():
+            if count >= 2 and pid in seen:
+                boost = (count - 1) * _OVERLAP_BOOST_PER_HIT
+                item = seen[pid]
+                old_score = item.get("semantic_score", 0) or 0
+                item["semantic_score"] = old_score + boost
+                item["overlap_count"] = count
+                overlap_boosted += 1
+
+        if overlap_boosted:
+            logger.info(
+                "Multi-query overlap boost applied",
+                boosted_items=overlap_boosted,
+                num_queries=num_queries,
+                boost_per_hit=_OVERLAP_BOOST_PER_HIT,
+            )
 
         # Interleave round-robin from each query's results to ensure
         # the top results show diversity rather than all coming from
@@ -1709,6 +1757,52 @@ class HybridSearchService:
         opt_list = optional_parts if optional_parts else None
 
         return hard_str, opt_list
+
+    def _build_cluster_brand_filters(
+        self,
+        user_profile: Dict[str, Any],
+    ) -> List[str]:
+        """Build Algolia optionalFilters to boost the user's cluster brands.
+
+        Looks up which clusters the user's preferred brands belong to, then
+        collects all properly-cased brand names from those clusters.  These
+        become optionalFilters — Algolia boosts matching items' ranking
+        without excluding non-matching ones.
+
+        Returns:
+            List of filter strings like ``'brand:"Ba&sh"'``.
+            Empty list if the user has no preferred brands or cluster data.
+        """
+        preferred_brands = user_profile.get("preferred_brands") or []
+        if not preferred_brands:
+            return []
+
+        try:
+            from recs.brand_clusters import get_brand_clusters
+            from scoring.constants.brand_data import BRAND_CLUSTERS
+        except ImportError:
+            return []
+
+        # Find all clusters the user's preferred brands belong to
+        user_cluster_ids: set = set()
+        for brand in preferred_brands:
+            for cid, _conf in get_brand_clusters(brand):
+                user_cluster_ids.add(cid)
+
+        if not user_cluster_ids:
+            return []
+
+        # Collect all properly-cased brand names from those clusters
+        seen: set = set()
+        filters: List[str] = []
+        for cid in user_cluster_ids:
+            for brand in BRAND_CLUSTERS.get(cid, []):
+                key = brand.lower()
+                if key not in seen:
+                    seen.add(key)
+                    filters.append(f'brand:"{brand}"')
+
+        return filters
 
     def _build_algolia_filters(self, request: HybridSearchRequest) -> Optional[str]:
         """Build Algolia filter string from request parameters."""

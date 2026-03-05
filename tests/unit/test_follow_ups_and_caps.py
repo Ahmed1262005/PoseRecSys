@@ -91,7 +91,7 @@ class TestSearchScoringCaps:
         assert SESSION_SKIP_PENALTY == -0.08
 
     def test_profile_scorer_uses_search_caps(self, reranker):
-        """ProfileScorer in reranker should use +/-0.10 caps, not feed caps."""
+        """ProfileScorer in reranker should use +0.20 cap (moderate personalization)."""
         # Create results with a profile that would give max boost
         results = [_make_result("p1", brand="Boohoo")]
         profile = {
@@ -104,22 +104,21 @@ class TestSearchScoringCaps:
 
         reranked = reranker._apply_profile_scoring(results, profile)
 
-        # The profile_adjustment should be capped at +0.10
+        # The profile_adjustment should be capped at +0.20
         adj = reranked[0].get("profile_adjustment", 0)
-        assert adj <= 0.10 + 1e-6, f"Profile adjustment {adj} exceeds search cap of 0.10"
-        # And negative cap should be -0.10 (not -2.0)
-        # We can't easily test negative cap without a strongly mismatched profile,
-        # so just verify the config is correct
+        assert adj <= 0.20 + 1e-6, f"Profile adjustment {adj} exceeds search cap of 0.20"
+        # Verify the config matches what the reranker actually uses
         from scoring.profile_scorer import ProfileScoringConfig
-        # Instantiate the same config the reranker uses
         search_config = ProfileScoringConfig(
-            max_positive=0.10,
-            max_negative=-0.10,
+            max_positive=0.20,
+            max_negative=-1.0,
             coverage_kill_penalty=-1.0,
+            brand_unrelated_penalty=-0.10,
         )
-        assert search_config.max_positive == 0.10
-        assert search_config.max_negative == -0.10
+        assert search_config.max_positive == 0.20
+        assert search_config.max_negative == -1.0
         assert search_config.coverage_kill_penalty == -1.0
+        assert search_config.brand_unrelated_penalty == -0.10
 
     def test_profile_scorer_coverage_kill_preserved(self, reranker):
         """Coverage hard-kill (-1.0) should be preserved even with search caps."""
@@ -141,9 +140,10 @@ class TestSearchScoringCaps:
         """max_negative should be -1.0 (not -0.10) to let coverage kills through."""
         from scoring.profile_scorer import ProfileScoringConfig
         search_config = ProfileScoringConfig(
-            max_positive=0.10,
+            max_positive=0.20,
             max_negative=-1.0,
             coverage_kill_penalty=-1.0,
+            brand_unrelated_penalty=-0.10,
         )
         assert search_config.max_negative == -1.0
         assert search_config.coverage_kill_penalty == -1.0

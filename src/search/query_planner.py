@@ -454,6 +454,49 @@ Example for "mob wife coat" (trend/aesthetic — see Principle 10):
 ]
 ```
 
+**DETAIL-FOCUSED QUERIES — when the user mentions a non-filterable product detail:**
+When the query's KEY distinguishing feature is a specific product detail that has NO structured
+filter (e.g., "zipped pockets", "hidden buttons", "ruched seams", "tie waist", "drawstring hem",
+"patch pockets", "pearl buttons"), the semantic queries must OVERLAP on that detail instead of
+diversifying the garment type. The detail IS the search — varying jacket subtypes misses the point.
+
+Rules for detail queries:
+- ALL 3-4 semantic queries MUST mention the specific detail
+- Vary the PHRASING and VISUAL ANGLE of the detail, NOT the garment type
+- Describe exactly what the detail LOOKS like from different perspectives
+- Include close-up descriptions ("visible zipper pulls on front pockets") alongside full-garment
+  descriptions ("jacket with zippered cargo pockets")
+- The more specific and overlapping the descriptions, the better — products matched by 3+ of
+  these queries are far more likely to actually have the detail
+
+Example for "jacket with zipped pockets":
+```json
+"semantic_queries": [
+  "jacket with visible zippered pockets on the front, metal zipper pulls on pocket closures",
+  "outerwear with zip-closure cargo pockets, functional zippered pocket flaps",
+  "jacket featuring multiple zippered pockets with exposed zipper hardware, utility style",
+  "coat with zipper pocket details, secure zip-up pockets on chest and sides"
+]
+```
+
+Example for "dress with ruched sides":
+```json
+"semantic_queries": [
+  "dress with gathered ruched fabric along the sides, textured side seam draping",
+  "bodycon dress with side ruching creating figure-flattering gathered texture",
+  "fitted dress featuring ruched side panels, cinched draped fabric at the waist"
+]
+```
+
+Example for "blouse with pearl buttons":
+```json
+"semantic_queries": [
+  "blouse with decorative pearl buttons down the front placket, elegant button detail",
+  "feminine top featuring small pearl button closures, classic pearl-buttoned shirt",
+  "button-up blouse with visible round pearl buttons, refined polished detailing"
+]
+```
+
 If you can only think of one meaningful angle, set semantic_queries to [semantic_query].
 
 ## SECTION 7: PRICE, BRAND, INTENT

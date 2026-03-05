@@ -166,6 +166,14 @@ def create_app(
         logger.info("Mounted search routes: /api/search/*")
     except ImportError as e:
         logger.warning(f"Could not load search router: {e}")
+
+    # POSE Canvas (inspiration management + style extraction)
+    try:
+        from canvas.routes import router as canvas_router
+        app.include_router(canvas_router)
+        logger.info("Mounted canvas routes: /api/canvas/*")
+    except ImportError as e:
+        logger.warning(f"Could not load canvas router: {e}")
     
     # =========================================================================
     # Static Files

@@ -1605,6 +1605,49 @@ def _apply_category_ranking(
 
 
 # ---------------------------------------------------------------------------
+# JUDGE POSITION PENALTY (v3.3)
+# ---------------------------------------------------------------------------
+
+# Max TATTOO penalty for the item the judge ranked last.  Calibrated so
+# that bottom-ranked items fall below MMR's quality_floor (0.08) relative
+# to the judge's top pick, preventing MMR diversity from rescuing items
+# the stylist explicitly ranked poorly.
+_JUDGE_POSITION_MAX_PENALTY: float = 0.10
+
+
+def _apply_judge_position_penalty(
+    scored: List[Dict], n_ranked: int,
+) -> None:
+    """Penalise TATTOO scores based on judge ranking position.
+
+    Linear penalty from 0 (judge's #1) to ``_JUDGE_POSITION_MAX_PENALTY``
+    (judge's last pick).  Modifies entries *in-place*.
+
+    Items beyond ``n_ranked`` (e.g. AVIF-filtered candidates that the
+    judge never saw) receive the **full** max penalty — the judge
+    couldn't vouch for them, so they shouldn't get a free pass through
+    MMR diversity selection.
+
+    This ensures MMR's greedy diversity selection respects the judge's
+    ordering instead of rescuing items the judge ranked poorly (or never
+    evaluated) just because they are visually "different".
+    """
+    if n_ranked <= 1:
+        return
+    # Ranked items: linear penalty by position
+    for i, entry in enumerate(scored[:n_ranked]):
+        frac = i / (n_ranked - 1)
+        penalty = _JUDGE_POSITION_MAX_PENALTY * frac
+        entry["tattoo"] -= penalty
+        entry["judge_position_adj"] = round(-penalty, 4)
+
+    # Unranked items (AVIF-filtered, invalid URL, etc.): max penalty
+    for entry in scored[n_ranked:]:
+        entry["tattoo"] -= _JUDGE_POSITION_MAX_PENALTY
+        entry["judge_position_adj"] = round(-_JUDGE_POSITION_MAX_PENALTY, 4)
+
+
+# ---------------------------------------------------------------------------
 # GREEDY DIVERSE SELECTION (MMR-style)
 # ---------------------------------------------------------------------------
 
@@ -2760,6 +2803,7 @@ class OutfitEngine:
                 "avoids": True,
                 "stylist_judge": get_pair_judge() is not None,
                 "outfit_ranking": outfit_ranked,
+                "judge_notes": self._collect_judge_notes(),
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -3274,9 +3318,12 @@ class OutfitEngine:
 
             if ranking:
                 top_k = _apply_category_ranking(top_k, ranking)
+                _apply_judge_position_penalty(top_k, len(ranking))
+                self._tag_judge_note(target_broad)
                 logger.info(
-                    "Stylist rerank applied: top=%s of %d candidates",
+                    "Stylist rerank applied: top=%s of %d candidates (position penalty up to %.2f)",
                     ranking[0][:12] if ranking else "?", len(top_k),
+                    _JUDGE_POSITION_MAX_PENALTY,
                 )
 
             scored = top_k + rest
@@ -3306,6 +3353,34 @@ class OutfitEngine:
             scored = kept + overflow
 
         return scored
+
+    # ------------------------------------------------------------------
+    # Internal: judge note collection
+    # ------------------------------------------------------------------
+
+    def _collect_judge_notes(self) -> Dict[str, Any]:
+        """Read and clear judge notes for inclusion in scoring_info."""
+        judge = get_pair_judge()
+        if not judge:
+            return {}
+        notes: Dict[str, Any] = {}
+        if judge.last_category_notes:
+            notes["category_notes"] = list(judge.last_category_notes)
+            judge.last_category_notes.clear()
+        if judge.last_outfit_note:
+            notes["outfit_note"] = judge.last_outfit_note
+            judge.last_outfit_note = ""
+        return notes
+
+    def _tag_judge_note(self, category: str) -> None:
+        """Tag the most recent judge note with its category name."""
+        judge = get_pair_judge()
+        if not judge or not judge.last_category_notes:
+            return
+        # The last entry is the one just added — replace raw string with dict
+        last = judge.last_category_notes[-1]
+        if isinstance(last, str):
+            judge.last_category_notes[-1] = {"category": category, "note": last}
 
     # ------------------------------------------------------------------
     # Internal: response formatting

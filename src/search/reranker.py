@@ -8,7 +8,8 @@ Scoring components (shared with the feed pipeline):
 - ProfileScorer:  11-dimension attribute-driven scoring (brand clusters,
   style, formality, fit/sleeve/length/neckline/rise, type, pattern,
   occasion, color-avoid, price, coverage hard-kills, category boosts).
-  Search uses LIGHT positive cap (+0.10) vs feed (+0.50).
+  Search uses MODERATE positive cap (+0.20) vs feed (+0.50).
+  Brand unrelated penalty: -0.10 (vs default -0.05).
   Negative cap is -1.0 to allow coverage hard-kills through.
 - ContextScorer:  age-affinity + weather/season scoring.
   Search uses reduced weight (0.20) vs feed (1.0).
@@ -286,14 +287,19 @@ class SessionReranker:
         """
         try:
             from scoring.profile_scorer import ProfileScorer, ProfileScoringConfig
-            # Search uses light personalization: +0.10 positive cap
-            # (feed uses +0.50/-2.0). max_negative must allow coverage
-            # hard-kill (-1.0) to pass through — personality penalties
-            # won't exceed -0.10 anyway since individual weights are small.
+            # Search uses moderate personalization: +0.20 positive cap
+            # (feed uses +0.50/-2.0). Raised from +0.10 to let multi-
+            # dimension matches (brand + style + occasion) differentiate
+            # from single-dimension hits — critical for cluster-aware
+            # ranking where preferred-brand items need a meaningful edge.
+            # max_negative allows coverage hard-kill (-1.0) through.
+            # brand_unrelated_penalty raised to -0.10 to more effectively
+            # demote brands outside the user's cluster.
             search_config = ProfileScoringConfig(
-                max_positive=0.10,
+                max_positive=0.20,
                 max_negative=-1.0,
                 coverage_kill_penalty=-1.0,
+                brand_unrelated_penalty=-0.10,
             )
             scorer = ProfileScorer(config=search_config)
             scorer.score_items(results, profile, score_field="rrf_score")

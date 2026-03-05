@@ -454,6 +454,10 @@ class StylistJudge:
         self._cache_order: List[str] = []
         self._cache_lock = threading.Lock()
 
+        # Last notes from judge calls (read by engine for scoring_info)
+        self.last_category_notes: List[str] = []
+        self.last_outfit_note: str = ""
+
         logger.info(
             "StylistJudge initialized: model=%s, detail=%s, timeout=%.1fs",
             model, detail, timeout,
@@ -591,6 +595,7 @@ class StylistJudge:
                         note = json.loads(content).get("note", "")
                     except Exception:
                         pass
+                    self.last_category_notes.append(note)
                     logger.info(
                         "Stylist rerank: %.1fs, top=%s, note=%s",
                         elapsed, ranking[0][:12] if ranking else "?",
@@ -730,6 +735,7 @@ class StylistJudge:
                     note = json.loads(content).get("note", "")
                 except Exception:
                     pass
+                self.last_outfit_note = note
                 logger.info(
                     "Outfit ranking: %.1fs, result=%s, note=%s",
                     elapsed, ranking, note[:80],
