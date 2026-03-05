@@ -67,7 +67,7 @@ from integrations.pinterest_style import (
 # Constants
 # ---------------------------------------------------------------------------
 CALLBACK_PORT = int(os.getenv("PINTEREST_CALLBACK_PORT", "7861"))
-GRADIO_PORT = int(os.getenv("CANVAS_GRADIO_PORT", "7862"))
+GRADIO_PORT = int(os.getenv("CANVAS_GRADIO_PORT", "7860"))
 DEFAULT_USER_ID = "c9eefa63-e152-4515-aff7-4a528a5d9523"
 
 # ---------------------------------------------------------------------------
@@ -557,6 +557,43 @@ def _get_inspiration_choices(user_id: str) -> List[str]:
         return []
 
 
+def _get_inspiration_preview(user_id: str, selection: str) -> str:
+    """Fetch the selected inspiration's image and render an HTML preview."""
+    if not selection or not selection.strip():
+        return ""
+
+    inspiration_id = _parse_inspiration_id(selection)
+    try:
+        sb = _get_sb()
+        result = (
+            sb.table("user_inspirations")
+            .select("image_url, title, style_label")
+            .eq("id", inspiration_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return '<span class="status-warn">Inspiration not found</span>'
+
+        row = rows[0]
+        image_url = row.get("image_url") or ""
+        title = row.get("title") or "Untitled"
+        label = row.get("style_label") or "?"
+
+        return (
+            f'<div style="text-align:center;">'
+            f'<img src="{_esc(image_url)}" '
+            f'style="max-height:300px;border-radius:12px;object-fit:cover;">'
+            f'<p style="margin-top:8px;font-size:13px;color:#6b7280;">'
+            f'{_esc(title)} &mdash; '
+            f'<span class="label-style card-label">{_esc(label)}</span></p>'
+            f'</div>'
+        )
+    except Exception as exc:
+        return f'<span class="status-err">{_esc(str(exc))}</span>'
+
+
 # ============================================================================
 # Tab 4 — Style Elements
 # ============================================================================
@@ -1000,9 +1037,15 @@ def build_app() -> gr.Blocks:
                 )
                 sim_btn = gr.Button("Find Similar", variant="primary", size="lg")
 
+            sim_preview = gr.HTML(label="Selected Inspiration")
             sim_html = gr.HTML()
             sim_stats = gr.Code(label="Details", language="json")
 
+            sim_id.change(
+                fn=_get_inspiration_preview,
+                inputs=[user_id, sim_id],
+                outputs=[sim_preview],
+            )
             sim_btn.click(
                 fn=find_similar,
                 inputs=[user_id, sim_id, sim_count],
@@ -1035,6 +1078,8 @@ def build_app() -> gr.Blocks:
                 )
                 fit_btn = gr.Button("Complete the Fit", variant="primary", size="lg")
 
+            fit_preview = gr.HTML(label="Selected Inspiration")
+
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("#### Closest Product")
@@ -1045,6 +1090,11 @@ def build_app() -> gr.Blocks:
 
             fit_stats = gr.Code(label="Pipeline Stats", language="json")
 
+            fit_id.change(
+                fn=_get_inspiration_preview,
+                inputs=[user_id, fit_id],
+                outputs=[fit_preview],
+            )
             fit_btn.click(
                 fn=complete_fit,
                 inputs=[user_id, fit_id],
