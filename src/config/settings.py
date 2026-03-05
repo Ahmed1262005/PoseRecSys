@@ -215,6 +215,22 @@ class Settings(BaseSettings):
         default=True,
         description="Request continuous refresh tokens when exchanging/refreshing"
     )
+
+    # ==========================================================================
+    # POSE Canvas
+    # ==========================================================================
+    canvas_storage_bucket: str = Field(
+        default="inspirations",
+        description="Supabase Storage bucket for uploaded inspiration images"
+    )
+    canvas_max_inspirations: int = Field(
+        default=50,
+        description="Maximum inspiration images per user"
+    )
+    canvas_style_nearest_k: int = Field(
+        default=20,
+        description="Number of nearest products used for style classification"
+    )
     
     # ==========================================================================
     # Algolia Search Configuration
@@ -242,23 +258,27 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
-    # Vision Judge (Complete the Fit v3 — pass/fail image filter)
+    # Stylist Judge (Complete the Fit v3.3 — ranking-based reranker)
     # ==========================================================================
     llm_judge_enabled: bool = Field(
         default=True,
-        description="Enable vision judge for outfit filtering (falls back to TATTOO-only if disabled)"
+        description="Enable stylist judge for outfit reranking (falls back to TATTOO-only if disabled)"
     )
     llm_judge_model: str = Field(
-        default="gpt-4o-mini",
-        description="OpenAI vision model for outfit visual clash detection"
+        default="gpt-4.1",
+        description="OpenAI vision model for stylist-quality outfit ranking"
     )
     llm_judge_timeout: float = Field(
-        default=20.0,
-        description="Timeout for vision judge call in seconds"
+        default=30.0,
+        description="Timeout for stylist judge call in seconds"
     )
     llm_judge_top_k: int = Field(
-        default=10,
-        description="Number of top TATTOO candidates to send to vision judge per category"
+        default=16,
+        description="Number of top TATTOO candidates to send to stylist judge per category"
+    )
+    llm_judge_detail: str = Field(
+        default="auto",
+        description="Image detail level for vision API (auto, low, high)"
     )
 
     # ==========================================================================

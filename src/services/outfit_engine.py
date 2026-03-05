@@ -1574,6 +1574,37 @@ def _apply_outfit_ranking(
 
 
 # ---------------------------------------------------------------------------
+# PER-CATEGORY RANKING APPLICATION (v3.3)
+# ---------------------------------------------------------------------------
+
+def _apply_category_ranking(
+    scored: List[Dict], ranking: List[str],
+) -> List[Dict]:
+    """Reorder scored entries to match LLM ranking (best-first product IDs).
+
+    Items not in the ranking keep their TATTOO order at the end.
+    Returns a new list — does not mutate the input.
+    """
+    pid_to_entry = {e["profile"].product_id: e for e in scored}
+    result: List[Dict] = []
+    used: set = set()
+
+    # Place ranked items first (in LLM order)
+    for pid in ranking:
+        if pid in pid_to_entry and pid not in used:
+            result.append(pid_to_entry[pid])
+            used.add(pid)
+
+    # Append unranked items (preserve TATTOO order)
+    for e in scored:
+        pid = e["profile"].product_id
+        if pid not in used:
+            result.append(e)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GREEDY DIVERSE SELECTION (MMR-style)
 # ---------------------------------------------------------------------------
 
@@ -2723,11 +2754,11 @@ class OutfitEngine:
                 "dimensions": 8,
                 "fusion": ("0.70*compat + 0.30*cosine + profile + avoids + style_adj" if personalized
                            else "0.70*compat + 0.30*cosine + avoids + style_adj"),
-                "engine": "tattoo_v3.2" if outfit_ranked else ("tattoo_v3.1" if get_pair_judge() else "tattoo_v2.3"),
+                "engine": "tattoo_v3.3" if outfit_ranked else ("tattoo_v3.3_cat" if get_pair_judge() else "tattoo_v2.3"),
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
                 "avoids": True,
-                "vision_judge": get_pair_judge() is not None,
+                "stylist_judge": get_pair_judge() is not None,
                 "outfit_ranking": outfit_ranked,
             },
             "complete_outfit": {
@@ -3215,41 +3246,40 @@ class OutfitEngine:
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
 
-        # --- Vision judge filter (v3) ---
-        # Take top K by tattoo, send images to gpt-4o-mini, remove clashes.
-        # TATTOO ranking preserved — no score blending. Pure pass/fail.
-        # Graceful: if judge is None or fails, all candidates kept.
+        # --- Stylist reranker (v3.3) ---
+        # Take top K by TATTOO, send images to GPT-4.1, get full ranking.
+        # LLM returns best-to-worst ordering; items ranked low fall below
+        # the 4-item cutoff naturally instead of being deleted.
+        # Graceful: if judge is None or fails, TATTOO order preserved.
         judge = get_pair_judge()
         if judge and scored:
             try:
                 from config.settings import get_settings
                 _js = get_settings()
-                top_k_n = getattr(_js, "llm_judge_top_k", 10)
+                top_k_n = getattr(_js, "llm_judge_top_k", 16)
             except Exception:
-                top_k_n = 10
+                top_k_n = 16
 
             intent = derive_fit_intent(source)
             top_k = scored[:top_k_n]
             rest = scored[top_k_n:]
 
             try:
-                fail_ids = judge.judge_batch(
+                ranking = judge.rerank_category(
                     source, [s["profile"] for s in top_k], intent,
                 )
             except Exception as e:
-                logger.warning("Vision judge failed, keeping all: %s", e)
-                fail_ids = set()
+                logger.warning("Stylist rerank failed, keeping TATTOO order: %s", e)
+                ranking = None
 
-            if fail_ids:
+            if ranking:
+                top_k = _apply_category_ranking(top_k, ranking)
                 logger.info(
-                    "Vision judge removed %d/%d candidates: %s",
-                    len(fail_ids), len(top_k), fail_ids,
+                    "Stylist rerank applied: top=%s of %d candidates",
+                    ranking[0][:12] if ranking else "?", len(top_k),
                 )
-                for entry in top_k:
-                    if entry["profile"].product_id in fail_ids:
-                        entry["vision_fail"] = True
-                top_k = [e for e in top_k if not e.get("vision_fail")]
-                scored = top_k + rest
+
+            scored = top_k + rest
 
         # --- Greedy diverse selection (MMR-style) ---
         # Ensures the final list has visual variety: each next pick must

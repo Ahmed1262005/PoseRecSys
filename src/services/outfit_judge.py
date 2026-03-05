@@ -1,21 +1,28 @@
 """
-Vision-Based Pass/Fail Judge for Complete the Fit v3
-=====================================================
+Stylist Ranking Judge for Complete the Fit v3.3
+================================================
 
-Sends source + candidate product images to gpt-4o-mini vision and asks
-which candidates visually CLASH with the source for the given occasion.
-Operates as a post-TATTOO filter: TATTOO ranks, vision judge vetoes.
+GPT-4.1 multimodal judge that operates as a **fashion critic**, not a
+compatibility filter.  Replaces the v3.0 pass/fail VisionJudge.
 
-Components:
-  - FitIntent: derived from source product, provides minimal text context
-  - derive_fit_intent(): source AestheticProfile -> FitIntent
-  - VisionJudge: singleton OpenAI client with bounded LRU cache
-  - get_pair_judge(): thread-safe singleton accessor
+Two judging stages:
+  1. **Per-category reranking** — ``rerank_category()``:
+     Takes source image + top 16 TATTOO candidates.  Returns a full
+     ranked ordering from best to worst outfit pairing.
+
+  2. **Outfit composition ranking** — ``rank_outfits()``:
+     Takes source image + top 6 complete outfit combos (all categories).
+     Returns best-to-worst ranking by overall styling quality.
+
+Key design principles:
+  - Images > text.  Attributes lie; images don't.
+  - "Would a stylist build this outfit?" not "Can this work?"
+  - Penalise catalog-safe/boring pairings, reward intentional styling.
+  - Graceful degradation: if LLM fails → keep TATTOO order.
 
 Integration:
-  Called from outfit_engine._score_category() after TATTOO scoring.
-  Returns set of product IDs that should be removed (visual clashes).
-  No score blending — TATTOO ranking is preserved for passing candidates.
+  Called from outfit_engine._score_category() and build_outfit() after
+  TATTOO scoring.  Reorders candidates instead of removing them.
 """
 
 import hashlib
@@ -38,7 +45,9 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 _VALID_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
-_IMAGE_FORMAT_PARAMS = frozenset({"fmt=jpeg", "fmt=jpg", "fmt=png", "fmt=webp", "fmt=gif"})
+_IMAGE_FORMAT_PARAMS = frozenset({
+    "fmt=jpeg", "fmt=jpg", "fmt=png", "fmt=webp", "fmt=gif",
+})
 
 
 def _is_valid_image_url(url: str) -> bool:
@@ -54,21 +63,16 @@ def _is_valid_image_url(url: str) -> bool:
     """
     if not url or not url.startswith("http"):
         return False
-    # Strip fragment (e.g. #main) and query string for extension check
     parsed = urlparse(url)
     path = parsed.path.lower()
-    # Reject known non-image pages
     if path.endswith((".html", ".htm", ".php", ".asp", ".aspx")):
         return False
-    # Accept known image extensions
     for ext in _VALID_IMAGE_EXTENSIONS:
         if path.endswith(ext):
             return True
-    # Accept dynamic image CDNs with explicit format params
     query = (parsed.query or "").lower()
     if any(p in query for p in _IMAGE_FORMAT_PARAMS):
         return True
-    # Accept S3 / CloudFront URLs (our own product images)
     host = parsed.hostname or ""
     if "s3." in host or "cloudfront" in host:
         return True
@@ -112,12 +116,10 @@ class FitIntent:
     warmth_target: str              # hot | mild | cold | any
 
     def cache_key(self) -> str:
-        """Short hash for cache keying."""
         raw = f"{self.occasion_target}:{self.silhouette_intent}:{self.vibe}:{self.warmth_target}"
         return hashlib.md5(raw.encode()).hexdigest()[:8]
 
     def context_line(self) -> str:
-        """One-line text context for the vision prompt."""
         return (
             f"Source: {self.occasion_target} {self.source_category.lower()}. "
             f"Building a {self.occasion_target} outfit with {self.vibe} style."
@@ -126,14 +128,15 @@ class FitIntent:
 
 def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
     """Derive outfit intent from a source product's AestheticProfile."""
-    # Occasion target
     occasion_counts: Dict[str, int] = {}
     for occ in (source.occasions or []):
         bucket = _OCCASION_TO_BUCKET.get(occ.lower().strip(), "casual")
         occasion_counts[bucket] = occasion_counts.get(bucket, 0) + 1
-    occasion_target = max(occasion_counts, key=lambda k: occasion_counts[k]) if occasion_counts else "casual"
+    occasion_target = (
+        max(occasion_counts, key=lambda k: occasion_counts[k])
+        if occasion_counts else "casual"
+    )
 
-    # Silhouette intent
     sil = (source.silhouette or "").lower().strip()
     l1 = (source.gemini_category_l1 or "").lower().strip()
     if sil in _OVERSIZED_SILS:
@@ -145,13 +148,8 @@ def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
     else:
         silhouette_intent = "balanced"
 
-    # Vibe
     vibe = (source.primary_style or "casual").lower().strip()
-
-    # Source category
     source_category = source.gemini_category_l2 or source.category or "item"
-
-    # Warmth target
     warmth_target = source.temp_band or "mild"
 
     return FitIntent(
@@ -164,98 +162,120 @@ def derive_fit_intent(source: "AestheticProfile") -> FitIntent:
 
 
 # =============================================================================
-# 2. PROMPT
+# 2. PROMPTS — fashion critic, not compatibility checker
 # =============================================================================
 
-_SYSTEM_PROMPT = (
-    "You are a fashion outfit visual compatibility judge. "
-    "You will see a SOURCE garment image followed by CANDIDATE garment images. "
-    "Your job: identify which candidates would visually CLASH with the source "
-    "when worn together as an outfit.\n\n"
-    "CLASH means:\n"
-    "- Colors that fight each other (e.g. competing neon brights)\n"
-    "- Wildly mismatched formality (gym shorts with a silk blouse)\n"
-    "- Clashing patterns (busy print + busy print)\n"
-    "- Same exact look as the source (redundant, not complementary)\n"
-    "- Textures/fabrics that look wrong together\n\n"
-    "Most candidates should PASS. Only flag clear visual clashes.\n"
-    "When in doubt, PASS. We want to remove bad matches, not be picky.\n\n"
-    "Return ONLY valid JSON: {\"fail\": [\"id_of_clashing_candidate\", ...]}\n"
-    "If all candidates pass, return: {\"fail\": []}"
+_RERANK_SYSTEM_PROMPT = (
+    "You are a professional fashion stylist building outfits for clients. "
+    "You have impeccable taste and high standards. You judge outfit pairings "
+    "the way a Net-a-Porter stylist would — not like a search engine.\n\n"
+    "Your job: rank candidate garments from BEST to WORST for creating a "
+    "cohesive, intentionally styled outfit with the source garment.\n\n"
+    "WHAT MAKES A GREAT PAIRING:\n"
+    "- Clear outfit story (modern classic, elevated casual, chic weekend, etc.)\n"
+    "- Complementary textures/fabrics — knit with denim, silk with structured cotton\n"
+    "- Intentional color palette — not everything matching, but harmonious\n"
+    "- Matching lifestyle and polish level\n"
+    "- Balanced proportions — mix of fitted and relaxed\n"
+    "- Would look deliberately styled in a street-style photo\n\n"
+    "WHAT MAKES A POOR PAIRING:\n"
+    "- Technically compatible but boring/generic (all neutrals, no visual interest)\n"
+    "- Wrong lifestyle context (gym pieces with tailored, loungewear with dressy)\n"
+    "- Same texture/color as source (matchy-matchy, not curated)\n"
+    "- Low fashion credibility — looks accidental, not styled\n"
+    "- Sloppy or mismatched vibe, even if individual pieces are fine\n\n"
+    "IMPORTANT: Prefer STRONG outfits over SAFE outfits. An interesting pairing "
+    "with character beats a generic neutral-on-neutral match every time.\n\n"
+    "Return ONLY valid JSON."
 )
 
-_OUTFIT_RANKING_PROMPT = (
-    "You are a fashion stylist ranking complete outfit combinations. "
-    "You will see a SOURCE garment, then several OUTFIT OPTIONS. "
-    "Each option shows the garments that would complete the outfit.\n\n"
-    "Rank from BEST to WORST. A great outfit has:\n"
-    "- Color story: intentional palette, not everything matching\n"
-    "- Texture contrast: e.g. knit + denim, silk + leather, linen + structured cotton\n"
-    "- Balanced proportions: mix of fitted and relaxed\n"
-    "- Style intent: looks deliberately styled, not randomly safe\n\n"
-    "A mediocre outfit:\n"
-    "- Everything the same color/texture (boring)\n"
+_OUTFIT_RANKING_SYSTEM_PROMPT = (
+    "You are a professional fashion stylist reviewing complete outfit options "
+    "for a client. You have the eye of a Vogue editor — you can instantly "
+    "tell which outfit tells the best style story.\n\n"
+    "WHAT MAKES THE BEST OUTFIT:\n"
+    "- Tells a clear style story — you can name the vibe in one phrase\n"
+    "- Has intentional contrast: texture, structure, proportion, or color\n"
+    "- Feels like a stylist curated it, not an algorithm\n"
+    "- Would photograph well as a complete look\n"
+    "- Each piece has a role: anchor, complement, or statement\n\n"
+    "WHAT MAKES A WEAK OUTFIT:\n"
+    "- Everything the same color/texture/vibe (boring, no dimension)\n"
+    "- Pieces that don't relate to each other (random assembly)\n"
     "- All safe neutrals with no visual interest\n"
-    "- Looks like separate items, not a curated outfit\n\n"
-    "Return ONLY valid JSON: {\"ranking\": [3, 1, 2, ...]}\n"
-    "Numbers are outfit indices (1-based), best to worst. Rank ALL outfits."
+    "- Lifestyle clash between any pieces\n"
+    "- Would look like separate items worn together, not a look\n\n"
+    "IMPORTANT: A bold, well-styled outfit always beats a safe, generic one.\n\n"
+    "Return ONLY valid JSON."
 )
 
 
-def build_vision_messages(
+# =============================================================================
+# 3. MESSAGE BUILDERS
+# =============================================================================
+
+def build_rerank_messages(
     source: "AestheticProfile",
     candidates: List["AestheticProfile"],
     intent: FitIntent,
+    detail: str = "auto",
 ) -> List[Dict[str, Any]]:
-    """Build the OpenAI messages array with images for the vision judge."""
-    # User message content parts: text context + source image + candidate images
+    """Build messages for per-category stylist reranking."""
     content_parts: List[Dict[str, Any]] = []
 
-    # 1. Text context line
+    # 1. Context + source image
     content_parts.append({
         "type": "text",
-        "text": intent.context_line() + "\n\nSOURCE garment:",
+        "text": (
+            f"I need you to style a {intent.occasion_target} outfit.\n\n"
+            f"SOURCE GARMENT (client already owns this — "
+            f"{intent.source_category.lower()}, {intent.vibe} style):"
+        ),
     })
-
-    # 2. Source image
     source_url = source.image_url or ""
     if _is_valid_image_url(source_url):
         content_parts.append({
             "type": "image_url",
-            "image_url": {"url": source_url, "detail": "low"},
+            "image_url": {"url": source_url, "detail": detail},
         })
 
-    # 3. Candidate images with IDs
+    # 2. Candidate images with IDs
     content_parts.append({
         "type": "text",
-        "text": "\nCANDIDATE garments to evaluate:",
+        "text": (
+            "\nCANDIDATE PIECES to pair with the source "
+            f"({len(candidates)} options):"
+        ),
     })
-
     for i, cand in enumerate(candidates):
         cand_url = cand.image_url or ""
         cand_id = cand.product_id or f"cand_{i}"
         content_parts.append({
             "type": "text",
-            "text": f"\nCandidate {cand_id}:",
+            "text": f"\n{cand_id}:",
         })
         if _is_valid_image_url(cand_url):
             content_parts.append({
                 "type": "image_url",
-                "image_url": {"url": cand_url, "detail": "low"},
+                "image_url": {"url": cand_url, "detail": detail},
             })
 
-    # 4. Final instruction
+    # 3. Instruction
     content_parts.append({
         "type": "text",
         "text": (
-            "\n\nWhich candidates visually CLASH with the source for "
-            f"a {intent.occasion_target} outfit? Return JSON: "
-            '{"fail": ["id1", "id2", ...]} or {"fail": []} if all pass.'
+            "\n\nRank ALL candidates from BEST to WORST for building a "
+            f"stylish {intent.occasion_target} outfit with the source.\n"
+            "Consider: lifestyle match, outfit polish, silhouette balance, "
+            "color harmony, fabric coherence, and whether the pairing feels "
+            "intentional.\n\n"
+            'Return JSON: {"ranking": ["best_id", "second_id", ...], '
+            '"note": "one sentence on why the top pick works"}'
         ),
     })
 
     return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
         {"role": "user", "content": content_parts},
     ]
 
@@ -264,30 +284,31 @@ def build_outfit_ranking_messages(
     source: "AestheticProfile",
     outfits: List[Dict[str, "AestheticProfile"]],
     intent: FitIntent,
+    detail: str = "auto",
 ) -> List[Dict[str, Any]]:
-    """Build OpenAI messages to rank complete outfit combinations.
-
-    Each outfit is a dict mapping category -> AestheticProfile.
-    The judge sees the source image + all pieces for each outfit option.
-    """
+    """Build messages for complete outfit composition ranking."""
     content_parts: List[Dict[str, Any]] = []
 
     # 1. Context + source image
     content_parts.append({
         "type": "text",
-        "text": intent.context_line() + "\n\nSOURCE garment (already owned):",
+        "text": (
+            f"Review these complete outfit options for a "
+            f"{intent.occasion_target} look.\n\n"
+            "SOURCE GARMENT (client's piece):"
+        ),
     })
     source_url = source.image_url or ""
     if _is_valid_image_url(source_url):
         content_parts.append({
             "type": "image_url",
-            "image_url": {"url": source_url, "detail": "low"},
+            "image_url": {"url": source_url, "detail": detail},
         })
 
     # 2. Each outfit option
     content_parts.append({
         "type": "text",
-        "text": "\nHere are the outfit options to complete the look:",
+        "text": "\nCOMPLETE OUTFIT OPTIONS:",
     })
     for i, outfit in enumerate(outfits, 1):
         content_parts.append({
@@ -303,36 +324,53 @@ def build_outfit_ranking_messages(
                 })
                 content_parts.append({
                     "type": "image_url",
-                    "image_url": {"url": img_url, "detail": "low"},
+                    "image_url": {"url": img_url, "detail": detail},
                 })
 
-    # 3. Final instruction
+    # 3. Instruction
     content_parts.append({
         "type": "text",
         "text": (
             f"\nRank these {len(outfits)} outfits from BEST to WORST styled "
-            "with the source garment. Prefer intentional contrast and styling "
-            "over safe matching. Return JSON: "
-            '{"ranking": [best_idx, ..., worst_idx]} (1-indexed)'
+            "with the source garment. The best outfit tells a clear style "
+            "story with intentional contrast — not just safe matching.\n\n"
+            'Return JSON: {"ranking": [best_idx, ..., worst_idx], '
+            '"note": "why the winner works"}\n'
+            "(indices are 1-based)"
         ),
     })
 
     return [
-        {"role": "system", "content": _OUTFIT_RANKING_PROMPT},
+        {"role": "system", "content": _OUTFIT_RANKING_SYSTEM_PROMPT},
         {"role": "user", "content": content_parts},
     ]
 
 
+# --- Legacy message builders (kept for backward compatibility in tests) ------
+
+def build_vision_messages(
+    source: "AestheticProfile",
+    candidates: List["AestheticProfile"],
+    intent: FitIntent,
+) -> List[Dict[str, Any]]:
+    """Legacy: build pass/fail veto messages. Delegates to rerank builder."""
+    return build_rerank_messages(source, candidates, intent, detail="low")
+
+
 # =============================================================================
-# 3. VISION JUDGE
+# 4. STYLIST JUDGE
 # =============================================================================
 
-class VisionJudge:
-    """Post-TATTOO vision filter that vetoes visually clashing candidates.
+class StylistJudge:
+    """Post-TATTOO stylist ranking judge for Complete the Fit v3.3.
 
-    Singleton — accessed via get_pair_judge().
-    Uses gpt-4o-mini with image inputs.
-    Bounded in-memory LRU cache for results.
+    Replaces the v3.0 VisionJudge pass/fail filter with a full
+    ranking-based approach.  Uses GPT-4.1 multimodal to reorder
+    candidates by outfit styling quality.
+
+    Singleton — accessed via ``get_pair_judge()``.
+    Bounded in-memory LRU cache for ranking results.
+    Graceful degradation: if LLM fails → preserve TATTOO order.
     """
 
     _CACHE_SIZE = 256
@@ -340,23 +378,26 @@ class VisionJudge:
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
-        timeout: float = 20.0,
+        model: str = "gpt-4.1",
+        timeout: float = 30.0,
         max_retries: int = 1,
+        detail: str = "auto",
     ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key)
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+        self.detail = detail
 
-        self._cache: Dict[str, bool] = {}     # key -> True means FAIL
+        # Cache stores ranking lists keyed on source+candidates+intent
+        self._cache: Dict[str, List[str]] = {}
         self._cache_order: List[str] = []
         self._cache_lock = threading.Lock()
 
         logger.info(
-            "VisionJudge initialized: model=%s, timeout=%.1fs, cache_size=%d",
-            model, timeout, self._CACHE_SIZE,
+            "StylistJudge initialized: model=%s, detail=%s, timeout=%.1fs",
+            model, detail, timeout,
         )
 
     # ------------------------------------------------------------------
@@ -364,14 +405,18 @@ class VisionJudge:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_cache_key(source_pid: str, cand_pid: str, intent_hash: str) -> str:
-        return f"{source_pid}:{cand_pid}:{intent_hash}"
+    def _make_ranking_cache_key(
+        source_pid: str, cand_pids: List[str], intent_hash: str,
+    ) -> str:
+        cand_str = ",".join(sorted(cand_pids))
+        raw = f"{source_pid}:{cand_str}:{intent_hash}"
+        return hashlib.md5(raw.encode()).hexdigest()[:16]
 
-    def _cache_get(self, key: str) -> Optional[bool]:
+    def _cache_get(self, key: str) -> Optional[List[str]]:
         with self._cache_lock:
             return self._cache.get(key)
 
-    def _cache_put(self, key: str, value: bool) -> None:
+    def _cache_put(self, key: str, value: List[str]) -> None:
         with self._cache_lock:
             if key in self._cache:
                 return
@@ -382,102 +427,80 @@ class VisionJudge:
             self._cache_order.append(key)
 
     # ------------------------------------------------------------------
-    # Main API
+    # Per-category reranking
     # ------------------------------------------------------------------
 
-    def judge_batch(
+    def rerank_category(
         self,
         source: "AestheticProfile",
         candidates: List["AestheticProfile"],
         intent: FitIntent,
-    ) -> Set[str]:
-        """Evaluate candidates visually against source.
+    ) -> Optional[List[str]]:
+        """Rank candidates by outfit styling quality with the source.
 
-        Returns set of product IDs that FAIL (should be removed).
-        On LLM failure, returns empty set (graceful degradation = keep all).
+        Args:
+            source: the source product
+            candidates: top-N TATTOO candidates (with images)
+            intent: derived fit intent
+
+        Returns:
+            Ordered list of product IDs (best first),
+            or None if ranking fails (preserve TATTOO order).
         """
         if not candidates:
-            return set()
+            return None
 
-        # Pre-filter: skip if source image is invalid (would fail entire call)
+        # Pre-filter: skip if source image is invalid
         source_url = source.image_url or ""
         if not _is_valid_image_url(source_url):
             logger.warning(
-                "Vision judge: source %s has invalid image URL, skipping",
+                "Stylist rerank: source %s has invalid image URL, skipping",
                 source.product_id,
             )
-            return set()
+            return None
 
         # Pre-filter: only send candidates with valid image URLs
-        valid_candidates = [c for c in candidates if _is_valid_image_url(c.image_url or "")]
-        if len(valid_candidates) < len(candidates):
+        valid = [c for c in candidates if _is_valid_image_url(c.image_url or "")]
+        skipped = len(candidates) - len(valid)
+        if skipped:
             logger.info(
-                "Vision judge: filtered %d/%d candidates with invalid image URLs",
-                len(candidates) - len(valid_candidates), len(candidates),
+                "Stylist rerank: filtered %d/%d candidates (invalid URLs)",
+                skipped, len(candidates),
             )
-        if not valid_candidates:
-            return set()
-        candidates = valid_candidates
+        if not valid:
+            return None
 
         source_pid = source.product_id or ""
+        cand_pids = [c.product_id or "" for c in valid]
         intent_hash = intent.cache_key()
 
-        # Separate cached from uncached
-        fail_ids: Set[str] = set()
-        uncached: List["AestheticProfile"] = []
-
-        for cand in candidates:
-            cand_pid = cand.product_id or ""
-            key = self._make_cache_key(source_pid, cand_pid, intent_hash)
-            cached = self._cache_get(key)
-            if cached is not None:
-                if cached:  # True = fail
-                    fail_ids.add(cand_pid)
-            else:
-                uncached.append(cand)
-
-        if not uncached:
-            logger.debug("Vision judge: all %d candidates cached", len(candidates))
-            return fail_ids
-
-        # Log URLs being sent for debugging image format issues
-        logger.info(
-            "Vision judge: source URL=%s",
-            source_url[:120],
-        )
-        for uc in uncached[:3]:
-            logger.info(
-                "Vision judge: candidate %s URL=%s",
-                uc.product_id, (uc.image_url or "")[:120],
-            )
+        # Check cache
+        cache_key = self._make_ranking_cache_key(source_pid, cand_pids, intent_hash)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.debug("Stylist rerank: cache hit for source %s", source_pid)
+            return cached
 
         logger.info(
-            "Vision judge: %d cached, %d to evaluate for source %s",
-            len(candidates) - len(uncached), len(uncached), source_pid,
+            "Stylist rerank: %d candidates for source %s (%s %s)",
+            len(valid), source_pid, intent.occasion_target, intent.vibe,
         )
 
         # Build messages and call LLM
-        messages = build_vision_messages(source, uncached, intent)
-        new_fails = self._call_vision(messages)
+        messages = build_rerank_messages(source, valid, intent, self.detail)
+        ranking = self._call_rerank(messages, cand_pids)
 
-        # Populate cache
-        for cand in uncached:
-            cand_pid = cand.product_id or ""
-            key = self._make_cache_key(source_pid, cand_pid, intent_hash)
-            is_fail = cand_pid in new_fails
-            self._cache_put(key, is_fail)
-            if is_fail:
-                fail_ids.add(cand_pid)
+        if ranking is not None:
+            self._cache_put(cache_key, ranking)
 
-        return fail_ids
+        return ranking
 
-    # ------------------------------------------------------------------
-    # Vision call (with retry)
-    # ------------------------------------------------------------------
+    def _call_rerank(
+        self, messages: List[Dict], cand_pids: List[str],
+    ) -> Optional[List[str]]:
+        """Call LLM and parse category ranking response.
 
-    def _call_vision(self, messages: List[Dict]) -> Set[str]:
-        """Call OpenAI vision API and parse the fail list.
-        On failure returns empty set (graceful degradation = keep all).
+        Returns ordered list of product IDs, or None on failure.
         """
         for attempt in range(1 + self.max_retries):
             try:
@@ -487,47 +510,78 @@ class VisionJudge:
                     messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0.0,
-                    max_tokens=500,
+                    max_tokens=800,
                     timeout=self.timeout,
                 )
                 elapsed = _time.monotonic() - t0
                 content = response.choices[0].message.content or ""
-                fails = self._parse_response(content)
-                logger.info(
-                    "Vision judge call: %.1fs, %d fails",
-                    elapsed, len(fails),
-                )
-                return fails
+                ranking = self._parse_rerank_response(content, cand_pids)
+                if ranking:
+                    note = ""
+                    try:
+                        note = json.loads(content).get("note", "")
+                    except Exception:
+                        pass
+                    logger.info(
+                        "Stylist rerank: %.1fs, top=%s, note=%s",
+                        elapsed, ranking[0][:12] if ranking else "?",
+                        note[:80],
+                    )
+                return ranking
             except Exception as e:
                 logger.warning(
-                    "Vision judge call failed (attempt %d/%d): %s",
+                    "Stylist rerank failed (attempt %d/%d): %s",
                     attempt + 1, 1 + self.max_retries, e,
                 )
                 if attempt < self.max_retries:
-                    _time.sleep(2.0 * (attempt + 1))
+                    _time.sleep(1.5 * (attempt + 1))
 
-        logger.error("Vision judge: all attempts failed, keeping all candidates")
-        return set()
+        logger.error("Stylist rerank: all attempts failed, keeping TATTOO order")
+        return None
 
     @staticmethod
-    def _parse_response(content: str) -> Set[str]:
-        """Parse LLM JSON response into set of fail IDs."""
+    def _parse_rerank_response(
+        content: str, cand_pids: List[str],
+    ) -> Optional[List[str]]:
+        """Parse LLM ranking response into ordered list of product IDs."""
         try:
             data = json.loads(content)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Vision judge: invalid JSON: %.200s", content)
-            return set()
+            logger.warning("Stylist rerank: invalid JSON: %.200s", content)
+            return None
 
-        if isinstance(data, dict):
-            fail_list = data.get("fail", [])
-            if isinstance(fail_list, list):
-                return {str(x) for x in fail_list if x}
+        if not isinstance(data, dict):
+            logger.warning("Stylist rerank: not a dict: %.200s", content)
+            return None
 
-        logger.warning("Vision judge: unexpected structure: %.200s", content)
-        return set()
+        ranking_raw = data.get("ranking", [])
+        if not isinstance(ranking_raw, list) or not ranking_raw:
+            logger.warning("Stylist rerank: no ranking list: %.200s", content)
+            return None
+
+        # Build ordered list, matching IDs to known candidates
+        pid_set = set(cand_pids)
+        ordered: List[str] = []
+        seen: Set[str] = set()
+        for item in ranking_raw:
+            pid = str(item).strip()
+            if pid in pid_set and pid not in seen:
+                ordered.append(pid)
+                seen.add(pid)
+
+        if not ordered:
+            logger.warning("Stylist rerank: no matching IDs in ranking")
+            return None
+
+        # Append any candidates not mentioned (preserve TATTOO order for those)
+        for pid in cand_pids:
+            if pid not in seen:
+                ordered.append(pid)
+
+        return ordered
 
     # ------------------------------------------------------------------
-    # Outfit-level ranking
+    # Outfit-level composition ranking
     # ------------------------------------------------------------------
 
     def rank_outfits(
@@ -536,12 +590,7 @@ class VisionJudge:
         outfits: List[Dict[str, "AestheticProfile"]],
         intent: FitIntent,
     ) -> Optional[List[int]]:
-        """Rank complete outfit combinations by visual styling quality.
-
-        Args:
-            source: the source product (already owned)
-            outfits: list of outfit combos, each mapping category -> AestheticProfile
-            intent: derived fit intent for prompt context
+        """Rank complete outfit combinations by styling quality.
 
         Returns:
             0-indexed list of outfit indices ordered best->worst,
@@ -550,7 +599,6 @@ class VisionJudge:
         if len(outfits) <= 1:
             return None
 
-        # Pre-filter: skip if source image is invalid
         source_url = source.image_url or ""
         if not _is_valid_image_url(source_url):
             logger.warning(
@@ -559,24 +607,25 @@ class VisionJudge:
             )
             return None
 
-        # Pre-filter: remove outfits where ANY piece has an invalid image URL
+        # Pre-filter outfits with invalid image URLs
         valid_outfits: List[Dict[str, "AestheticProfile"]] = []
         valid_indices: List[int] = []
         for i, outfit in enumerate(outfits):
-            all_valid = all(
-                _is_valid_image_url(p.image_url or "")
-                for p in outfit.values()
-            )
-            if all_valid:
+            if all(_is_valid_image_url(p.image_url or "") for p in outfit.values()):
                 valid_outfits.append(outfit)
                 valid_indices.append(i)
-            else:
-                logger.debug("Outfit ranking: outfit %d has invalid image URL, skipping", i)
 
         if len(valid_outfits) <= 1:
             return None
 
-        messages = build_outfit_ranking_messages(source, valid_outfits, intent)
+        logger.info(
+            "Outfit ranking: %d combos for source %s",
+            len(valid_outfits), source.product_id,
+        )
+
+        messages = build_outfit_ranking_messages(
+            source, valid_outfits, intent, self.detail,
+        )
 
         for attempt in range(1 + self.max_retries):
             try:
@@ -586,20 +635,28 @@ class VisionJudge:
                     messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0.0,
-                    max_tokens=200,
+                    max_tokens=300,
                     timeout=self.timeout,
                 )
                 elapsed = _time.monotonic() - t0
                 content = response.choices[0].message.content or ""
-                ranking = self._parse_ranking_response(content, len(valid_outfits))
+                ranking = self._parse_outfit_ranking(content, len(valid_outfits))
                 if ranking is not None:
-                    # Remap filtered indices back to original outfit positions,
-                    # then append any outfits that were excluded due to bad URLs.
+                    # Remap back to original indices
                     remapped = [valid_indices[r] for r in ranking]
-                    excluded = [i for i in range(len(outfits)) if i not in set(valid_indices)]
+                    excluded = [
+                        i for i in range(len(outfits))
+                        if i not in set(valid_indices)
+                    ]
                     ranking = remapped + excluded
+                note = ""
+                try:
+                    note = json.loads(content).get("note", "")
+                except Exception:
+                    pass
                 logger.info(
-                    "Outfit ranking: %.1fs, result=%s", elapsed, ranking,
+                    "Outfit ranking: %.1fs, result=%s, note=%s",
+                    elapsed, ranking, note[:80],
                 )
                 return ranking
             except Exception as e:
@@ -608,14 +665,16 @@ class VisionJudge:
                     attempt + 1, 1 + self.max_retries, e,
                 )
                 if attempt < self.max_retries:
-                    _time.sleep(2.0 * (attempt + 1))
+                    _time.sleep(1.5 * (attempt + 1))
 
         logger.error("Outfit ranking: all attempts failed, keeping TATTOO order")
         return None
 
     @staticmethod
-    def _parse_ranking_response(content: str, n_outfits: int) -> Optional[List[int]]:
-        """Parse ranking JSON into 0-indexed list of outfit indices."""
+    def _parse_outfit_ranking(
+        content: str, n_outfits: int,
+    ) -> Optional[List[int]]:
+        """Parse outfit ranking JSON into 0-indexed list."""
         try:
             data = json.loads(content)
         except (json.JSONDecodeError, TypeError):
@@ -623,15 +682,13 @@ class VisionJudge:
             return None
 
         if not isinstance(data, dict):
-            logger.warning("Outfit ranking: not a dict: %.200s", content)
             return None
 
         ranking = data.get("ranking", [])
-        if not isinstance(ranking, list):
-            logger.warning("Outfit ranking: 'ranking' not a list: %.200s", content)
+        if not isinstance(ranking, list) or not ranking:
             return None
 
-        # Convert 1-indexed to 0-indexed, validate
+        # Convert 1-indexed to 0-indexed
         indices: List[int] = []
         seen: Set[int] = set()
         for r in ranking:
@@ -644,27 +701,55 @@ class VisionJudge:
                 continue
 
         if not indices:
-            logger.warning("Outfit ranking: no valid indices parsed")
             return None
 
-        # Fill in any omitted indices at the end (preserve their order)
+        # Fill omitted indices at end
         for i in range(n_outfits):
             if i not in seen:
                 indices.append(i)
 
         return indices
 
+    # ------------------------------------------------------------------
+    # Legacy API compatibility
+    # ------------------------------------------------------------------
+
+    def judge_batch(
+        self,
+        source: "AestheticProfile",
+        candidates: List["AestheticProfile"],
+        intent: FitIntent,
+    ) -> Set[str]:
+        """Legacy pass/fail API — converts ranking to bottom-3 fails.
+
+        Kept for backward compatibility with existing tests and code
+        that hasn't migrated to rerank_category() yet.
+        """
+        ranking = self.rerank_category(source, candidates, intent)
+        if not ranking or len(ranking) <= 3:
+            return set()
+        # Bottom 30% are considered "fails" for legacy callers
+        cutoff = max(len(ranking) - 3, len(ranking) * 7 // 10)
+        return set(ranking[cutoff:])
+
+
+# Legacy alias
+VisionJudge = StylistJudge
+
 
 # =============================================================================
-# 4. SINGLETON
+# 5. SINGLETON
 # =============================================================================
 
-_judge: Optional[VisionJudge] = None
+_judge: Optional[StylistJudge] = None
 _judge_lock = threading.Lock()
 
 
-def get_pair_judge() -> Optional[VisionJudge]:
-    """Get or create VisionJudge singleton. Returns None if disabled or no API key."""
+def get_pair_judge() -> Optional[StylistJudge]:
+    """Get or create StylistJudge singleton.
+
+    Returns None if disabled or no API key.
+    """
     global _judge
     if _judge is None:
         with _judge_lock:
@@ -674,14 +759,18 @@ def get_pair_judge() -> Optional[VisionJudge]:
                     settings = get_settings()
                     api_key = settings.openai_api_key
                     if not api_key or not getattr(settings, "llm_judge_enabled", True):
-                        logger.info("Vision judge disabled (no API key or disabled)")
+                        logger.info("Stylist judge disabled (no API key or disabled)")
                         return None
-                    model = getattr(settings, "llm_judge_model", "gpt-4o-mini")
-                    timeout = getattr(settings, "llm_judge_timeout", 20.0)
-                    _judge = VisionJudge(
-                        api_key=api_key, model=model, timeout=timeout,
+                    model = getattr(settings, "llm_judge_model", "gpt-4.1")
+                    timeout = getattr(settings, "llm_judge_timeout", 30.0)
+                    detail = getattr(settings, "llm_judge_detail", "auto")
+                    _judge = StylistJudge(
+                        api_key=api_key,
+                        model=model,
+                        timeout=timeout,
+                        detail=detail,
                     )
                 except Exception as e:
-                    logger.warning("Failed to init vision judge: %s", e)
+                    logger.warning("Failed to init stylist judge: %s", e)
                     return None
     return _judge
