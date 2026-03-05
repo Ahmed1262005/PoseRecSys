@@ -247,6 +247,18 @@ class HybridSearchResponse(BaseModel):
         description="Contextual follow-up questions to refine the search (only for vague/ambiguous queries). "
         "Each question has 2-4 options with pre-computed filter updates.",
     )
+    applied_filters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="All follow-up filters that were applied in this search "
+        "(accumulated across refinement rounds). Clients should pass this "
+        "back as selected_filters in the next refinement request.",
+    )
+    answered_dimensions: Optional[List[str]] = Field(
+        None,
+        description="Semantic dimensions already answered by the user "
+        "(e.g., ['color', 'vibe']). Used to prevent re-asking the same "
+        "questions in subsequent follow-up rounds.",
+    )
 
 
 class AutocompleteProductSuggestion(BaseModel):

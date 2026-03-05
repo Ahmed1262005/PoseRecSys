@@ -718,6 +718,11 @@ def create_app():
                 fu_original_query = gr.State(value="")
                 fu_selections = gr.State(value={})      # {question_idx: [{label, filters}, ...]}
 
+                # Accumulators: persist across refinement rounds so earlier
+                # selections are not lost when the planner returns new follow-ups.
+                fu_accumulated_filters = gr.State(value={})   # merged filters from ALL rounds
+                fu_accumulated_labels = gr.State(value=[])    # labels from ALL rounds
+
                 # Pre-allocate a grid of buttons for follow-up options.
                 # Each question gets a label + row of option buttons.
                 fu_labels = []
@@ -869,6 +874,8 @@ def create_app():
                             {},   # fu_selections (reset)
                             "",   # selection_summary
                             gr.Button("Search with selections", visible=False, variant="primary"),
+                            {},   # fu_accumulated_filters (reset)
+                            [],   # fu_accumulated_labels (reset)
                         ] + empty_btns
 
                     # Build planner context from onboarding
@@ -898,6 +905,8 @@ def create_app():
                             {},
                             "",
                             gr.Button("Search with selections", visible=False, variant="primary"),
+                            {},   # fu_accumulated_filters (reset)
+                            [],   # fu_accumulated_labels (reset)
                         ] + empty_btns
 
                     # Meta
@@ -932,6 +941,8 @@ def create_app():
                         {},                 # fu_selections (reset)
                         "",                 # selection_summary (empty)
                         show_apply,         # apply_btn visibility
+                        {},                 # fu_accumulated_filters (reset on new search)
+                        [],                 # fu_accumulated_labels (reset on new search)
                     ] + btn_updates
 
                 search_outputs = [
@@ -939,6 +950,7 @@ def create_app():
                     planner_ctx_display, raw_json,
                     fu_state, fu_original_query,
                     fu_selections, selection_summary, apply_btn,
+                    fu_accumulated_filters, fu_accumulated_labels,
                 ] + all_fu_outputs
 
                 search_btn.click(
@@ -1066,7 +1078,7 @@ def create_app():
 
                     return merged, all_labels
 
-                def on_apply(fu_data, orig_query, selections, age, clusters, mn, mx, mod):
+                def on_apply(fu_data, orig_query, selections, acc_filters, acc_labels, age, clusters, mn, mx, mod):
                     empty_btns = _hide_all_buttons()
                     if not selections or not orig_query:
                         return [
@@ -1080,10 +1092,48 @@ def create_app():
                             {},
                             "",
                             gr.Button("Search with selections", visible=False, variant="primary"),
+                            acc_filters or {},   # preserve accumulators
+                            acc_labels or [],
                         ] + empty_btns
 
-                    # Merge multi-select filters into a flat dict
-                    merged_filters, labels_used = _merge_multi_selections(selections)
+                    # Merge this round's multi-select filters into a flat dict
+                    round_filters, round_labels = _merge_multi_selections(selections)
+
+                    # ---- Accumulate across rounds ----
+                    # Start from a copy of previous accumulated state
+                    new_acc_filters = dict(acc_filters or {})
+                    new_acc_labels = list(acc_labels or [])
+
+                    # Merge this round's filters INTO the accumulator
+                    # Same merge rules: lists = union, min_price = min, max_price = max
+                    for fk, fv in round_filters.items():
+                        if fk == "min_price":
+                            cur = new_acc_filters.get("min_price")
+                            val = float(fv) if fv is not None else None
+                            if val is not None:
+                                new_acc_filters["min_price"] = min(cur, val) if cur is not None else val
+                        elif fk == "max_price":
+                            cur = new_acc_filters.get("max_price")
+                            val = float(fv) if fv is not None else None
+                            if val is not None:
+                                new_acc_filters["max_price"] = max(cur, val) if cur is not None else val
+                        elif isinstance(fv, list):
+                            existing = new_acc_filters.get(fk, [])
+                            seen = set(existing)
+                            for v in fv:
+                                if v not in seen:
+                                    existing.append(v)
+                                    seen.add(v)
+                            new_acc_filters[fk] = existing
+                        else:
+                            new_acc_filters[fk] = fv
+
+                    # Accumulate labels (deduplicated, order preserved)
+                    seen_labels = set(new_acc_labels)
+                    for lbl in round_labels:
+                        if lbl not in seen_labels:
+                            new_acc_labels.append(lbl)
+                            seen_labels.add(lbl)
 
                     # Build planner context from onboarding
                     selected_ids = [
@@ -1092,17 +1142,14 @@ def create_app():
                     ctx = build_planner_context(age, selected_ids, mn, mx, mod)
 
                     # Full search via /hybrid with REFINEMENT mode.
-                    # The planner sees the original query + selected_filters
-                    # + selection_labels in its [REFINEMENT] user message
-                    # (Section 11). It generates updated semantic queries,
-                    # modes, avoids, and NEW follow-up questions. Selected
-                    # filters are force-injected into the plan so the LLM
-                    # cannot drop them.
+                    # Pass ACCUMULATED filters/labels (all rounds) so the
+                    # planner sees the full refinement history, not just the
+                    # current round's selections.
                     response = do_search(
                         query=orig_query,
                         planner_context=ctx,
-                        selected_filters=merged_filters,
-                        selection_labels=labels_used,
+                        selected_filters=new_acc_filters,
+                        selection_labels=new_acc_labels,
                         page=1,
                         page_size=30,
                         session_id=session_id,
@@ -1120,14 +1167,16 @@ def create_app():
                             selections,
                             _selection_summary_html(selections),
                             gr.Button("Search with selections", visible=True, variant="primary"),
+                            new_acc_filters,   # keep accumulated state even on error
+                            new_acc_labels,
                         ] + _build_button_updates(fu_data, selections)
 
-                    # Meta
+                    # Meta — show ALL accumulated answers, not just this round
                     meta = _search_meta_html(response)
-                    filter_summary = ", ".join(f"{k}={v}" for k, v in merged_filters.items())
+                    filter_summary = ", ".join(f"{k}={v}" for k, v in new_acc_filters.items())
                     meta += (
                         f'<div style="font-size:12px; color:#059669; margin-top:4px;">'
-                        f'Answers: <b>{" + ".join(labels_used)}</b></div>'
+                        f'Answers: <b>{" + ".join(new_acc_labels)}</b></div>'
                         f'<div style="font-size:12px; color:#374151; margin-top:2px;">'
                         f'Selected filters: <b>{filter_summary}</b></div>'
                     )
@@ -1145,12 +1194,31 @@ def create_app():
                     new_follow_ups = response.get("follow_ups") or []
                     if new_follow_ups:
                         active_follow_ups = new_follow_ups
-                        active_selections = {}
+                        active_selections = {}    # reset current-round selections for new questions
                         summary = ""
                     else:
                         active_follow_ups = fu_data
                         active_selections = selections
                         summary = _selection_summary_html(selections)
+
+                    # Show accumulated selection summary if we have accumulated labels
+                    # and new follow-ups appeared (so current round summary is empty)
+                    if not summary and new_acc_labels:
+                        acc_parts = []
+                        for lbl in new_acc_labels:
+                            acc_parts.append(
+                                f'<span style="display:inline-block; background:#d1fae5; '
+                                f'color:#065f46; padding:3px 10px; border-radius:12px; '
+                                f'font-size:12px; margin:2px 4px;">'
+                                f'{lbl}</span>'
+                            )
+                        summary = (
+                            '<div style="padding:8px 0;">'
+                            '<span style="font-size:13px; font-weight:600; color:#065f46;">'
+                            'Prior selections: </span>'
+                            + "".join(acc_parts)
+                            + '</div>'
+                        )
 
                     fu_html = _followup_html(active_follow_ups)
                     btn_updates = _build_button_updates(active_follow_ups, active_selections)
@@ -1162,6 +1230,8 @@ def create_app():
                         active_selections,
                         summary,
                         gr.Button("Search with selections", visible=bool(active_follow_ups), variant="primary"),
+                        new_acc_filters,     # updated accumulators
+                        new_acc_labels,
                     ] + btn_updates
 
                 apply_outputs = [
@@ -1169,12 +1239,14 @@ def create_app():
                     planner_ctx_display, raw_json,
                     fu_state, fu_original_query,
                     fu_selections, selection_summary, apply_btn,
+                    fu_accumulated_filters, fu_accumulated_labels,
                 ] + all_fu_outputs
 
                 apply_btn.click(
                     fn=on_apply,
                     inputs=[
                         fu_state, fu_original_query, fu_selections,
+                        fu_accumulated_filters, fu_accumulated_labels,
                         age_slider, cluster_checkboxes, min_price, max_price, modesty,
                     ],
                     outputs=apply_outputs,

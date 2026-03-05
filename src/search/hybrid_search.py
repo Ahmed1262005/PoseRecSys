@@ -207,53 +207,53 @@ class HybridSearchService:
             mode_excl_keys = plan_updates.pop("_mode_excl_keys", [])
 
             # ---------------------------------------------------------
-            # VAGUE queries: skip ALL planner attribute filters.
+            # Filter application strategy per intent:
             #
-            # SPECIFIC with modes: strip mode-derived exclude_* fields.
-            # Composite modes like "modest" generate 20+ exclusion
-            # filters that together eliminate nearly all products on
-            # fast-fashion catalogs.  The semantic queries already
-            # encode the intent ("modest midi dress with long sleeves")
-            # so hard-excluding V-Neck/Mini/Fitted/etc is redundant
-            # and destructive.  Name exclusions still catch egregious
-            # violations (e.g. "backless" in product name).
+            # VAGUE: Keep structural filters (category, formality,
+            #   occasions) and mode exclusions.  Strip subjective
+            #   visual attributes (colors, patterns, materials, etc.)
+            #   — those are carried by the semantic queries.
             #
-            # EXACT: apply filters normally.
+            # SPECIFIC: Apply ALL filters including mode exclusions.
+            #   Mode exclusions (modest, work, etc.) are important
+            #   safety/appropriateness constraints.
+            #
+            # EXACT: Apply filters normally.
             # ---------------------------------------------------------
+
+            # Subjective visual attributes to strip for VAGUE queries.
+            # These are appearance-based filters that the LLM may guess
+            # imprecisely — semantic queries handle them better.
+            _VAGUE_STRIP_KEYS = {
+                "colors", "patterns", "materials", "style_tags",
+                "fit_type", "neckline", "sleeve_type", "length",
+                "silhouette", "aesthetics", "age_groups", "body_types",
+                "care_instructions", "sustainability_ratings",
+                "versatility_scores",
+            }
+
             if intent_str == "vague":
-                # Preserve category_l1 — it's structural (what garment type),
-                # not subjective.  Without it, Bottoms/Pants leak into outfit
-                # queries where the planner correctly inferred Tops+Dresses.
+                # Keep structural + safety filters; strip subjective visuals
                 preserved = {}
-                skipped = dict(plan_updates)
-                if "category_l1" in plan_updates and not getattr(request, "category_l1", None):
-                    preserved["category_l1"] = plan_updates["category_l1"]
-                    skipped.pop("category_l1", None)
+                skipped = {}
+                for k, v in plan_updates.items():
+                    if k in _VAGUE_STRIP_KEYS:
+                        skipped[k] = v
+                    elif not getattr(request, k, None):
+                        preserved[k] = v
                 updates = preserved
                 if updates:
                     request = request.model_copy(update=updates)
                 logger.info(
-                    "Vague query — skipping subjective filters, keeping category_l1",
+                    "Vague query — keeping structural + exclusion filters",
                     query=request.query,
-                    preserved_filters=preserved,
-                    skipped_filters=skipped,
+                    preserved_filters=list(preserved.keys()),
+                    skipped_filters=list(skipped.keys()),
                     semantic_queries=semantic_queries,
                 )
             else:
-                # For SPECIFIC intent, strip mode-derived exclusion filters
-                if intent_str == "specific" and mode_excl_keys:
-                    stripped = {}
-                    for key in mode_excl_keys:
-                        if key in plan_updates:
-                            stripped[key] = plan_updates.pop(key)
-                    if stripped:
-                        logger.info(
-                            "SPECIFIC intent: stripped mode exclusion filters",
-                            query=request.query,
-                            stripped_filters=list(stripped.keys()),
-                        )
-
-                # Apply remaining planner filters
+                # SPECIFIC / EXACT: apply ALL planner filters including
+                # mode-derived exclusions (no longer stripped).
                 updates = {}
                 for field, values in plan_updates.items():
                     if not getattr(request, field, None):
@@ -534,8 +534,23 @@ class HybridSearchService:
             timing["relaxation_level"] = relaxation_level
 
         # Step 5: Merge with RRF
+        # When the planner returned an empty algolia_query, Algolia fell back
+        # to customRanking (trending/popularity) — the same popular items for
+        # every query.  Discard those results so they don't pollute RRF;
+        # semantic search alone drives ranking.  Algolia still ran for facets.
+        _algolia_for_rrf = algolia_results
+        if not algolia_query or not algolia_query.strip():
+            if algolia_results:
+                logger.info(
+                    "Empty algolia_query — discarding Algolia results from RRF "
+                    "(keeping facets only)",
+                    discarded_count=len(algolia_results),
+                    semantic_count=len(semantic_results),
+                )
+            _algolia_for_rrf = []
+
         merged = self._reciprocal_rank_fusion(
-            algolia_results=algolia_results,
+            algolia_results=_algolia_for_rrf,
             semantic_results=semantic_results,
             algolia_weight=algolia_weight,
             semantic_weight=semantic_weight,
@@ -644,14 +659,13 @@ class HybridSearchService:
             rerank_kwargs["max_per_brand"] = brand_cap
         merged = self._reranker.rerank(**rerank_kwargs)
 
-        # Step 6b: Category diversity for VAGUE queries (post-reranker).
-        # Semantic search tends to cluster results in one category (e.g. all
-        # pants) because FashionCLIP matches visual features, not garment type.
-        # For vague queries where no hard category filter was set, interleave
-        # results round-robin by category_l1 so the top results show a mix
-        # of garment types (dresses, tops, bottoms, etc.) rather than a wall
-        # of one category.  Within each category, items keep their reranked
-        # order.  Applied AFTER the reranker so scoring doesn't undo diversity.
+        # Step 6b: Score-gated category diversity for VAGUE queries.
+        # Only interleave categories whose top item scores within 25% of
+        # the best category's top score.  Weak categories (e.g. Outerwear
+        # at 0.005 when Tops is at 0.068) are appended at the end instead
+        # of being forced into prominent positions via round-robin.
+        _INTERLEAVE_SCORE_RATIO = 0.25
+
         if intent == QueryIntent.VAGUE and merged:
             cat_buckets: Dict[str, List[dict]] = {}
             for item in merged:
@@ -659,20 +673,43 @@ class HybridSearchService:
                 cat_buckets.setdefault(cat, []).append(item)
 
             if len(cat_buckets) > 1:
-                # Sort buckets: largest first so round-robin starts with
-                # the most populated category (feels natural).
-                sorted_cats = sorted(cat_buckets.keys(), key=lambda c: -len(cat_buckets[c]))
+                # Find each category's top score (first item, already sorted)
+                cat_top_scores = {
+                    cat: items[0].get("rrf_score", 0)
+                    for cat, items in cat_buckets.items()
+                    if items
+                }
+                best_score = max(cat_top_scores.values()) if cat_top_scores else 0
+                threshold = best_score * _INTERLEAVE_SCORE_RATIO
+
+                strong_cats = [
+                    c for c, s in cat_top_scores.items() if s >= threshold
+                ]
+                weak_cats = [
+                    c for c, s in cat_top_scores.items() if s < threshold
+                ]
+
+                # Round-robin only strong categories
+                strong_cats.sort(key=lambda c: -len(cat_buckets[c]))
                 interleaved: List[dict] = []
-                max_bucket = max(len(b) for b in cat_buckets.values())
-                for pos in range(max_bucket):
-                    for cat in sorted_cats:
-                        if pos < len(cat_buckets[cat]):
-                            interleaved.append(cat_buckets[cat][pos])
+                if strong_cats:
+                    max_bucket = max(len(cat_buckets[c]) for c in strong_cats)
+                    for pos in range(max_bucket):
+                        for cat in strong_cats:
+                            if pos < len(cat_buckets[cat]):
+                                interleaved.append(cat_buckets[cat][pos])
+
+                # Append weak categories at the end (in score order)
+                for cat in weak_cats:
+                    interleaved.extend(cat_buckets[cat])
 
                 before_cats = {c: len(b) for c, b in cat_buckets.items()}
                 logger.info(
-                    "Category diversity interleave applied (vague query)",
+                    "Category diversity interleave (score-gated)",
                     categories=before_cats,
+                    strong=strong_cats,
+                    weak=weak_cats,
+                    threshold=round(threshold, 6),
                     total=len(interleaved),
                 )
                 merged = interleaved
@@ -705,6 +742,16 @@ class HybridSearchService:
         except Exception as e:
             logger.warning("Failed to log search analytics", error=str(e))
 
+        # Compute refinement state for client (accumulated across rounds)
+        _applied_filters: Optional[Dict[str, Any]] = None
+        _answered_dims: Optional[List[str]] = None
+        if selected_filters:
+            _applied_filters = selected_filters
+            from search.query_planner import QueryPlanner
+            _answered_dims = QueryPlanner._infer_answered_dimensions(
+                selected_filters
+            )
+
         return HybridSearchResponse(
             query=request.query,
             intent=intent.value,
@@ -719,6 +766,8 @@ class HybridSearchService:
             timing=timing,
             facets=facets,
             follow_ups=follow_ups,
+            applied_filters=_applied_filters,
+            answered_dimensions=_answered_dims,
         )
 
     # =========================================================================
