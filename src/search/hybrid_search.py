@@ -534,16 +534,18 @@ class HybridSearchService:
             timing["relaxation_level"] = relaxation_level
 
         # Step 5: Merge with RRF
-        # When the planner returned an empty algolia_query, Algolia fell back
-        # to customRanking (trending/popularity) — the same popular items for
-        # every query.  Discard those results so they don't pollute RRF;
-        # semantic search alone drives ranking.  Algolia still ran for facets.
+        # When the planner returned an empty algolia_query for a VAGUE query,
+        # Algolia fell back to customRanking (trending/popularity) — the same
+        # popular items for every query.  Discard those results so they don't
+        # pollute RRF.  For EXACT/SPECIFIC, Algolia has meaningful filters
+        # (brand, category, occasions) so its results are relevant even
+        # without a text query — keep them.
         _algolia_for_rrf = algolia_results
-        if not algolia_query or not algolia_query.strip():
+        if intent == QueryIntent.VAGUE and (not algolia_query or not algolia_query.strip()):
             if algolia_results:
                 logger.info(
-                    "Empty algolia_query — discarding Algolia results from RRF "
-                    "(keeping facets only)",
+                    "VAGUE + empty algolia_query — discarding Algolia results "
+                    "from RRF (keeping facets only)",
                     discarded_count=len(algolia_results),
                     semantic_count=len(semantic_results),
                 )
