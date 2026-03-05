@@ -557,7 +557,6 @@ class HybridSearchService:
             algolia_weight=algolia_weight,
             semantic_weight=semantic_weight,
         )
-
         # Step 5b: Apply exclusion filters on ALL merged results.
         # Semantic results were already filtered in step 4c, but Algolia results
         # only had NOT clauses in the filter string — which can miss products
@@ -646,9 +645,11 @@ class HybridSearchService:
                 pass  # Non-fatal — skip demotion if load fails
 
         # Step 6: Rerank with session/profile + context scoring
-        # For EXACT brand queries, disable brand diversity cap — the user
-        # explicitly searched for that brand and expects all results from it.
-        brand_cap = 0 if intent == QueryIntent.EXACT else None
+        # Disable brand diversity cap when the user explicitly requested a
+        # brand (via EXACT intent or a brands filter).  Otherwise the
+        # reranker's MAX_PER_BRAND=4 cap kills almost all results when
+        # every result is from the same brand.
+        brand_cap = 0 if intent == QueryIntent.EXACT or request.brands else None
         rerank_kwargs: Dict[str, Any] = dict(
             results=merged,
             user_profile=user_profile,
