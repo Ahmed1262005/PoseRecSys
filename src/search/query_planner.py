@@ -23,7 +23,7 @@ There is NO regex fallback.  On planner failure, basic search runs.
 import json
 import time
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,8 +74,10 @@ class SearchPlan(BaseModel):
         description="Mode tags selected from the mode menu (e.g. ['cover_arms', 'work'])"
     )
 
-    # Positive attribute filters — concrete values the user explicitly stated
-    attributes: Dict[str, List[str]] = Field(
+    # Positive attribute filters — concrete values the user explicitly stated.
+    # Values are List[str] for most keys, but bool for has_pockets,
+    # pocket_has_zip, slit_presence.
+    attributes: Dict[str, Union[List[str], bool]] = Field(
         default_factory=dict,
         description="Concrete positive filter values from the user's query"
     )
@@ -108,26 +110,30 @@ class SearchPlan(BaseModel):
     )
 
     # Non-filterable product details from the query (e.g., "zipped pockets",
-    # "pearl buttons", "ruched sides").  When present, the vision reranker
-    # sends candidate images to Gemini to verify the detail is actually visible.
+    # "pearl buttons", "ruched sides").  These are details that have NO
+    # structured attribute in our v1.0.0.2 schema.  When present, they are
+    # included in semantic_queries so FashionCLIP can attempt visual matching.
+    # NOTE: Many details that were previously non-filterable (pockets, backless,
+    # lace, slit, etc.) are NOW filterable via v1.0.0.2 attributes — put those
+    # in the `attributes` dict instead.
     detail_terms: List[str] = Field(
         default_factory=list,
-        description="Non-filterable product details from the query for vision reranker verification"
+        description="Truly non-filterable product details (pearl buttons, zipper placement, hardware)"
     )
 
-    # When True, the pipeline uses a detail-aware retrieval path: skip
-    # FashionCLIP (can't distinguish fine details), do a broad Algolia
-    # category pull with prefilter_keywords, and let the vision reranker
-    # handle accuracy.
+    # When True, the query's key feature is a non-filterable visual detail
+    # that cannot be matched by structured attributes or FashionCLIP.
+    # Only set this for details with NO attribute mapping (pearl buttons,
+    # specific hardware, zipper placement).  For filterable details
+    # (pockets, backless, lace, slit, etc.) use `attributes` instead.
     detail_mode: bool = Field(
         default=False,
-        description="True when the query's key feature is a non-filterable visual detail"
+        description="True when the query's key feature is a truly non-filterable visual detail"
     )
 
     # Keywords the LLM expects to find in product names/descriptions of items
-    # that have the requested detail.  Used for cheap text-based prefiltering:
-    # Algolia matches these against name + source_description to prioritise
-    # likely-relevant candidates before the expensive Gemini vision pass.
+    # that have the requested detail.  Used for text-based prefiltering in
+    # Algolia to narrow candidates for detail-mode queries.
     prefilter_keywords: List[str] = Field(
         default_factory=list,
         description="Keywords likely in product names/descriptions for items with this detail"
@@ -261,15 +267,29 @@ def _build_system_prompt() -> str:
    - "maxi skirt" → attributes: {{"length": ["Maxi"]}}, avoid: {{"length": ["Mini", "Micro", "Cropped"]}}
    This is critical — without the avoid values, semantic search results with wrong attributes leak through.
 
-7. **Non-filterable features go to semantic_query AND detail_terms.** Some things users mention cannot
-   be filtered because our database has no attribute for them: slit, ruching, cutout, wrap, tie-front,
-   drawstring, button-down, zipper placement, pocket detail, etc. For these:
-   - Put them in semantic_query (FashionCLIP understands visual features)
-   - ALSO put them in detail_terms (e.g., detail_terms: ["zipped pockets"]) — the vision reranker
-     will use these to verify the detail is actually visible in product images
-   - Do NOT invent avoid values that don't match — never guess filter mappings for concepts we don't track
-   - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8) — do NOT
-     add "no slit" to detail_terms (detail_terms is for POSITIVE features to verify, not negations)
+7. **Distinguish filterable attributes from truly non-filterable details.**
+    Many visual details are NOW filterable via our v1.0.0.2 product attribute schema.
+
+    **NOW FILTERABLE — put in `attributes` dict (Section 4b):**
+    Pockets (has_pockets), backless/open back (back_openness), lace/ruffle/crochet/embroidery
+    (detail_tags), slit (slit_presence, slit_height), cutout/pleated/quilted/mesh (detail_tags),
+    bodycon/loose/oversized (body_cling_visual), structured/flowy (structure_level, drape_level),
+    wide-leg/flared/skinny (leg_volume_visual), cinched waist (waist_definition_visual),
+    cropped (cropped_degree), sheer (sheerness_visual), low-cut/plunging/high-neck (neckline_depth),
+    off-shoulder/strapless/one-shoulder (shoulder_coverage), sleeveless/long-sleeve (arm_coverage),
+    midriff-baring (midriff_exposure), lined/unlined (lining_status_likely).
+
+    **STILL NON-FILTERABLE — put in semantic_query AND detail_terms:**
+    Pearl buttons, specific zipper placement, button style, hardware type, tie-front, drawstring,
+    wrap construction, ruching placement (e.g., "ruched sides" — distinct from ruched_bodice tag),
+    specific stitching, embellishment placement.
+
+    For non-filterable details:
+    - Put them in semantic_query (FashionCLIP understands visual features)
+    - ALSO put them in detail_terms (e.g., detail_terms: ["pearl buttons"])
+    - Do NOT invent filter values — never guess attribute mappings for concepts we don't track
+    - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8) — do NOT
+      add "no slit" to detail_terms (detail_terms is for POSITIVE features to verify, not negations)
 
 8. **semantic_query must be POSITIVE descriptions only — NEVER use negation.**
    FashionCLIP is a vision-language embedding model. It does NOT understand negation.
@@ -353,9 +373,9 @@ Return a JSON object with these fields:
 - modes: string[] (mode tags from the menu below)
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
-- detail_terms: string[] (non-filterable product details for vision verification — see Section 8 rule 7)
-- detail_mode: boolean (true when the query's distinguishing feature is a non-filterable visual/construction detail — see Section 8 rule 8)
-- prefilter_keywords: string[] (keywords likely in product names/descriptions for text prefiltering — see Section 8 rule 8)
+- detail_terms: string[] (TRULY non-filterable product details — pearl buttons, hardware, zipper placement. NOT for pockets/backless/lace/slit which are now filterable via Section 4b)
+- detail_mode: boolean (true ONLY when the query's distinguishing feature has NO attribute mapping at all — see Section 8 rule 8)
+- prefilter_keywords: string[] (keywords likely in product names/descriptions for text prefiltering — only used when detail_mode=true)
 - brand: string | null
 - max_price: number | null
 - min_price: number | null
@@ -397,11 +417,60 @@ Only the following keys are valid. Use EXACT values from the allowed lists:
 - **style_tags**: ["Bohemian", "Romantic", "Glamorous", "Edgy", "Vintage", "Sporty", "Classic", "Modern", "Minimalist", "Preppy", "Streetwear", "Sexy", "Western", "Utility"]
 - **brands**: Only if a specific brand is mentioned
 
+## SECTION 4b: PRODUCT DETAIL ATTRIBUTES (v1.0.0.2 schema)
+
+These attributes capture fine-grained visual details from Gemini Vision extraction.
+Use these for detail queries instead of detail_terms/detail_mode. Only the following
+keys are valid. Use EXACT values from the allowed lists:
+
+- **back_openness**: ["open", "partial", "closed"]
+- **shoulder_coverage**: ["exposed", "strap_only", "off_shoulder", "one_shoulder", "covered"]
+- **arm_coverage**: ["none", "short", "half", "three_quarter", "full"]
+- **neckline_depth**: ["deep", "low", "moderate", "high"]
+- **midriff_exposure**: ["exposed", "partial", "covered"]
+- **sheerness_visual**: ["semi_sheer", "opaque"]
+- **body_cling_visual**: ["bodycon", "skim", "slim", "regular", "relaxed", "loose"]
+- **structure_level**: ["structured", "moderate", "soft", "unstructured"]
+- **drape_level**: ["none", "low", "moderate", "high"]
+- **cropped_degree**: ["very", "moderate", "slightly", "none"]
+- **waist_definition_visual**: ["cinched", "defined", "natural", "undefined"]
+- **leg_volume_visual**: ["skinny", "slim", "straight", "wide", "flared", "balloon"]
+- **bulk_visual**: ["sleek", "low", "moderate", "bulky"]
+- **has_pockets**: true/false (boolean — set true when user asks for pockets)
+- **pocket_types**: array from vocabulary ["patch", "welt", "flap", "zip", "cargo", "seam", "kangaroo", "slash", "jetted", "inseam"] (lowercase — filter by specific pocket type in pocket_details.types)
+- **pocket_has_zip**: true/false (boolean — set true when user asks for zippered/zipped pockets; checks zip_count > 0 and zip pocket types)
+- **slit_presence**: true/false (boolean — set true when user asks for a slit)
+- **slit_height**: ["low", "mid", "high"]
+- **detail_tags**: array from vocabulary ["lace_trim", "ruffle_detail", "crochet_detail", "distressed_detail", "scalloped_hem", "ruched_bodice", "embroidery_detail", "ribbed_trim", "mesh_panels", "fringe_detail", "raw_hem", "frayed_edge", "quilted_texture", "pleated_detail", "cutout_detail"]
+- **lining_status_likely**: ["lined", "partially_lined", "unlined"]
+
+DETAIL ATTRIBUTE MAPPING EXAMPLES:
+- "dress with pockets" → attributes: {{"has_pockets": true, "category_l1": ["Dresses"]}}
+- "jacket with zipped pockets" → attributes: {{"has_pockets": true, "pocket_has_zip": true, "category_l1": ["Outerwear"]}}
+- "cargo pants with pockets" → attributes: {{"has_pockets": true, "pocket_types": ["cargo"], "category_l1": ["Bottoms"]}}
+- "blazer with welt pockets" → attributes: {{"has_pockets": true, "pocket_types": ["welt", "jetted"], "category_l1": ["Outerwear"]}}
+- "hoodie with kangaroo pocket" → attributes: {{"has_pockets": true, "pocket_types": ["kangaroo"], "category_l1": ["Tops"]}}
+- "backless dress" → attributes: {{"back_openness": ["open", "partial"], "category_l1": ["Dresses"]}}
+- "lace midi dress" → attributes: {{"detail_tags": ["lace_trim"], "length": ["Midi"], "category_l1": ["Dresses"]}}
+- "high slit evening dress" → attributes: {{"slit_presence": true, "slit_height": ["high"], "category_l1": ["Dresses"]}}
+- "wide leg pants with pockets" → attributes: {{"leg_volume_visual": ["wide"], "has_pockets": true, "category_l1": ["Bottoms"]}}
+- "off shoulder top" → attributes: {{"shoulder_coverage": ["off_shoulder"], "category_l1": ["Tops"]}}
+- "sheer blouse" → attributes: {{"sheerness_visual": ["semi_sheer"], "category_l1": ["Tops"]}}
+- "structured blazer" → attributes: {{"structure_level": ["structured"], "category_l1": ["Outerwear"]}}
+- "flowy maxi dress" → attributes: {{"drape_level": ["high", "moderate"], "body_cling_visual": ["loose", "relaxed"], "length": ["Maxi"], "category_l1": ["Dresses"]}}
+- "bodycon mini dress" → attributes: {{"body_cling_visual": ["bodycon"], "length": ["Mini"], "category_l1": ["Dresses"]}}
+- "ruffle trim top" → attributes: {{"detail_tags": ["ruffle_detail"], "category_l1": ["Tops"]}}
+- "pleated skirt" → attributes: {{"detail_tags": ["pleated_detail"], "category_l1": ["Bottoms"]}}
+- "cutout dress" → attributes: {{"detail_tags": ["cutout_detail"], "category_l1": ["Dresses"]}}
+- "lined winter coat" → attributes: {{"lining_status_likely": ["lined"], "category_l1": ["Outerwear"]}}
+
 ATTRIBUTE RULES:
 - Only include values the user explicitly or strongly implies.
 - Use exact values from the allowed lists above.
 - For category_l2, include singular AND plural: ["Jacket", "Jackets"].
 - category_l1 is ALWAYS a positive attribute, never in avoid.
+- For v1.0.0.2 detail attributes: use attributes dict, NOT detail_terms.
+  detail_terms is ONLY for truly non-filterable details (pearl buttons, hardware, etc.).
 
 ## SECTION 5: AVOID (negative filters)
 
@@ -549,40 +618,39 @@ If you can only think of one meaningful angle, set semantic_queries to [semantic
 4. Never duplicate: if a mode handles it, don't also put it in avoid.
 5. Combine freely: modes + attributes + avoid can all be used together.
 6. ALWAYS set category_l1. Never leave it empty. Default to ["Tops", "Dresses"] for vague queries.
-7. If a feature isn't in our filter lists (slit, cutout, ruching, etc.), put it in BOTH
-   semantic_query AND detail_terms. Do NOT guess filter mappings — leave avoid empty for
-   non-filterable features. detail_terms triggers a vision reranker that verifies the detail
-   in product images (e.g., detail_terms: ["ruched sides", "zipped pockets"]).
-8. DETAIL MODE: When the query's KEY distinguishing feature is a non-filterable visual or
-   construction detail (pocket type, button style, closure placement, stitching, hardware,
-   draping, gathering), set detail_mode: true and populate ALL of:
-   - detail_terms: the exact visual detail to verify (e.g., ["zipped pockets"])
-   - prefilter_keywords: 8-15 keywords likely to appear in product NAMES or DESCRIPTIONS
-     of items with this detail. Include:
-     a) Direct keyword variations (e.g., "zip", "zipper", "zippered", "zipped")
-     b) Related product terms (e.g., "pocket", "pockets", "cargo")
-     c) Category/style associations (e.g., "utility", "moto", "tactical", "bomber")
-     d) Construction terms (e.g., "closure", "hardware", "functional")
-   - algolia_query: STRIP the detail terms, keep only the base garment type.
-     "jacket with zipped pockets" → algolia_query: "jacket"
-     "dress with pearl buttons" → algolia_query: "dress"
-   
-   Examples:
-     "jacket with zipped pockets" →
-       detail_mode: true, detail_terms: ["zipped pockets"],
-       prefilter_keywords: ["zip", "zipper", "zippered", "pocket", "pockets", "cargo",
-                            "utility", "moto", "tactical", "bomber", "puffer", "hardware"],
-       algolia_query: "jacket"
-     "dress with pearl buttons" →
-       detail_mode: true, detail_terms: ["pearl buttons"],
-       prefilter_keywords: ["pearl", "button", "buttons", "embellished", "beaded",
-                            "detail", "cardigan", "knit", "vintage", "classic", "ornate"],
-       algolia_query: "dress"
-     "top with ruched sides" →
-       detail_mode: true, detail_terms: ["ruched sides"],
-       prefilter_keywords: ["ruched", "ruching", "gathered", "shirred", "scrunch",
-                            "bodycon", "fitted", "draped", "textured", "side detail"],
-       algolia_query: "top"
+7. **Filterable details go to attributes, non-filterable go to detail_terms.**
+    Check Section 4b for the list of filterable v1.0.0.2 attributes.
+    - If a detail IS in Section 4b (pockets, backless, lace, slit, cutout, bodycon, wide-leg, etc.):
+      → Put in `attributes` dict using the exact keys/values from Section 4b.
+      → Do NOT set detail_mode=true. Do NOT put in detail_terms.
+    - If a detail is NOT in Section 4b (pearl buttons, specific hardware,
+      tie-front, wrap construction, drawstring, button style, zipper placement):
+      → Put in BOTH semantic_query AND detail_terms.
+      → Do NOT guess filter mappings — leave attributes empty for non-filterable features.
+8. DETAIL MODE: Set detail_mode=true ONLY when the query's KEY distinguishing feature has
+    NO attribute mapping in Section 4b. This is rare — most visual details are now filterable.
+    Only use for: pearl buttons, specific zipper placement, hardware type, tie-front mechanism,
+    drawstring, wrap construction, specific stitching, embellishment placement.
+
+    When detail_mode=true, populate ALL of:
+    - detail_terms: the exact visual detail (e.g., ["pearl buttons"])
+    - prefilter_keywords: 8-15 keywords likely in product NAMES or DESCRIPTIONS
+    - algolia_query: STRIP the detail terms, keep only the base garment type
+
+    Examples of detail_mode=true (truly non-filterable):
+      "dress with pearl buttons" →
+        detail_mode: true, detail_terms: ["pearl buttons"],
+        prefilter_keywords: ["pearl", "button", "buttons", "embellished", "beaded",
+                             "detail", "cardigan", "knit", "vintage", "classic", "ornate"],
+        algolia_query: "dress"
+
+    Examples of detail_mode=FALSE (use attributes instead):
+      "dress with pockets" → detail_mode: false, attributes: {{"has_pockets": true, "category_l1": ["Dresses"]}}
+      "backless dress" → detail_mode: false, attributes: {{"back_openness": ["open", "partial"], "category_l1": ["Dresses"]}}
+      "lace midi dress" → detail_mode: false, attributes: {{"detail_tags": ["lace_trim"], "length": ["Midi"], "category_l1": ["Dresses"]}}
+      "high slit evening dress" → detail_mode: false, attributes: {{"slit_presence": true, "slit_height": ["high"], "category_l1": ["Dresses"]}}
+      "cutout dress" → detail_mode: false, attributes: {{"detail_tags": ["cutout_detail"], "category_l1": ["Dresses"]}}
+      "wide leg pants" → detail_mode: false, attributes: {{"leg_volume_visual": ["wide"], "category_l1": ["Bottoms"]}}
 
 VOCABULARY TRANSLATION:
 - "skirt with shorts underneath" → algolia_query="skort"
@@ -1587,12 +1655,25 @@ class QueryPlanner:
         "style_tag": "style_tags",
     }
 
-    # Valid filter field names (for validation)
+    # Valid filter field names (for validation).
+    # Includes both classic Algolia filters and v1.0.0.2 attribute keys.
     _VALID_FILTER_FIELDS = {
         "category_l1", "category_l2", "patterns", "colors", "formality",
         "occasions", "fit_type", "neckline", "sleeve_type", "length",
         "rise", "materials", "silhouette", "seasons", "style_tags",
         "brands", "categories",
+    }
+
+    # v1.0.0.2 detail attribute keys — these pass through to
+    # plan_to_attribute_filters() and are NOT applied as Algolia filters.
+    _V1002_ATTRIBUTE_KEYS = {
+        "back_openness", "shoulder_coverage", "arm_coverage",
+        "neckline_depth", "midriff_exposure", "sheerness_visual",
+        "body_cling_visual", "structure_level", "drape_level",
+        "cropped_degree", "waist_definition_visual", "leg_volume_visual",
+        "bulk_visual", "has_pockets", "pocket_types", "pocket_has_zip",
+        "slit_presence", "slit_height",
+        "detail_tags", "lining_status_likely",
     }
 
     # Map filter key -> exclude_* request field
@@ -1646,11 +1727,17 @@ class QueryPlanner:
         # Start with mode filters
         merged_filters: Dict[str, List[str]] = {k: list(v) for k, v in mode_filters.items()}
 
-        # Merge in LLM attributes (correct typos first)
+        # Merge in LLM attributes (correct typos first).
+        # v1.0.0.2 detail attribute keys (has_pockets, back_openness, etc.)
+        # are skipped here — they stay in plan.attributes and are consumed
+        # by plan_to_attribute_filters() in the hybrid search pipeline.
         for raw_field, values in plan.attributes.items():
             field = self._TYPO_CORRECTIONS.get(raw_field, raw_field)
             if field != raw_field:
                 logger.info("Corrected LLM typo in attributes", original=raw_field, corrected=field)
+            # Skip v1.0.0.2 keys — they are handled by attribute_search.py
+            if field in self._V1002_ATTRIBUTE_KEYS:
+                continue
             if field not in self._VALID_FILTER_FIELDS or not values:
                 continue
             if field in merged_filters:

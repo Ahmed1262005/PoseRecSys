@@ -241,24 +241,16 @@ class Settings(BaseSettings):
     algolia_index_name: str = Field(default="products", description="Algolia index name")
 
     # ==========================================================================
-    # Google Gemini (LLM Vision Reranker)
+    # Google Gemini (kept for stylist judge and other uses)
     # ==========================================================================
-    google_api_key: str = Field(default="", description="Google API key for Gemini vision reranker")
-    vision_reranker_model: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model for vision-based reranking of detail queries"
-    )
-    vision_reranker_enabled: bool = Field(
+    google_api_key: str = Field(default="", description="Google API key for Gemini")
+
+    # ==========================================================================
+    # Attribute-Filtered Search (v1.0.0.2)
+    # ==========================================================================
+    attribute_filters_enabled: bool = Field(
         default=True,
-        description="Enable Gemini vision reranker for queries with non-filterable product details"
-    )
-    vision_reranker_max_candidates: int = Field(
-        default=150,
-        description="Maximum candidates to send to the vision reranker"
-    )
-    detail_mode_broad_pool_size: int = Field(
-        default=300,
-        description="Number of candidates to fetch in detail mode broad Algolia pull"
+        description="Enable v1.0.0.2 attribute-filtered semantic search for detail queries"
     )
 
     # ==========================================================================
