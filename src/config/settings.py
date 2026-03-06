@@ -253,7 +253,7 @@ class Settings(BaseSettings):
         description="Enable Gemini vision reranker for queries with non-filterable product details"
     )
     vision_reranker_max_candidates: int = Field(
-        default=20,
+        default=50,
         description="Maximum candidates to send to the vision reranker"
     )
 
