@@ -44,22 +44,26 @@ _DOWNLOAD_WORKERS = 8  # parallel downloads
 # Score blending
 # =============================================================================
 
-# Multiplicative factor applied to rrf_score based on LLM relevance.
-# Maps LLM score (0-10) to a multiplier via piecewise linear:
-#   0-2  → 0.3  (strong demotion — detail clearly absent)
-#   3-4  → 0.7  (mild demotion)
-#   5-6  → 1.0  (neutral — possible but unconfirmed)
-#   7    → 1.3  (mild boost)
+# Items scored below this threshold are REMOVED from results entirely.
+# The scoring guide is:
+#   0-2: Detail is clearly absent or not visible at all
+#   3-4: Uncertain — features exist but detail not confirmed
+#   5-6: Likely has it based on garment style, or partially visible
+#   7-10: Detail clearly visible
+# Threshold 5 means: if Gemini can't confirm the detail is at least
+# "likely present", the item doesn't belong in results for this query.
+_REMOVE_THRESHOLD = 5
+
+# Multiplicative factor applied to rrf_score for items that PASS the
+# threshold.  Items below _REMOVE_THRESHOLD are removed, not demoted.
+#   5-6  → 1.0  (neutral — likely present)
+#   7    → 1.5  (confirmed present)
 #   8-10 → 2.0  (strong boost — detail clearly visible)
 def _llm_score_to_factor(score: int) -> float:
-    if score <= 2:
-        return 0.3
-    elif score <= 4:
-        return 0.7
-    elif score <= 6:
+    if score <= 6:
         return 1.0
     elif score == 7:
-        return 1.3
+        return 1.5
     else:
         return 2.0
 
@@ -300,23 +304,37 @@ def rerank_with_vision(
         logger.warning("Vision reranker: no scores returned from Gemini")
         return candidates
 
-    # Step 3: Apply score adjustments
-    boosted = 0
-    demoted = 0
+    # Step 3: Tag all scored candidates with their LLM scores
     for idx, (llm_score, reason) in scores.items():
         if 0 <= idx < len(candidates):
-            factor = _llm_score_to_factor(llm_score)
-            old_rrf = candidates[idx].get("rrf_score", 0) or 0
-            candidates[idx]["rrf_score"] = old_rrf * factor
             candidates[idx]["llm_detail_score"] = llm_score
             candidates[idx]["llm_detail_reason"] = reason
+
+    # Step 4: Remove items below threshold, boost items above
+    #
+    # Three categories:
+    #   - Scored < _REMOVE_THRESHOLD → REMOVED (detail absent/uncertain)
+    #   - Scored >= _REMOVE_THRESHOLD → kept, rrf_score multiplied by factor
+    #   - Not scored (rank > max_candidates or download failed) → kept as-is
+    kept: List[dict] = []
+    removed = 0
+    boosted = 0
+    for idx, cand in enumerate(candidates):
+        llm_score = cand.get("llm_detail_score")
+        if llm_score is not None:
+            # This candidate was scored by Gemini
+            if llm_score < _REMOVE_THRESHOLD:
+                removed += 1
+                continue  # drop from results
+            factor = _llm_score_to_factor(llm_score)
+            old_rrf = cand.get("rrf_score", 0) or 0
+            cand["rrf_score"] = old_rrf * factor
             if factor > 1.0:
                 boosted += 1
-            elif factor < 1.0:
-                demoted += 1
+        kept.append(cand)
 
-    # Step 4: Re-sort by adjusted rrf_score
-    candidates.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+    # Step 5: Re-sort by adjusted rrf_score
+    kept.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
 
     t_end = time.time()
 
@@ -325,11 +343,13 @@ def rerank_with_vision(
         detail=detail,
         images_sent=len(downloaded),
         images_scored=len(scores),
+        removed=removed,
         boosted=boosted,
-        demoted=demoted,
+        kept=len(kept),
+        threshold=_REMOVE_THRESHOLD,
         download_ms=round((t_dl_end - t_dl_start) * 1000),
         llm_ms=round((t_llm_end - t_llm_start) * 1000),
         total_ms=round((t_end - t_start) * 1000),
     )
 
-    return candidates
+    return kept
