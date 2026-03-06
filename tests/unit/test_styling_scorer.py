@@ -711,3 +711,222 @@ class TestEdgeCases:
         result = compute_styling_adjustment(source, cand, "bottoms", meta)
         assert isinstance(result.styling_adj, float)
         assert result.has_source_metadata
+
+
+# ===========================================================================
+# 15. STACKING WITH EXISTING HEURISTICS (integration-level)
+# ===========================================================================
+
+class TestStackingWithExistingHeuristics:
+    """Verify that styling_adj stacks correctly with the existing
+    outerwear heuristics (_KNIT_CARDIGAN_PENALTY, _STRUCTURED_BONUS)
+    and outfit_avoids (K1, etc.). These tests simulate what happens
+    inside _score_category() when both systems fire on the same candidate.
+    """
+
+    def test_knit_source_cardigan_gets_double_penalty(self):
+        """A knit top source + cardigan candidate should get:
+        - style_adj: -0.06 from outerwear knit-on-knit heuristic
+        - styling_adj: negative from ideal_outerwear_profile.avoid
+        Both stack, making cardigans rank much lower for knit sources.
+        """
+        source = _make_profile(
+            product_id="src-knit",
+            broad_category="tops",
+            gemini_category_l1="Tops",
+            gemini_category_l2="Knit Sweater",
+            apparent_fabric="Knit",
+            material_family="knit",
+            fit_type="Regular",
+            formality="Casual",
+        )
+        cardigan = _make_profile(
+            product_id="cand-cardigan",
+            broad_category="outerwear",
+            gemini_category_l1="Outerwear",
+            gemini_category_l2="Cardigan",
+            apparent_fabric="Knit",
+            fit_type="Relaxed",
+            formality="Casual",
+        )
+        # Metadata explicitly avoids cardigans for outerwear
+        meta = _styling_metadata_full()
+        meta["ideal_outerwear_profile"]["avoid"] = ["oversized cardigan", "knit cardigan"]
+
+        result = compute_styling_adjustment(source, cardigan, "outerwear", meta)
+
+        # Existing heuristic gives -0.06 (not in styling scorer, added separately)
+        # Styling scorer should give its own penalty from profile avoid
+        assert result.styling_adj < 0, "Cardigan should get negative styling_adj"
+        assert "profile_avoid" in result.breakdown, "Profile avoid should fire for cardigan"
+
+        # Simulate the full stacking as in _score_category():
+        _KNIT_CARDIGAN_PENALTY = -0.06
+        style_adj = _KNIT_CARDIGAN_PENALTY  # from outerwear heuristic
+        combined = style_adj + result.styling_adj
+        assert combined < -0.10, (
+            f"Combined penalty should be significant: style_adj={style_adj} + "
+            f"styling_adj={result.styling_adj} = {combined}"
+        )
+
+    def test_structured_outerwear_gets_bonus_from_both_systems(self):
+        """A blazer candidate should get:
+        - style_adj: +0.03 from _STRUCTURED_OUTERWEAR bonus
+        - styling_adj: +0.04 from category match (if blazer in ideal profile)
+        Both stack, making structured outerwear rank higher.
+        """
+        source = _source_top(fit_type="Fitted")
+        blazer = _make_profile(
+            product_id="cand-blazer",
+            broad_category="outerwear",
+            gemini_category_l1="Outerwear",
+            gemini_category_l2="Blazer",
+            apparent_fabric="Wool",
+            fit_type="Regular",
+            color_family="Black",
+            formality="Business Casual",
+        )
+        meta = _styling_metadata_full()
+        # Ensure blazer is in outerwear profile categories
+        assert "blazer" in meta["ideal_outerwear_profile"]["categories"]
+
+        result = compute_styling_adjustment(source, blazer, "outerwear", meta)
+
+        # Styling scorer should give category match bonus
+        assert result.styling_adj > 0, "Blazer should get positive styling_adj"
+        assert "category_match" in result.breakdown
+
+        # Simulate stacking:
+        _STRUCTURED_BONUS = 0.03
+        style_adj = _STRUCTURED_BONUS
+        combined = style_adj + result.styling_adj
+        assert combined > 0.05, (
+            f"Combined bonus should be meaningful: style_adj={style_adj} + "
+            f"styling_adj={result.styling_adj} = {combined}"
+        )
+
+    def test_good_bottom_gets_no_conflicting_signals(self):
+        """A well-matching bottom (straight jeans, regular fit, mid rise)
+        should get positive styling_adj. The avoid systems shouldn't
+        accidentally penalize it.
+        """
+        source = _source_top(fit_type="Fitted")
+        good_jeans = _candidate_bottom(
+            gemini_category_l2="Straight Leg Jeans",
+            fit_type="Regular",
+            rise="Mid",
+            length="Full Length",
+            apparent_fabric="Denim",
+            color_family="Blues",
+            formality="Casual",
+        )
+        meta = _styling_metadata_full()
+        result = compute_styling_adjustment(source, good_jeans, "bottoms", meta)
+
+        assert result.styling_adj > 0, "Well-matching jeans should score positive"
+        assert len(result.avoid_hits) == 0, "No avoids should fire on good match"
+        assert len(result.matched_profile_fields) >= 3, (
+            f"Should match multiple profile fields: {result.matched_profile_fields}"
+        )
+
+    def test_styling_penalty_cannot_rescue_hard_avoid_item(self):
+        """Even if a candidate matches some profile fields, a hard avoid
+        should make the total styling_adj negative. The hard avoid penalty
+        (-0.12) should outweigh any profile bonuses.
+        """
+        source = _source_top()
+        # Candidate matches some profile fields BUT hits a hard avoid
+        bad_cand = _candidate_bottom(
+            gemini_category_l2="Straight Leg Jeans",
+            name="Neon Mesh Sequin Mini Skirt",  # hits hard avoid
+            fit_type="Regular",
+            rise="Mid",
+            apparent_fabric="Sequin Mesh",
+        )
+        meta = _styling_metadata_full()
+        result = compute_styling_adjustment(source, bad_cand, "bottoms", meta)
+
+        assert result.styling_adj < 0, (
+            f"Hard avoid should dominate despite profile matches: "
+            f"adj={result.styling_adj}, breakdown={result.breakdown}"
+        )
+
+    def test_cardigan_vs_blazer_ordering(self):
+        """When both cardigan and blazer are candidates for outerwear,
+        the blazer should get a higher styling_adj than the cardigan
+        (assuming the source metadata prefers structured outerwear).
+        """
+        source = _source_top(fit_type="Fitted", apparent_fabric="Cotton")
+        cardigan = _make_profile(
+            product_id="cand-cardigan",
+            broad_category="outerwear",
+            gemini_category_l1="Outerwear",
+            gemini_category_l2="Cardigan",
+            apparent_fabric="Knit",
+            fit_type="Relaxed",
+        )
+        blazer = _make_profile(
+            product_id="cand-blazer",
+            broad_category="outerwear",
+            gemini_category_l1="Outerwear",
+            gemini_category_l2="Blazer",
+            apparent_fabric="Wool",
+            fit_type="Regular",
+            color_family="Black",
+        )
+        meta = _styling_metadata_full()
+        # Metadata prefers blazers, avoids puffer jacket (cardigan not explicitly avoided)
+        meta["ideal_outerwear_profile"]["categories"] = ["blazer", "leather jacket", "trench coat"]
+
+        card_result = compute_styling_adjustment(source, cardigan, "outerwear", meta)
+        blaz_result = compute_styling_adjustment(source, blazer, "outerwear", meta)
+
+        assert blaz_result.styling_adj > card_result.styling_adj, (
+            f"Blazer ({blaz_result.styling_adj}) should outscore cardigan "
+            f"({card_result.styling_adj}) when metadata prefers structured outerwear"
+        )
+
+    def test_both_avoid_systems_can_fire_on_same_candidate(self):
+        """A candidate can trigger outfit_avoids AND styling scorer avoids
+        simultaneously. The styling scorer doesn't replace outfit_avoids.
+        """
+        from services.outfit_avoids import compute_avoid_penalties
+
+        source = _make_profile(
+            product_id="src-refined",
+            broad_category="tops",
+            gemini_category_l1="Tops",
+            gemini_category_l2="Blouse",
+            formality="Semi-Formal",
+            style_tags=["Classic", "Elegant"],
+            apparent_fabric="Silk",
+            fit_type="Fitted",
+        )
+        # Sporty joggers: should fire K1 (style clash) in outfit_avoids
+        # AND soft_avoid in styling scorer
+        joggers = _make_profile(
+            product_id="cand-joggers",
+            broad_category="bottoms",
+            gemini_category_l1="Bottoms",
+            gemini_category_l2="Joggers",
+            name="Oversized Graphic Athletic Joggers",
+            formality="Casual",
+            style_tags=["Sporty", "Streetwear"],
+            apparent_fabric="Cotton Jersey",
+            fit_type="Oversized",
+        )
+
+        # Check outfit_avoids penalty
+        avoid_adj, triggered = compute_avoid_penalties(source, joggers, None)
+
+        # Check styling scorer penalty
+        meta = _styling_metadata_full(formality_level=4)
+        styling_result = compute_styling_adjustment(source, joggers, "bottoms", meta)
+
+        # Both systems should penalize (or at minimum, the combined is deeply negative)
+        combined = avoid_adj + styling_result.styling_adj
+        assert combined < -0.05, (
+            f"Sporty joggers with elegant source should get stacked penalties: "
+            f"avoid_adj={avoid_adj}, styling_adj={styling_result.styling_adj}, "
+            f"combined={combined}"
+        )
