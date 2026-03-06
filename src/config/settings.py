@@ -253,8 +253,12 @@ class Settings(BaseSettings):
         description="Enable Gemini vision reranker for queries with non-filterable product details"
     )
     vision_reranker_max_candidates: int = Field(
-        default=50,
+        default=150,
         description="Maximum candidates to send to the vision reranker"
+    )
+    detail_mode_broad_pool_size: int = Field(
+        default=300,
+        description="Number of candidates to fetch in detail mode broad Algolia pull"
     )
 
     # ==========================================================================

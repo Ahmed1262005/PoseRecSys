@@ -30,6 +30,7 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "unordered(style_tags)",         # 5th - Style descriptors
         "unordered(apparent_fabric)",    # 6th - Material
         "unordered(primary_color)",      # 7th - Color
+        "unordered(source_description)", # 8th - Product description from source site
     ],
 
     # ===========================================
@@ -419,6 +420,7 @@ def product_to_algolia_record(
         "name": product.get("name"),
         "brand": product.get("brand"),
         "article_type": product.get("article_type"),
+        "source_description": attrs.get("source_description"),
 
         # ==========================================
         # Category (Gemini Vision)

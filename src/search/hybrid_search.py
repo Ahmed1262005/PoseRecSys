@@ -340,133 +340,251 @@ class HybridSearchService:
                     total_optional=len(algolia_optional_filters),
                 )
 
-        # Step 3+4: Run Algolia + Semantic search
-        # For SPECIFIC/VAGUE intent, both searches are independent so we run
-        # them in parallel.  For EXACT intent, semantic only runs if Algolia
-        # returns 0, so we keep those sequential.
+        # =====================================================================
+        # DETAIL MODE: alternate retrieval path for fine-grained visual
+        # details (zipped pockets, pearl buttons, ruched sides, etc.).
         #
-        # Auto-detect active filters from the request model.
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by", "planner_context"}
-        has_filters = any(
-            getattr(request, field_name) not in (None, False, [])
-            for field_name in HybridSearchRequest.model_fields
-            if field_name not in _NON_FILTER_FIELDS
-        )
-        # Fetch extra semantic candidates when filters are active,
-        # since strict post-filtering will drop non-matching results
-        fetch_multiplier = 5 if has_filters else 3
-        fetch_size = request.page_size * fetch_multiplier
-
-        # Pre-build the semantic search parameters (needed for both paths)
-        semantic_results = []
-        clip_query = semantic_query_override if semantic_query_override else request.query
-        _queries_to_run = (
-            semantic_queries
-            if semantic_queries and len(semantic_queries) > 1
-            else [clip_query]
+        # FashionCLIP embeddings can't distinguish pocket-level details in
+        # 512-dim vectors, so semantic search is skipped entirely.  Instead
+        # we do a BROAD Algolia category pull using LLM-generated prefilter
+        # keywords that match against product names + descriptions.  The
+        # vision reranker (Gemini) later verifies the detail in images.
+        # =====================================================================
+        _is_detail_mode = (
+            search_plan is not None
+            and search_plan.detail_mode
+            and search_plan.detail_terms
         )
 
-        # Build a relaxed request for semantic search when planner is active
-        # or when filters are pre-resolved (refine path).  Subjective filters
-        # (colors, patterns, occasions) are removed so pgvector returns more
-        # candidates — the post-filter soft scoring will boost matches.
-        if search_plan is not None or skip_planner:
-            semantic_request = request.model_copy(update={
-                "categories": None,
-                "colors": None,
-                "patterns": None,
-                "occasions": None,
-            })
-            logger.info(
-                "Using relaxed filters for semantic search",
-                source="planner" if search_plan else "refine",
-                kept=["price", "brands", "exclude_brands", "category_l1", "category_l2"],
-                removed=["categories", "colors", "patterns", "occasions"],
-            )
-        else:
-            semantic_request = request
+        if _is_detail_mode:
+            from concurrent.futures import ThreadPoolExecutor
 
-        def _run_algolia() -> tuple:
-            """Run Algolia search, return (results, facets, elapsed_ms)."""
-            t0 = time.time()
-            results, fcts = self._search_algolia(
-                query=algolia_query,
-                filters=algolia_filters,
-                hits_per_page=fetch_size,
-                facets=_FACET_FIELDS,
-                optional_filters=algolia_optional_filters,
-            )
-            return results, fcts, int((time.time() - t0) * 1000)
+            _broad_pool_size = get_settings().detail_mode_broad_pool_size
+            _prefilter_kws = search_plan.prefilter_keywords or []
 
-        def _run_semantic() -> tuple:
-            """Run semantic search, return (results, query_count, elapsed_ms)."""
-            t0 = time.time()
-            if len(_queries_to_run) > 1:
-                results = self._search_semantic_multi(
-                    queries=_queries_to_run,
-                    request=semantic_request,
-                    limit_per_query=max(fetch_size // len(_queries_to_run), 30),
-                    user_id=user_id,
+            # Build the broad prefilter query: first 5 keywords as the
+            # Algolia query text (OR-matched by default), rest as
+            # optionalFilters for soft boosting.
+            _broad_query_terms = _prefilter_kws[:5]
+            _broad_optional = [f"source_description:{kw}" for kw in _prefilter_kws[5:]]
+            _broad_query = " ".join(_broad_query_terms) if _broad_query_terms else ""
+
+            def _run_algolia_keyword() -> tuple:
+                """Normal Algolia keyword search (base garment query)."""
+                t0 = time.time()
+                results, fcts = self._search_algolia(
+                    query=algolia_query,
+                    filters=algolia_filters,
+                    hits_per_page=200,
+                    facets=_FACET_FIELDS,
+                    optional_filters=algolia_optional_filters,
                 )
-                qcount = len(_queries_to_run)
-            else:
-                results = self._search_semantic(
-                    query=_queries_to_run[0],
-                    request=semantic_request,
-                    limit=fetch_size,
-                    user_id=user_id,
-                )
-                qcount = 1
-            return results, qcount, int((time.time() - t0) * 1000)
+                return results, fcts, int((time.time() - t0) * 1000)
 
-        if intent == QueryIntent.EXACT:
-            # EXACT: run Algolia first; only run semantic if Algolia returns 0
-            algolia_results, facets, algolia_ms = _run_algolia()
+            def _run_algolia_broad() -> tuple:
+                """Broad Algolia pull with prefilter keywords."""
+                t0 = time.time()
+                results, _ = self._search_algolia(
+                    query=_broad_query,
+                    filters=algolia_filters,
+                    hits_per_page=_broad_pool_size,
+                    optional_filters=_broad_optional or None,
+                )
+                return results, int((time.time() - t0) * 1000)
+
+            # Run both Algolia calls in parallel
+            algolia_results, facets = [], {}
+            broad_results = []
+            algolia_ms = 0
+            broad_ms = 0
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_kw = executor.submit(_run_algolia_keyword)
+                future_broad = executor.submit(_run_algolia_broad)
+
+                try:
+                    algolia_results, facets, algolia_ms = future_kw.result()
+                except Exception as e:
+                    logger.warning("Detail mode keyword Algolia failed", error=str(e))
+                try:
+                    broad_results, broad_ms = future_broad.result()
+                except Exception as e:
+                    logger.warning("Detail mode broad Algolia failed", error=str(e))
+
             timing["algolia_ms"] = algolia_ms
+            timing["detail_broad_ms"] = broad_ms
+            timing["semantic_ms"] = 0
+            timing["semantic_query_count"] = 0
+            timing["detail_mode"] = True
 
-            if len(algolia_results) == 0:
-                semantic_results, sq_count, semantic_ms = _run_semantic()
+            # Merge keyword + broad results, dedup by product_id
+            _detail_seen: set = set()
+            merged_algolia: List[dict] = []
+            for r in algolia_results + broad_results:
+                pid = r.get("product_id")
+                if pid and pid not in _detail_seen:
+                    _detail_seen.add(pid)
+                    merged_algolia.append(r)
+
+            # Brand diversity cap on the pool — max 25 per brand to prevent
+            # one brand (e.g., Boohoo with 20K products) dominating the pool.
+            _MAX_PER_BRAND_POOL = 25
+            brand_counts: Dict[str, int] = {}
+            diverse_pool: List[dict] = []
+            for r in merged_algolia:
+                brand = (r.get("brand") or "").lower()
+                cnt = brand_counts.get(brand, 0)
+                if cnt < _MAX_PER_BRAND_POOL:
+                    diverse_pool.append(r)
+                    brand_counts[brand] = cnt + 1
+
+            # Use the diverse pool as our "algolia_results" for RRF.
+            # Semantic results stay empty — detail mode skips FashionCLIP.
+            algolia_results = diverse_pool
+            semantic_results = []
+
+            logger.info(
+                "Detail mode retrieval",
+                keyword_count=algolia_ms and len([r for r in diverse_pool if r in algolia_results]) or 0,
+                broad_count=len(broad_results),
+                merged_unique=len(merged_algolia),
+                after_brand_cap=len(diverse_pool),
+                prefilter_keywords=_prefilter_kws[:5],
+                broad_pool_size=_broad_pool_size,
+            )
+
+        else:
+            # =================================================================
+            # NORMAL MODE: Algolia + FashionCLIP semantic search
+            # =================================================================
+
+            # Step 3+4: Run Algolia + Semantic search
+            # For SPECIFIC/VAGUE intent, both searches are independent so we
+            # run them in parallel.  For EXACT intent, semantic only runs if
+            # Algolia returns 0, so we keep those sequential.
+            #
+            # Auto-detect active filters from the request model.
+            _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by", "planner_context"}
+            has_filters = any(
+                getattr(request, field_name) not in (None, False, [])
+                for field_name in HybridSearchRequest.model_fields
+                if field_name not in _NON_FILTER_FIELDS
+            )
+            # Fetch extra semantic candidates when filters are active,
+            # since strict post-filtering will drop non-matching results
+            fetch_multiplier = 5 if has_filters else 3
+            fetch_size = request.page_size * fetch_multiplier
+
+            # Pre-build the semantic search parameters (needed for both paths)
+            semantic_results = []
+            clip_query = semantic_query_override if semantic_query_override else request.query
+            _queries_to_run = (
+                semantic_queries
+                if semantic_queries and len(semantic_queries) > 1
+                else [clip_query]
+            )
+
+            # Build a relaxed request for semantic search when planner is active
+            # or when filters are pre-resolved (refine path).  Subjective filters
+            # (colors, patterns, occasions) are removed so pgvector returns more
+            # candidates — the post-filter soft scoring will boost matches.
+            if search_plan is not None or skip_planner:
+                semantic_request = request.model_copy(update={
+                    "categories": None,
+                    "colors": None,
+                    "patterns": None,
+                    "occasions": None,
+                })
+                logger.info(
+                    "Using relaxed filters for semantic search",
+                    source="planner" if search_plan else "refine",
+                    kept=["price", "brands", "exclude_brands", "category_l1", "category_l2"],
+                    removed=["categories", "colors", "patterns", "occasions"],
+                )
+            else:
+                semantic_request = request
+
+            def _run_algolia() -> tuple:
+                """Run Algolia search, return (results, facets, elapsed_ms)."""
+                t0 = time.time()
+                results, fcts = self._search_algolia(
+                    query=algolia_query,
+                    filters=algolia_filters,
+                    hits_per_page=fetch_size,
+                    facets=_FACET_FIELDS,
+                    optional_filters=algolia_optional_filters,
+                )
+                return results, fcts, int((time.time() - t0) * 1000)
+
+            def _run_semantic() -> tuple:
+                """Run semantic search, return (results, query_count, elapsed_ms)."""
+                t0 = time.time()
+                if len(_queries_to_run) > 1:
+                    results = self._search_semantic_multi(
+                        queries=_queries_to_run,
+                        request=semantic_request,
+                        limit_per_query=max(fetch_size // len(_queries_to_run), 30),
+                        user_id=user_id,
+                    )
+                    qcount = len(_queries_to_run)
+                else:
+                    results = self._search_semantic(
+                        query=_queries_to_run[0],
+                        request=semantic_request,
+                        limit=fetch_size,
+                        user_id=user_id,
+                    )
+                    qcount = 1
+                return results, qcount, int((time.time() - t0) * 1000)
+
+            if intent == QueryIntent.EXACT:
+                # EXACT: run Algolia first; only run semantic if Algolia returns 0
+                algolia_results, facets, algolia_ms = _run_algolia()
+                timing["algolia_ms"] = algolia_ms
+
+                if len(algolia_results) == 0:
+                    semantic_results, sq_count, semantic_ms = _run_semantic()
+                    timing["semantic_ms"] = semantic_ms
+                    timing["semantic_query_count"] = sq_count
+                    if semantic_results:
+                        logger.info(
+                            "Algolia returned 0 results for EXACT query, fell back to semantic",
+                            query=request.query,
+                            semantic_count=len(semantic_results),
+                        )
+            else:
+                # SPECIFIC / VAGUE: run Algolia + Semantic in parallel
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                algolia_results, facets = [], {}
+                algolia_ms = 0
+                semantic_ms = 0
+                sq_count = 1
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    future_algolia = executor.submit(_run_algolia)
+                    future_semantic = executor.submit(_run_semantic)
+
+                    try:
+                        algolia_results, facets, algolia_ms = future_algolia.result()
+                    except Exception as e:
+                        logger.warning("Algolia search failed in parallel", error=str(e))
+
+                    try:
+                        semantic_results, sq_count, semantic_ms = future_semantic.result()
+                    except Exception as e:
+                        logger.warning("Semantic search failed in parallel", error=str(e))
+
+                timing["algolia_ms"] = algolia_ms
                 timing["semantic_ms"] = semantic_ms
                 timing["semantic_query_count"] = sq_count
-                if semantic_results:
+
+                if len(algolia_results) == 0 and semantic_results:
                     logger.info(
-                        "Algolia returned 0 results for EXACT query, fell back to semantic",
+                        "Algolia returned 0 results, falling back to semantic-only",
                         query=request.query,
                         semantic_count=len(semantic_results),
                     )
-        else:
-            # SPECIFIC / VAGUE: run Algolia + Semantic in parallel
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            algolia_results, facets = [], {}
-            algolia_ms = 0
-            semantic_ms = 0
-            sq_count = 1
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_algolia = executor.submit(_run_algolia)
-                future_semantic = executor.submit(_run_semantic)
-
-                try:
-                    algolia_results, facets, algolia_ms = future_algolia.result()
-                except Exception as e:
-                    logger.warning("Algolia search failed in parallel", error=str(e))
-
-                try:
-                    semantic_results, sq_count, semantic_ms = future_semantic.result()
-                except Exception as e:
-                    logger.warning("Semantic search failed in parallel", error=str(e))
-
-            timing["algolia_ms"] = algolia_ms
-            timing["semantic_ms"] = semantic_ms
-            timing["semantic_query_count"] = sq_count
-
-            if len(algolia_results) == 0 and semantic_results:
-                logger.info(
-                    "Algolia returned 0 results, falling back to semantic-only",
-                    query=request.query,
-                    semantic_count=len(semantic_results),
-                )
 
         # Step 4b: Enrich semantic results with Gemini attributes from Algolia
         if semantic_results:

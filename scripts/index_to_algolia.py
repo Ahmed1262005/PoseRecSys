@@ -65,7 +65,8 @@ def fetch_products_batch(supabase, offset: int, batch_size: int, brand: str = No
         "  construction, primary_color, color_family, secondary_colors, "
         "  pattern, pattern_scale, apparent_fabric, texture, sheen, "
         "  style_tags, occasions, seasons, formality, trend_tags, "
-        "  fit_type, stretch, rise, leg_shape, silhouette"
+        "  fit_type, stretch, rise, leg_shape, silhouette, "
+        "  source_description"
         ")"
     ).eq("in_stock", True)
 
@@ -185,7 +186,8 @@ def fetch_products_by_ids(supabase, product_ids: list):
         "  construction, primary_color, color_family, secondary_colors, "
         "  pattern, pattern_scale, apparent_fabric, texture, sheen, "
         "  style_tags, occasions, seasons, formality, trend_tags, "
-        "  fit_type, stretch, rise, leg_shape, silhouette"
+        "  fit_type, stretch, rise, leg_shape, silhouette, "
+        "  source_description"
         ")"
     ).in_("id", product_ids)
 

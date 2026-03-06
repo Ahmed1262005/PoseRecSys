@@ -14,8 +14,8 @@ Architecture:
 Only triggered when the planner identifies non-filterable `detail_terms`.
 Gracefully degrades: on any failure, returns candidates unchanged.
 
-Cost: ~$0.001/search at 20 images (Gemini 2.0 Flash pricing).
-Latency: ~3-6s for 20 images (parallel download + single Gemini call).
+Cost: ~$0.005/search at 150 images (Gemini 2.0 Flash pricing).
+Latency: ~5-20s for 150 images (parallel download + batched Gemini calls).
 """
 
 import io
@@ -37,7 +37,11 @@ logger = get_logger(__name__)
 _IMG_SIZE = (256, 256)
 _JPEG_QUALITY = 50
 _DOWNLOAD_TIMEOUT = 4  # seconds per image
-_DOWNLOAD_WORKERS = 8  # parallel downloads
+_DOWNLOAD_WORKERS = 16  # parallel downloads
+
+# Gemini batching — split large candidate sets into batches of this size
+# to stay within Gemini's per-request limits and get consistent scoring.
+_GEMINI_BATCH_SIZE = 50
 
 
 # =============================================================================
@@ -195,12 +199,16 @@ def _call_gemini(
                 genai.types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
             )
 
+        # Scale output tokens with batch size: ~25 tokens per item
+        # ({"idx":1,"score":N,"reason":"brief explanation"})
+        _max_tokens = max(1200, len(items) * 30)
+
         resp = client.models.generate_content(
             model=model,
             contents=parts,
             config=genai.types.GenerateContentConfig(
                 temperature=0.0,
-                max_output_tokens=1200,
+                max_output_tokens=_max_tokens,
             ),
         )
 
@@ -285,20 +293,39 @@ def rerank_with_vision(
         logger.warning("Vision reranker: no images downloaded successfully")
         return candidates
 
-    # Step 2: Build prompt and call Gemini
-    items = [(idx, cand) for idx, cand, _ in downloaded]
-    images = [jpeg for _, _, jpeg in downloaded]
-    prompt = _build_prompt(detail, items)
+    # Step 2: Build prompt and call Gemini in batches
+    #
+    # For <=50 images, single call.  For >50, split into batches of
+    # _GEMINI_BATCH_SIZE and merge scores across batches.
+    all_scores: Dict[int, Tuple[int, str]] = {}
 
     t_llm_start = time.time()
-    scores = _call_gemini(
-        prompt=prompt,
-        images=images,
-        items=items,
-        model=settings.vision_reranker_model,
-        api_key=settings.google_api_key,
-    )
+    num_batches = (len(downloaded) + _GEMINI_BATCH_SIZE - 1) // _GEMINI_BATCH_SIZE
+
+    for batch_idx in range(num_batches):
+        start = batch_idx * _GEMINI_BATCH_SIZE
+        end = start + _GEMINI_BATCH_SIZE
+        batch = downloaded[start:end]
+
+        batch_items = [(idx, cand) for idx, cand, _ in batch]
+        batch_images = [jpeg for _, _, jpeg in batch]
+        batch_prompt = _build_prompt(detail, batch_items)
+
+        batch_scores = _call_gemini(
+            prompt=batch_prompt,
+            images=batch_images,
+            items=batch_items,
+            model=settings.vision_reranker_model,
+            api_key=settings.google_api_key,
+        )
+        all_scores.update(batch_scores)
+
+        # Small delay between batches to avoid rate limits
+        if batch_idx < num_batches - 1 and batch_scores:
+            time.sleep(0.5)
+
     t_llm_end = time.time()
+    scores = all_scores
 
     if not scores:
         logger.warning("Vision reranker: no scores returned from Gemini")
@@ -343,6 +370,7 @@ def rerank_with_vision(
         detail=detail,
         images_sent=len(downloaded),
         images_scored=len(scores),
+        gemini_batches=num_batches,
         removed=removed,
         boosted=boosted,
         kept=len(kept),

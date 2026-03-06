@@ -115,6 +115,24 @@ class SearchPlan(BaseModel):
         description="Non-filterable product details from the query for vision reranker verification"
     )
 
+    # When True, the pipeline uses a detail-aware retrieval path: skip
+    # FashionCLIP (can't distinguish fine details), do a broad Algolia
+    # category pull with prefilter_keywords, and let the vision reranker
+    # handle accuracy.
+    detail_mode: bool = Field(
+        default=False,
+        description="True when the query's key feature is a non-filterable visual detail"
+    )
+
+    # Keywords the LLM expects to find in product names/descriptions of items
+    # that have the requested detail.  Used for cheap text-based prefiltering:
+    # Algolia matches these against name + source_description to prioritise
+    # likely-relevant candidates before the expensive Gemini vision pass.
+    prefilter_keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords likely in product names/descriptions for items with this detail"
+    )
+
     # Confidence 0.0-1.0 in the plan
     confidence: float = Field(
         default=0.8,
@@ -336,6 +354,8 @@ Return a JSON object with these fields:
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
 - detail_terms: string[] (non-filterable product details for vision verification — see Section 8 rule 7)
+- detail_mode: boolean (true when the query's distinguishing feature is a non-filterable visual/construction detail — see Section 8 rule 8)
+- prefilter_keywords: string[] (keywords likely in product names/descriptions for text prefiltering — see Section 8 rule 8)
 - brand: string | null
 - max_price: number | null
 - min_price: number | null
@@ -533,6 +553,36 @@ If you can only think of one meaningful angle, set semantic_queries to [semantic
    semantic_query AND detail_terms. Do NOT guess filter mappings — leave avoid empty for
    non-filterable features. detail_terms triggers a vision reranker that verifies the detail
    in product images (e.g., detail_terms: ["ruched sides", "zipped pockets"]).
+8. DETAIL MODE: When the query's KEY distinguishing feature is a non-filterable visual or
+   construction detail (pocket type, button style, closure placement, stitching, hardware,
+   draping, gathering), set detail_mode: true and populate ALL of:
+   - detail_terms: the exact visual detail to verify (e.g., ["zipped pockets"])
+   - prefilter_keywords: 8-15 keywords likely to appear in product NAMES or DESCRIPTIONS
+     of items with this detail. Include:
+     a) Direct keyword variations (e.g., "zip", "zipper", "zippered", "zipped")
+     b) Related product terms (e.g., "pocket", "pockets", "cargo")
+     c) Category/style associations (e.g., "utility", "moto", "tactical", "bomber")
+     d) Construction terms (e.g., "closure", "hardware", "functional")
+   - algolia_query: STRIP the detail terms, keep only the base garment type.
+     "jacket with zipped pockets" → algolia_query: "jacket"
+     "dress with pearl buttons" → algolia_query: "dress"
+   
+   Examples:
+     "jacket with zipped pockets" →
+       detail_mode: true, detail_terms: ["zipped pockets"],
+       prefilter_keywords: ["zip", "zipper", "zippered", "pocket", "pockets", "cargo",
+                            "utility", "moto", "tactical", "bomber", "puffer", "hardware"],
+       algolia_query: "jacket"
+     "dress with pearl buttons" →
+       detail_mode: true, detail_terms: ["pearl buttons"],
+       prefilter_keywords: ["pearl", "button", "buttons", "embellished", "beaded",
+                            "detail", "cardigan", "knit", "vintage", "classic", "ornate"],
+       algolia_query: "dress"
+     "top with ruched sides" →
+       detail_mode: true, detail_terms: ["ruched sides"],
+       prefilter_keywords: ["ruched", "ruching", "gathered", "shirred", "scrunch",
+                            "bodycon", "fitted", "draped", "textured", "side detail"],
+       algolia_query: "top"
 
 VOCABULARY TRANSLATION:
 - "skirt with shorts underneath" → algolia_query="skort"
@@ -1218,6 +1268,8 @@ class QueryPlanner:
                     attributes=plan.attributes,
                     avoid=plan.avoid,
                     detail_terms=plan.detail_terms,
+                    detail_mode=plan.detail_mode,
+                    prefilter_keywords=plan.prefilter_keywords,
                     follow_ups_count=len(plan.parsed_follow_ups),
                     confidence=plan.confidence,
                     latency_ms=latency_ms,
