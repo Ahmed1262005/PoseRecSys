@@ -650,6 +650,43 @@ class HybridSearchService:
                     patterns=name_exclusions,
                 )
 
+        # Step 5.6: Vision reranker for detail-specific queries.
+        # When the planner identified non-filterable detail_terms (e.g.,
+        # "zipped pockets", "pearl buttons"), send candidate images to
+        # Gemini 2.0 Flash to verify the detail is actually visible.
+        # Applied AFTER RRF merge + exclusion filtering, BEFORE profile
+        # scoring — so the vision scores adjust rrf_score before the
+        # reranker applies profile boosts and diversity caps.
+        if (
+            search_plan is not None
+            and search_plan.detail_terms
+            and merged
+        ):
+            try:
+                from search.llm_reranker import rerank_with_vision
+
+                t_vision = time.time()
+                vision_max = get_settings().vision_reranker_max_candidates
+                merged = rerank_with_vision(
+                    detail_terms=search_plan.detail_terms,
+                    candidates=merged,
+                    max_candidates=vision_max,
+                )
+                vision_ms = int((time.time() - t_vision) * 1000)
+                timing["vision_reranker_ms"] = vision_ms
+                timing["plan_detail_terms"] = search_plan.detail_terms
+                logger.info(
+                    "Vision reranker applied",
+                    detail_terms=search_plan.detail_terms,
+                    vision_ms=vision_ms,
+                    candidates=len(merged),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Vision reranker failed, continuing without it",
+                    error=str(e),
+                )
+
         # Step 5.5: Load impression counts for soft demotion
         impression_counts: Optional[Dict[str, int]] = None
         if user_id:

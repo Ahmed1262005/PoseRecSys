@@ -107,6 +107,14 @@ class SearchPlan(BaseModel):
         description="True if user wants sale/discounted items only"
     )
 
+    # Non-filterable product details from the query (e.g., "zipped pockets",
+    # "pearl buttons", "ruched sides").  When present, the vision reranker
+    # sends candidate images to Gemini to verify the detail is actually visible.
+    detail_terms: List[str] = Field(
+        default_factory=list,
+        description="Non-filterable product details from the query for vision reranker verification"
+    )
+
     # Confidence 0.0-1.0 in the plan
     confidence: float = Field(
         default=0.8,
@@ -235,12 +243,15 @@ def _build_system_prompt() -> str:
    - "maxi skirt" → attributes: {{"length": ["Maxi"]}}, avoid: {{"length": ["Mini", "Micro", "Cropped"]}}
    This is critical — without the avoid values, semantic search results with wrong attributes leak through.
 
-7. **Non-filterable features go to semantic_query only.** Some things users mention cannot be filtered
-   because our database has no attribute for them: slit, ruching, cutout, wrap, tie-front, drawstring,
-   button-down, zipper placement, pocket detail, etc. For these:
+7. **Non-filterable features go to semantic_query AND detail_terms.** Some things users mention cannot
+   be filtered because our database has no attribute for them: slit, ruching, cutout, wrap, tie-front,
+   drawstring, button-down, zipper placement, pocket detail, etc. For these:
    - Put them in semantic_query (FashionCLIP understands visual features)
+   - ALSO put them in detail_terms (e.g., detail_terms: ["zipped pockets"]) — the vision reranker
+     will use these to verify the detail is actually visible in product images
    - Do NOT invent avoid values that don't match — never guess filter mappings for concepts we don't track
-   - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8)
+   - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8) — do NOT
+     add "no slit" to detail_terms (detail_terms is for POSITIVE features to verify, not negations)
 
 8. **semantic_query must be POSITIVE descriptions only — NEVER use negation.**
    FashionCLIP is a vision-language embedding model. It does NOT understand negation.
@@ -324,6 +335,7 @@ Return a JSON object with these fields:
 - modes: string[] (mode tags from the menu below)
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
+- detail_terms: string[] (non-filterable product details for vision verification — see Section 8 rule 7)
 - brand: string | null
 - max_price: number | null
 - min_price: number | null
@@ -517,8 +529,10 @@ If you can only think of one meaningful angle, set semantic_queries to [semantic
 4. Never duplicate: if a mode handles it, don't also put it in avoid.
 5. Combine freely: modes + attributes + avoid can all be used together.
 6. ALWAYS set category_l1. Never leave it empty. Default to ["Tops", "Dresses"] for vague queries.
-7. If a feature isn't in our filter lists (slit, cutout, ruching, etc.), put it ONLY in
-   semantic_query. Do NOT guess filter mappings — leave avoid empty for non-filterable features.
+7. If a feature isn't in our filter lists (slit, cutout, ruching, etc.), put it in BOTH
+   semantic_query AND detail_terms. Do NOT guess filter mappings — leave avoid empty for
+   non-filterable features. detail_terms triggers a vision reranker that verifies the detail
+   in product images (e.g., detail_terms: ["ruched sides", "zipped pockets"]).
 
 VOCABULARY TRANSLATION:
 - "skirt with shorts underneath" → algolia_query="skort"
@@ -1203,6 +1217,7 @@ class QueryPlanner:
                     modes=plan.modes,
                     attributes=plan.attributes,
                     avoid=plan.avoid,
+                    detail_terms=plan.detail_terms,
                     follow_ups_count=len(plan.parsed_follow_ups),
                     confidence=plan.confidence,
                     latency_ms=latency_ms,
