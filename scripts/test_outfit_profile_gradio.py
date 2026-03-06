@@ -378,6 +378,8 @@ def render_card(
     cosine = item.get("cosine_similarity", item.get("similarity", 0))
     compat = item.get("compatibility_score", 0)
     profile_adj = item.get("profile_adjustment", 0)
+    avoid_adj = item.get("avoid_adjustment", 0)
+    styling_adj = item.get("styling_adjustment", 0)
     dims = item.get("dimension_scores", {})
     pid = item.get("product_id", "")
 
@@ -415,7 +417,7 @@ def render_card(
         scores_parts.append(f"compat {compat:.3f}")
     scores_html = f'<div class="card-scores">{" &middot; ".join(scores_parts)}</div>' if scores_parts else ""
 
-    # Profile adjustment chip
+    # Adjustment chips (profile, avoid, styling)
     adj_html = ""
     if show_profile_adj and profile_adj:
         if profile_adj > 0.005:
@@ -424,7 +426,12 @@ def render_card(
             chip_cls = "adj-chip adj-chip-neg"
         else:
             chip_cls = "adj-chip adj-chip-zero"
-        adj_html = f'<span class="{chip_cls}">profile {profile_adj:+.3f}</span>'
+        adj_html += f'<span class="{chip_cls}">profile {profile_adj:+.3f}</span> '
+    if avoid_adj and abs(avoid_adj) > 0.001:
+        adj_html += f'<span class="adj-chip adj-chip-neg">avoid {avoid_adj:+.3f}</span> '
+    if styling_adj and abs(styling_adj) > 0.001:
+        s_cls = "adj-chip adj-chip-pos" if styling_adj > 0 else "adj-chip adj-chip-neg"
+        adj_html += f'<span class="{s_cls}">styling {styling_adj:+.3f}</span>'
 
     # Dimension bars
     dim_html = ""
@@ -521,10 +528,14 @@ def render_outfit_results(
     engine_ver = scoring_info.get("engine", "?")
 
     # Header
+    styling_on = scoring_info.get("styling_scorer", False)
+    judge_on = scoring_info.get("stylist_judge", False)
     header_cls = "header-personalized" if personalized else "header-baseline"
     label = "PERSONALIZED" if personalized else "BASELINE"
     cluster_text = f" | Clusters: {', '.join(clusters)}" if clusters else ""
-    header = f'<div class="comparison-header {header_cls}">{label} ({engine_ver}){cluster_text}</div>'
+    scorer_text = " | styling scorer" if styling_on else ""
+    judge_text = " | LLM judge" if judge_on else ""
+    header = f'<div class="comparison-header {header_cls}">{label} ({engine_ver}{scorer_text}{judge_text}){cluster_text}</div>'
 
     # Diff summary (only for personalized when we have baseline to compare)
     diff_html = ""
@@ -911,11 +922,11 @@ def explore_clusters(
 
 
 def get_random_product(category_filter: str = "") -> str:
-    """Fetch a random in-stock product that has Gemini attributes."""
+    """Fetch a random in-stock product that has v1.0.0.2 styling metadata."""
     try:
         q = SUPABASE.table("product_attributes").select(
             "sku_id, category_l1"
-        )
+        ).eq("extractor_version", "v1.0.0.2")
         if category_filter:
             q = q.eq("category_l1", category_filter)
         else:

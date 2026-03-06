@@ -1382,26 +1382,29 @@ class TestL1LifestyleMismatch:
         assert penalty <= -0.15
 
     def test_l1_override_by_athleisure(self):
-        """Athleisure user reduces L1 to 30%."""
+        """Athleisure user reduces L1 + L3 to 30%."""
         src = _p(style_tags=["classic"], formality_level=3)
         cand = _p(style_tags=["activewear"])
         penalty, triggered = compute_avoid_penalties(
             src, cand, user_styles={"athleisure"},
         )
         assert "L1" in triggered
-        # -0.15 * 0.3 = -0.045
-        assert -0.05 < penalty < 0.0
+        assert "L3" in triggered
+        # L1: -0.15 * 0.3 = -0.045, L3: -0.12 * 0.3 = -0.036
+        assert -0.09 < penalty < 0.0
 
     def test_l1_override_by_sporty_chic(self):
-        """Sporty chic user reduces L1 to 30%."""
+        """Sporty chic user reduces L1 + L2 + L3 to 30%."""
         src = _p(style_tags=["elegant"], formality_level=4)
         cand = _p(style_tags=["athletic"], occasions=["gym"])
         penalty, triggered = compute_avoid_penalties(
             src, cand, user_styles={"sporty chic"},
         )
         assert "L1" in triggered
-        # Check penalty is reduced (not full -0.15)
-        assert penalty > -0.10
+        assert "L3" in triggered
+        # All L-rules overridden: L1(-0.045) + L2(-0.054) + L3(-0.036) = -0.135
+        # Verify all are reduced (full would be -0.45)
+        assert penalty > -0.15
 
 
 class TestL2ActiveVsEvening:
@@ -1461,15 +1464,16 @@ class TestL2ActiveVsEvening:
         assert penalty <= -0.18
 
     def test_l2_override_by_athleisure(self):
-        """Athleisure user reduces L2 to 30%."""
+        """Athleisure user reduces L2 + L3 to 30%."""
         src = _p(formality_level=4, occasions=["formal event"])
         cand = _p(style_tags=["activewear"])
         penalty, triggered = compute_avoid_penalties(
             src, cand, user_styles={"athleisure"},
         )
         assert "L2" in triggered
-        # -0.18 * 0.3 = -0.054
-        assert penalty > -0.10
+        assert "L3" in triggered
+        # L2(-0.054) + L3(-0.036) + possibly L1(-0.045) all at 30%
+        assert penalty > -0.15
 
     def test_sporty_alone_no_l2(self):
         """Sporty-only cand vs evening source → no L2 (K1 handles it)."""

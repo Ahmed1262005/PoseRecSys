@@ -3268,7 +3268,19 @@ class OutfitEngine:
         })
         _STRUCTURED_BONUS = 0.03
         _KNIT_CARDIGAN_PENALTY = -0.06
-        source_is_knit = source.material_family == "knit"
+        # T-shirts, tank tops, henleys, etc. are jersey knit even when
+        # apparent_fabric says "cotton" or "cotton blend".  Treat them
+        # as knit for the cardigan-redundancy check.
+        _IMPLICIT_KNIT_L2 = frozenset({
+            "t-shirt", "tank top", "camisole", "henley", "long sleeve t-shirt",
+            "crop top", "bodysuit", "jersey top", "knit top", "polo",
+            "turtleneck", "mock neck top",
+        })
+        source_l2 = (source.gemini_category_l2 or "").lower().strip()
+        source_is_knit = (
+            source.material_family == "knit"
+            or source_l2 in _IMPLICIT_KNIT_L2
+        )
 
         scored = []
         for cand in profiles:

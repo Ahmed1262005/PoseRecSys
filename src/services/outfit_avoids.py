@@ -107,19 +107,24 @@ _SPORTY_STYLES: Set[str] = {"sporty", "streetwear"}
 # K1 already handles.  L-rules target the *lifestyle* context: items that
 # belong in a gym/yoga/running context, not just sporty-styled pieces.
 _ACTIVE_CONTEXT_STYLES: Set[str] = {
-    "activewear", "athletic",
+    "activewear", "athletic", "athleisure",
 }
 _ACTIVE_CONTEXT_OCCASIONS: Set[str] = {
     "workout", "gym", "exercise", "training",
-    "yoga", "running", "hiking",
+    "yoga", "running", "hiking", "athletic",
 }
 _ACTIVE_NAME_SIGNALS: Tuple[str, ...] = (
     "active ", "sport ", "athletic ", "performance ",
     "training ", "gym ", "yoga ", "running ",
+    "tennis ", "airbrush ", "ride pant",
 )
 # Broad activewear L2 set (superset of _ACTIVEWEAR_L2 + _GYM_PIECE_L2)
 _ACTIVE_L2_BROAD: Set[str] = (
-    _ACTIVEWEAR_L2 | _GYM_PIECE_L2 | {"athletic tank", "sports tank"}
+    _ACTIVEWEAR_L2 | _GYM_PIECE_L2 | {
+        "athletic tank", "sports tank", "tennis skirt",
+        "tennis dress", "golf skirt", "cycling shorts",
+        "yoga pants", "joggers", "active pants",
+    }
 )
 
 # Polished / tailored context signals
@@ -141,8 +146,8 @@ _STYLE_OVERRIDES: Dict[str, Set[str]] = {
     "edgy":          {"F3", "B1", "HF2"},
     "punk":          {"F3", "B1", "HF2"},
     "grunge":        {"F3", "B1", "HF2"},
-    "athleisure":    {"C1", "C2", "HF3", "K1", "L1", "L2"},
-    "sporty chic":   {"C1", "C2", "HF3", "K1", "L1", "L2"},
+    "athleisure":    {"C1", "C2", "HF3", "K1", "L1", "L2", "L3"},
+    "sporty chic":   {"C1", "C2", "HF3", "K1", "L1", "L2", "L3"},
     "avant-garde":   {"E1", "E2", "E3"},
     "experimental":  {"E1", "E2", "E3"},
     "eclectic":      {"J1", "B1", "HF1", "K1"},
@@ -918,6 +923,31 @@ def _check_L2(src: "AestheticProfile", cand: "AestheticProfile") -> float:
     return 0.0
 
 
+def _check_L3(src: "AestheticProfile", cand: "AestheticProfile") -> float:
+    """Active/athleisure candidate paired with non-active casual source.
+
+    Catches items like 'Tennis Skirt' or 'Ride Pant' from athleisure brands
+    surfacing next to basic casual T-shirts, blouses, or jeans.  L1 only
+    fires for *polished* sources; this rule covers the gap where the source
+    is casual/relaxed (not polished, not active either) but the candidate
+    is clearly activewear.
+
+    Bridge items with both active and casual-fashion signals are exempt.
+    """
+    # Only fires when candidate is active and source is NOT active
+    if not _has_active_context(cand):
+        return 0.0
+    if _has_active_context(src):
+        return 0.0  # both active = fine (athleisure outfit)
+
+    # Bridge check: candidate also carries non-active fashion signals
+    # (e.g. 'sporty chic blazer') — skip penalty
+    if _has_polished_context(cand):
+        return 0.0
+
+    return -0.12
+
+
 # ============================================================================
 # Soft-rule registry
 # ============================================================================
@@ -960,6 +990,7 @@ _SOFT_RULES: List[Tuple[str, Callable]] = [
     # L: Lifestyle / context mismatch
     ("L1", _check_L1),
     ("L2", _check_L2),
+    ("L3", _check_L3),
 ]
 
 
