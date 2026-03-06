@@ -44,6 +44,7 @@ from services.outfit_judge import (
     VisionJudge, FitIntent,
     derive_fit_intent, get_pair_judge,
 )
+from services.styling_scorer import score_candidates_batch as _styling_score_batch
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,13 @@ class AestheticProfile:
     gemini_category_l1: Optional[str] = None
     gemini_category_l2: Optional[str] = None
 
+    # Styling metadata (v1.0.0.2 extractor — used by StylingProfileMatcher)
+    styling_metadata: Optional[Dict[str, Any]] = None
+    styling_role: Optional[str] = None
+    appearance_top_tags: Optional[List[str]] = None
+    vibe_tags: Optional[List[str]] = None
+    extractor_version: Optional[str] = None
+
     @classmethod
     def from_product_and_attrs(
         cls, product: Dict, attrs: Optional[Dict] = None
@@ -197,6 +205,12 @@ class AestheticProfile:
             stretch=a.get("stretch"),
             gemini_category_l1=a.get("category_l1"),
             gemini_category_l2=a.get("category_l2"),
+            # Styling metadata (v1.0.0.2 extractor)
+            styling_metadata=a.get("styling_metadata"),
+            styling_role=a.get("styling_role"),
+            appearance_top_tags=_to_list(a.get("appearance_top_tags")),
+            vibe_tags=_to_list(a.get("vibe_tags")),
+            extractor_version=a.get("extractor_version"),
         )
         # Compute derived fields
         _derive_fields(profile)
@@ -2019,7 +2033,8 @@ _ATTRS_SELECT = (
     "occasions, style_tags, pattern, formality, fit_type, "
     "color_family, primary_color, secondary_colors, seasons, silhouette, "
     "construction, apparent_fabric, texture, coverage_level, "
-    "sheen, rise, leg_shape, stretch"
+    "sheen, rise, leg_shape, stretch, "
+    "styling_metadata, styling_role, appearance_top_tags, vibe_tags, extractor_version"
 )
 
 _PRODUCT_SELECT = (
@@ -2724,12 +2739,18 @@ class OutfitEngine:
                     user_styles,
                 )
 
-        # --- Outfit ranking (v3.1) ---
+        # --- Outfit ranking (v3.1, gated by use_llm_judge) ---
         # After per-category scoring + veto, rank complete outfit combos
         # to prefer styled compositions over safe catalog pairings.
         # Only runs when building a full outfit (≥2 categories, not paginated feed).
+        # Default OFF in v3.4 — styling scorer replaces the judge.
         outfit_ranked = False
-        judge = get_pair_judge()
+        try:
+            from config.settings import get_settings
+            _use_judge_outfit = getattr(get_settings(), "use_llm_judge", False)
+        except Exception:
+            _use_judge_outfit = False
+        judge = get_pair_judge() if _use_judge_outfit else None
         if judge and len(scored_by_cat) >= 2 and not target_category:
             try:
                 intent = derive_fit_intent(source)
@@ -2795,13 +2816,16 @@ class OutfitEngine:
             "status": status,
             "scoring_info": {
                 "dimensions": 8,
-                "fusion": ("0.70*compat + 0.30*cosine + profile + avoids + style_adj" if personalized
-                           else "0.70*compat + 0.30*cosine + avoids + style_adj"),
-                "engine": "tattoo_v3.3" if outfit_ranked else ("tattoo_v3.3_cat" if get_pair_judge() else "tattoo_v2.3"),
+                "fusion": ("0.70*compat + 0.30*cosine + profile + avoids + style_adj + styling_adj" if personalized
+                           else "0.70*compat + 0.30*cosine + avoids + style_adj + styling_adj"),
+                "engine": "tattoo_v3.4" if source.styling_metadata else (
+                    "tattoo_v3.3" if outfit_ranked else ("tattoo_v3.3_cat" if get_pair_judge() else "tattoo_v2.3")
+                ),
+                "styling_scorer": bool(source.styling_metadata),
                 "personalized": personalized,
                 "clusters": user_clusters if personalized else [],
                 "avoids": True,
-                "stylist_judge": get_pair_judge() is not None,
+                "stylist_judge": _use_judge_outfit and get_pair_judge() is not None,
                 "outfit_ranking": outfit_ranked,
                 "judge_notes": self._collect_judge_notes(),
             },
@@ -3064,23 +3088,22 @@ class OutfitEngine:
             }
             # Gemini attrs come with gemini_ prefix from the batch RPC
             attrs = {}
-            for key in (
+            _GEMINI_KEYS = (
                 "category_l1", "category_l2", "occasions", "style_tags",
                 "pattern", "formality", "fit_type", "color_family",
                 "primary_color", "secondary_colors", "seasons", "silhouette",
                 "construction", "apparent_fabric", "texture", "coverage_level",
                 "sheen", "rise", "leg_shape", "stretch",
-            ):
+                "styling_metadata", "styling_role", "appearance_top_tags",
+                "vibe_tags", "extractor_version",
+            )
+            for key in _GEMINI_KEYS:
                 val = c.get(f"gemini_{key}")
                 if val is not None:
                     attrs[key] = val
             # Also check non-prefixed keys (for old RPCs / backwards compat)
             if not attrs.get("category_l1") and c.get("category_l1"):
-                for key in ("category_l1", "category_l2", "occasions", "style_tags",
-                            "pattern", "formality", "fit_type", "color_family",
-                            "primary_color", "secondary_colors", "seasons", "silhouette",
-                            "construction", "apparent_fabric", "texture", "coverage_level",
-                            "sheen", "rise", "leg_shape", "stretch"):
+                for key in _GEMINI_KEYS:
                     if c.get(key) is not None:
                         attrs[key] = c[key]
 
@@ -3286,16 +3309,58 @@ class OutfitEngine:
                 "profile_adjustment": round(profile_adj, 4),
                 "avoid_adjustment": round(avoid_adj, 4),
                 "style_adjustment": round(style_adj, 4),
+                "styling_adjustment": 0.0,
             })
+
+        # --- Styling metadata scorer (v3.4) ---
+        # Deterministic scoring from pre-computed styling_metadata.
+        # Replaces/supplements the LLM judge with <1ms per-candidate adjustments.
+        # Graceful: if source lacks v1.0.0.2 metadata, all adjustments are 0.
+        try:
+            from config.settings import get_settings
+            _use_styling = getattr(get_settings(), "use_styling_scorer", True)
+        except Exception:
+            _use_styling = True
+
+        if _use_styling and scored and source.styling_metadata:
+            cand_extras = {}
+            for entry in scored:
+                cp = entry["profile"]
+                pid = cp.product_id or ""
+                cand_extras[pid] = {
+                    "appearance_top_tags": cp.appearance_top_tags,
+                    "vibe_tags": cp.vibe_tags,
+                }
+            styling_results = _styling_score_batch(
+                source=source,
+                candidates=[e["profile"] for e in scored],
+                target_category=target_broad,
+                source_styling_metadata=source.styling_metadata,
+                source_appearance_tags=source.appearance_top_tags,
+                source_vibe_tags=source.vibe_tags,
+                candidate_extras=cand_extras,
+            )
+            for entry in scored:
+                pid = entry["profile"].product_id or ""
+                sr = styling_results.get(pid)
+                if sr and sr.styling_adj != 0:
+                    entry["tattoo"] += sr.styling_adj
+                    entry["styling_adjustment"] = round(sr.styling_adj, 4)
 
         scored.sort(key=lambda x: x["tattoo"], reverse=True)
 
-        # --- Stylist reranker (v3.3) ---
+        # --- Stylist reranker (v3.3, gated by use_llm_judge) ---
         # Take top K by TATTOO, send images to GPT-4.1, get full ranking.
         # LLM returns best-to-worst ordering; items ranked low fall below
         # the 4-item cutoff naturally instead of being deleted.
         # Graceful: if judge is None or fails, TATTOO order preserved.
-        judge = get_pair_judge()
+        # Default OFF in v3.4 — styling scorer replaces the judge.
+        try:
+            from config.settings import get_settings
+            _use_judge = getattr(get_settings(), "use_llm_judge", False)
+        except Exception:
+            _use_judge = False
+        judge = get_pair_judge() if _use_judge else None
         if judge and scored:
             try:
                 from config.settings import get_settings
@@ -3420,6 +3485,8 @@ class OutfitEngine:
             result["profile_adjustment"] = entry["profile_adjustment"]
         if entry.get("avoid_adjustment"):
             result["avoid_adjustment"] = entry["avoid_adjustment"]
+        if entry.get("styling_adjustment"):
+            result["styling_adjustment"] = entry["styling_adjustment"]
         result["vision_pass"] = not entry.get("vision_fail", False)
         return result
 

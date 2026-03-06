@@ -279,11 +279,23 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Styling Scorer (Complete the Fit v3.4 — deterministic metadata scorer)
+    # ==========================================================================
+    use_styling_scorer: bool = Field(
+        default=True,
+        description="Enable styling metadata scorer for outfit scoring (deterministic, <1ms per candidate)"
+    )
+
+    # ==========================================================================
     # Stylist Judge (Complete the Fit v3.3 — ranking-based reranker)
     # ==========================================================================
+    use_llm_judge: bool = Field(
+        default=False,
+        description="Enable LLM stylist judge for outfit reranking (disabled by default in v3.4, replaced by styling scorer)"
+    )
     llm_judge_enabled: bool = Field(
         default=True,
-        description="Enable stylist judge for outfit reranking (falls back to TATTOO-only if disabled)"
+        description="Enable stylist judge initialization (keep True to allow toggling use_llm_judge at runtime)"
     )
     llm_judge_model: str = Field(
         default="gpt-4.1",
