@@ -38,6 +38,7 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -417,15 +418,17 @@ def process_batch(
     alpha: float,
     existing_ids: set,
     dry_run: bool = False,
+    encode_batch_fn=None,
+    db_workers: int = 4,
 ) -> Tuple[int, int, int]:
     """
-    Process a batch with sequential DB I/O and retry logic.
+    Process a batch with concurrent DB I/O and GPU-batched text encoding.
 
     1. Fetch product info + image embeddings (sequential, with retry)
     2. Build text strings (CPU, fast)
-    3. Encode texts one at a time with FashionCLIP (skips on error)
-    4. Combine embeddings (CPU, fast)
-    5. Upsert in small sequential chunks with retry
+    3. Batch-encode all texts at once on GPU (or fallback to one-by-one)
+    4. Combine embeddings (CPU, vectorized)
+    5. Upsert in parallel chunks with ThreadPoolExecutor
 
     Returns (processed, skipped, errors).
     """
@@ -477,17 +480,34 @@ def process_batch(
     if dry_run or not items_to_encode:
         return processed, skipped, errors
 
-    # Step 3: Encode texts individually (skip failures instead of failing entire batch)
-    records = []
-    for pid, product, attrs, img_emb, text in items_to_encode:
+    # Step 3: Batch-encode all texts at once on GPU (much faster than one-by-one)
+    texts = [item[4] for item in items_to_encode]
+    text_embeddings_list = []
+
+    if encode_batch_fn is not None:
         try:
-            text_emb = encode_text_fn(text)
+            text_embeddings_list = encode_batch_fn(texts)
         except Exception as e:
-            # Skip this product but continue with the rest
+            print(f"  WARN: Batch encode failed ({e}), falling back to sequential")
+            text_embeddings_list = []
+
+    # Fallback: encode one by one if batch failed or not available
+    if not text_embeddings_list:
+        text_embeddings_list = []
+        for text in texts:
+            try:
+                text_embeddings_list.append(encode_text_fn(text))
+            except Exception:
+                text_embeddings_list.append(None)
+
+    # Step 4: Combine embeddings (vectorized where possible)
+    records = []
+    for i, (pid, product, attrs, img_emb, text) in enumerate(items_to_encode):
+        text_emb = text_embeddings_list[i] if i < len(text_embeddings_list) else None
+        if text_emb is None:
             errors += 1
             continue
 
-        # Step 4: Combine embeddings
         multimodal_emb = combine_embeddings(img_emb, text_emb, alpha=alpha)
 
         records.append({
@@ -501,14 +521,52 @@ def process_batch(
         })
         processed += 1
 
-    # Step 5: Upsert with retry (sequential small chunks inside upsert_records)
+    # Step 5: Upsert in parallel chunks with ThreadPoolExecutor
     if records:
-        ok, err = upsert_records(supabase_client, records)
+        ok, err = upsert_records_parallel(supabase_client, records, db_workers=db_workers)
         if err:
             errors += err
             processed -= err
 
     return processed, skipped, errors
+
+
+def upsert_records_parallel(
+    supabase_client,
+    records: List[Dict],
+    db_workers: int = 4,
+    chunk_size: int = 50,
+) -> Tuple[int, int]:
+    """Upsert records in parallel chunks using ThreadPoolExecutor."""
+    if not records:
+        return 0, 0
+
+    chunks = [records[i:i + chunk_size] for i in range(0, len(records), chunk_size)]
+    total_ok = 0
+    total_err = 0
+
+    def _upsert_chunk(chunk):
+        try:
+            retry_with_backoff(
+                lambda c=chunk: supabase_client.table("product_multimodal_embeddings").upsert(
+                    c, on_conflict="product_id,version",
+                ).execute(),
+                max_retries=4,
+                base_delay=2.0,
+            )
+            return len(chunk), 0
+        except Exception as e:
+            print(f"  ERROR upserting chunk of {len(chunk)}: {e}")
+            return 0, len(chunk)
+
+    with ThreadPoolExecutor(max_workers=db_workers) as executor:
+        futures = {executor.submit(_upsert_chunk, chunk): chunk for chunk in chunks}
+        for future in as_completed(futures):
+            ok, err = future.result()
+            total_ok += ok
+            total_err += err
+
+    return total_ok, total_err
 
 
 # ============================================================================
@@ -548,6 +606,14 @@ def main():
         "--limit", type=int, default=None,
         help="Max products to process (useful for testing). Default: all",
     )
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Parallel DB upsert workers. Default: 4",
+    )
+    parser.add_argument(
+        "--batch-workers", type=int, default=1,
+        help="Parallel batch processing workers (each processes a full batch concurrently). Default: 1",
+    )
 
     args = parser.parse_args()
     versions = [1, 2] if args.version == "both" else [int(args.version)]
@@ -555,13 +621,15 @@ def main():
     print("=" * 60)
     print("Multimodal Embedding Generator")
     print("=" * 60)
-    print(f"  Versions:    {versions}")
-    print(f"  Alpha:       {args.alpha} (image) / {1 - args.alpha:.1f} (text)")
-    print(f"  Batch size:  {args.batch_size}")
-    print(f"  Batch delay: {args.batch_delay}s")
-    print(f"  Resume:      {args.resume}")
-    print(f"  Dry run:     {args.dry_run}")
-    print(f"  Limit:       {args.limit or 'all'}")
+    print(f"  Versions:      {versions}")
+    print(f"  Alpha:         {args.alpha} (image) / {1 - args.alpha:.1f} (text)")
+    print(f"  Batch size:    {args.batch_size}")
+    print(f"  Batch delay:   {args.batch_delay}s")
+    print(f"  DB workers:    {args.workers}")
+    print(f"  Batch workers: {args.batch_workers}")
+    print(f"  Resume:        {args.resume}")
+    print(f"  Dry run:       {args.dry_run}")
+    print(f"  Limit:         {args.limit or 'all'}")
     print()
 
     # Initialize Supabase client
@@ -571,11 +639,31 @@ def main():
 
     # Initialize FashionCLIP model (skip for dry run to save time)
     encode_text_fn = None
+    encode_batch_fn = None
     if not args.dry_run:
         from women_search_engine import get_women_search_engine
         engine = get_women_search_engine()
         engine._load_model()  # Force model load now
         encode_text_fn = engine.encode_text
+        # Try to get batch encode function for GPU-batched text encoding
+        if hasattr(engine, 'encode_texts_batch'):
+            encode_batch_fn = engine.encode_texts_batch
+        elif hasattr(engine, '_model') and engine._model is not None:
+            # Build a batch encoder from the underlying CLIP model
+            def _batch_encode(texts: List[str]) -> List[np.ndarray]:
+                from transformers import CLIPTokenizerFast
+                import torch
+                model = engine._model
+                processor = engine._processor
+                inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
+                if hasattr(model, 'device'):
+                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    text_features = model.get_text_features(**inputs)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                return [text_features[i].cpu().numpy().astype(np.float32) for i in range(len(texts))]
+            encode_batch_fn = _batch_encode
+            print("  GPU batch text encoding enabled")
         print("[2/3] FashionCLIP model loaded")
     else:
         print("[2/3] FashionCLIP model skipped (dry run)")
@@ -604,43 +692,83 @@ def main():
         batch_num = 0
         t_start = time.time()
 
+        # Pre-fetch multiple batches for parallel processing
+        prefetch_count = max(1, args.batch_workers)
+
         while True:
             # Check limit
             if args.limit and total_processed >= args.limit:
                 print(f"\n  Reached limit of {args.limit} products")
                 break
 
-            # Fetch next batch of attributes
-            try:
-                attrs_batch = retry_with_backoff(
-                    fetch_products_with_attributes, sb, args.batch_size, offset,
-                    max_retries=4, base_delay=2.0,
-                )
-            except Exception as e:
-                print(f"  ERROR fetching attrs batch at offset {offset}: {e}")
+            # Fetch multiple batches for parallel processing
+            batches_to_process = []
+            for _ in range(prefetch_count):
+                if args.limit and (total_processed + sum(len(b) for b in batches_to_process)) >= args.limit:
+                    break
+                try:
+                    attrs_batch = retry_with_backoff(
+                        fetch_products_with_attributes, sb, args.batch_size, offset,
+                        max_retries=4, base_delay=2.0,
+                    )
+                except Exception as e:
+                    print(f"  ERROR fetching attrs batch at offset {offset}: {e}")
+                    break
+
+                if not attrs_batch:
+                    break
+                batches_to_process.append(attrs_batch)
+                offset += args.batch_size
+
+            if not batches_to_process:
                 break
 
-            if not attrs_batch:
-                break  # No more data
-
-            batch_num += 1
-            offset += args.batch_size
-
-            # Process current batch (all sequential with retry)
             batch_t = time.time()
-            processed, skipped, errors = process_batch(
-                supabase_client=sb,
-                encode_text_fn=encode_text_fn,
-                attrs_batch=attrs_batch,
-                version=version,
-                alpha=args.alpha,
-                existing_ids=existing_ids,
-                dry_run=args.dry_run,
-            )
 
-            total_processed += processed
-            total_skipped += skipped
-            total_errors += errors
+            if args.batch_workers > 1 and len(batches_to_process) > 1:
+                # Process multiple batches in parallel using ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=args.batch_workers) as executor:
+                    futures = []
+                    for ab in batches_to_process:
+                        f = executor.submit(
+                            process_batch,
+                            supabase_client=sb,
+                            encode_text_fn=encode_text_fn,
+                            attrs_batch=ab,
+                            version=version,
+                            alpha=args.alpha,
+                            existing_ids=existing_ids,
+                            dry_run=args.dry_run,
+                            encode_batch_fn=encode_batch_fn,
+                            db_workers=args.workers,
+                        )
+                        futures.append(f)
+
+                    for f in as_completed(futures):
+                        processed, skipped, errors = f.result()
+                        total_processed += processed
+                        total_skipped += skipped
+                        total_errors += errors
+                        batch_num += 1
+            else:
+                # Single batch processing
+                for ab in batches_to_process:
+                    processed, skipped, errors = process_batch(
+                        supabase_client=sb,
+                        encode_text_fn=encode_text_fn,
+                        attrs_batch=ab,
+                        version=version,
+                        alpha=args.alpha,
+                        existing_ids=existing_ids,
+                        dry_run=args.dry_run,
+                        encode_batch_fn=encode_batch_fn,
+                        db_workers=args.workers,
+                    )
+                    total_processed += processed
+                    total_skipped += skipped
+                    total_errors += errors
+                    batch_num += 1
+
             batch_ms = int((time.time() - batch_t) * 1000)
 
             # Progress
@@ -650,13 +778,13 @@ def main():
 
             print(
                 f"  Batch {batch_num}: "
-                f"processed={processed}, skipped={skipped}, errors={errors} "
-                f"({batch_ms}ms) | "
+                f"processed={total_processed - total_skipped:,} "
+                f"({batch_ms}ms, {len(batches_to_process)} batches) | "
                 f"Total: {total_processed:,}/{total_attrs:,} "
                 f"({rate:.1f}/s, ETA {eta:.1f}min)"
             )
 
-            # Delay between batches to avoid overwhelming Supabase
+            # Delay between batch groups
             if args.batch_delay > 0:
                 time.sleep(args.batch_delay)
 
