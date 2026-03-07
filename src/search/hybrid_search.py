@@ -225,6 +225,42 @@ class HybridSearchService:
             vibe_brand = plan_updates.pop("_vibe_brand", None)
 
             # ---------------------------------------------------------
+            # Vibe-brand hard filter: when the LLM identifies a brand as
+            # a style reference (not a purchase target), hard-filter to
+            # brands from the same cluster(s).  This ensures cluster
+            # brands dominate results instead of being drowned by high-
+            # volume brands in semantic search.
+            # ---------------------------------------------------------
+            if vibe_brand and not request.brands:
+                try:
+                    from recs.brand_clusters import get_brand_clusters
+                    from scoring.constants.brand_data import BRAND_CLUSTERS
+                    vibe_cluster_ids: set = set()
+                    for cid, _conf in get_brand_clusters(vibe_brand.lower()):
+                        vibe_cluster_ids.add(cid)
+                    if vibe_cluster_ids:
+                        cluster_brands: List[str] = []
+                        seen_lower: set = set()
+                        for cid in vibe_cluster_ids:
+                            for brand_name in BRAND_CLUSTERS.get(cid, []):
+                                key = brand_name.lower()
+                                if key not in seen_lower:
+                                    seen_lower.add(key)
+                                    cluster_brands.append(brand_name)
+                        if cluster_brands:
+                            request = request.model_copy(
+                                update={"brands": cluster_brands}
+                            )
+                            logger.info(
+                                "Vibe-brand hard filter applied",
+                                vibe_brand=vibe_brand,
+                                clusters=sorted(vibe_cluster_ids),
+                                brand_count=len(cluster_brands),
+                            )
+                except Exception:
+                    pass  # Non-fatal — fall through to soft boost
+
+            # ---------------------------------------------------------
             # Filter application strategy per intent:
             #
             # VAGUE: Keep structural filters (category, formality,
@@ -799,7 +835,27 @@ class HybridSearchService:
         # brand (via EXACT intent or a brands filter).  Otherwise the
         # reranker's MAX_PER_BRAND=4 cap kills almost all results when
         # every result is from the same brand.
-        brand_cap = 0 if intent == QueryIntent.EXACT or request.brands else None
+        # Exception: vibe-brand queries set request.brands programmatically
+        # to cluster brands — we WANT the cap there to equalize across brands.
+        _user_set_brands = request.brands and not vibe_brand
+        brand_cap = 0 if intent == QueryIntent.EXACT or _user_set_brands else None
+
+        # Compute vibe-brand cluster set for reranker boost
+        vibe_clusters: Optional[Set[str]] = None
+        if vibe_brand:
+            try:
+                from recs.brand_clusters import get_brand_clusters
+                # get_brand_clusters returns List[(cluster_id, confidence)]
+                vibe_clusters = {cid for cid, _ in get_brand_clusters(vibe_brand)}
+                if vibe_clusters:
+                    logger.info(
+                        "Passing vibe-brand clusters to reranker",
+                        vibe_brand=vibe_brand,
+                        clusters=sorted(vibe_clusters),
+                    )
+            except Exception:
+                pass  # Non-fatal — skip cluster boost if lookup fails
+
         rerank_kwargs: Dict[str, Any] = dict(
             results=merged,
             user_profile=user_profile,
@@ -810,6 +866,8 @@ class HybridSearchService:
         )
         if brand_cap is not None:
             rerank_kwargs["max_per_brand"] = brand_cap
+        if vibe_clusters:
+            rerank_kwargs["vibe_brand_clusters"] = vibe_clusters
         merged = self._reranker.rerank(**rerank_kwargs)
 
         # Step 6b: Score-gated category diversity for VAGUE queries.

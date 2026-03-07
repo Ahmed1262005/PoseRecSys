@@ -617,7 +617,8 @@ Example for "Like Zara but better quality":
   "intent": "vague",
   "vibe_brand": "Zara",
   "brand": null,
-  "min_price": 60,
+  "min_price": 40,
+  "max_price": null,
   "algolia_query": "",
   "semantic_queries": [
     "polished clean-cut basics in neutral tones, tailored minimalist everyday wardrobe essentials",
@@ -683,11 +684,13 @@ concrete search attributes:
 6. Correct misspelled brand names (e.g., "Antropologie" → vibe_brand: "Anthropologie")
 
 **Quality/price modifiers** — use the brand's price tier as reference:
-- "better quality than X" / "elevated X" → same style DNA, but set min_price ABOVE the brand's tier
-  (e.g., "better than Zara [$15-80]" → min_price: 50-80, target the same clean/basic aesthetic)
-- "cheaper than X" / "affordable X" / "X for less" → same style DNA, but set max_price BELOW the brand's tier
-  (e.g., "cheaper Aritzia [$100-400]" → max_price: 80-100, target the same minimal/neutral aesthetic)
-- "X dupe" → same style DNA, lower price, no brand filter
+- "better quality than X" / "elevated X" → same style DNA, set min_price ABOVE the brand's tier.
+  Do NOT set max_price — the user wants to go UP in quality, so leave the price open-ended.
+  (e.g., "better than Zara [$15-80]" → min_price: 40, max_price: null)
+- "cheaper than X" / "affordable X" / "X for less" → same style DNA, set max_price BELOW the brand's tier.
+  Do NOT set min_price — the user wants affordable options.
+  (e.g., "cheaper Aritzia [$100-400]" → max_price: 80, min_price: null)
+- "X dupe" → same style DNA, lower max_price, no brand filter
 
 **Style cluster landscape** (for reasoning about brand tiers and aesthetic DNA):
 

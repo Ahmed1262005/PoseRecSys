@@ -30,6 +30,8 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
+from core.logging import get_logger
+
 from recs.feed_reranker import (
     CATEGORY_GROUP_MAP,
     DEFAULT_CATEGORY_PROPORTIONS,
@@ -39,6 +41,7 @@ from recs.feed_reranker import (
 if TYPE_CHECKING:
     from scoring.context import UserContext
 
+logger = get_logger(__name__)
 
 # Session-based scoring (EMA-powered, self-normalizing)
 # With EMA, raw scores are already in [-1, 1] — no per-field caps needed.
@@ -137,6 +140,10 @@ class SessionReranker:
     ContextScorer, and diversity constraints.
     """
 
+    # Vibe-brand cluster boost: applied to brands in the same cluster(s)
+    # as the query-referenced vibe brand.  Additive to rrf_score.
+    _VIBE_CLUSTER_BOOST = 0.008
+
     def rerank(
         self,
         results: List[dict],
@@ -146,6 +153,7 @@ class SessionReranker:
         user_context: Optional["UserContext"] = None,
         session_scores: Optional[Any] = None,
         impression_counts: Optional[Dict[str, int]] = None,
+        vibe_brand_clusters: Optional[Set[str]] = None,
     ) -> List[dict]:
         """
         Rerank results with session awareness.
@@ -161,6 +169,9 @@ class SessionReranker:
             session_scores: Live SessionScores from the recommendation pipeline.
             impression_counts: Per-product impression counts from search history.
                 Used to soft-demote over-exposed products.
+            vibe_brand_clusters: Set of cluster IDs from the query's vibe brand
+                (e.g., {"G", "A"} for Zara).  When present, brands belonging
+                to these clusters get a score boost.
 
         Returns:
             Reranked and filtered results.
@@ -183,6 +194,10 @@ class SessionReranker:
         if session_scores:
             results = self._apply_session_scoring(results, session_scores)
 
+        # Step 3.6: Apply vibe-brand cluster boost
+        if vibe_brand_clusters:
+            self._apply_vibe_brand_boost(results, vibe_brand_clusters)
+
         # Step 3.75: Apply context-aware scoring (age affinity + weather/season)
         if user_context:
             results = self._apply_context_scoring(results, user_context)
@@ -196,6 +211,43 @@ class SessionReranker:
             results = self._apply_constrained_diversity(results, max_per_brand)
 
         return results
+
+    def _apply_vibe_brand_boost(
+        self,
+        results: List[dict],
+        vibe_clusters: Set[str],
+    ) -> None:
+        """Boost brands that belong to the vibe brand's cluster(s).
+
+        When a user searches "like Zara but better", brands from Zara's
+        clusters (G, A) should rank higher than unrelated brands.  This
+        applies an additive score boost to each item whose brand is in
+        one of the vibe brand's clusters.
+        """
+        try:
+            from scoring.constants.brand_data import BRAND_TO_CLUSTER
+        except ImportError:
+            return
+
+        boosted = 0
+        for item in results:
+            brand = (item.get("brand") or "").lower()
+            if not brand:
+                continue
+            item_cluster = BRAND_TO_CLUSTER.get(brand, "")
+            if item_cluster and item_cluster in vibe_clusters:
+                item["rrf_score"] = item.get("rrf_score", 0) + self._VIBE_CLUSTER_BOOST
+                boosted += 1
+
+        if boosted:
+            # Re-sort by updated scores
+            results.sort(key=lambda r: r.get("rrf_score", 0), reverse=True)
+            logger.info(
+                "Vibe-brand cluster boost applied",
+                boosted_items=boosted,
+                total_items=len(results),
+                clusters=sorted(vibe_clusters),
+            )
 
     # Size-variant prefixes/suffixes to strip when comparing names
     _SIZE_PATTERNS = re.compile(
