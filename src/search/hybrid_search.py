@@ -230,20 +230,59 @@ class HybridSearchService:
             # brands from the same cluster(s).  This ensures cluster
             # brands dominate results instead of being drowned by high-
             # volume brands in semantic search.
+            #
+            # Cluster selection depends on the price direction:
+            # - "better quality" (min_price set, no max_price):
+            #   UPGRADE — exclude the brand's primary cluster (its own
+            #   tier) and keep only secondary/higher clusters.  Also
+            #   exclude the vibe brand itself.
+            # - "cheaper" (max_price set, no min_price):
+            #   DOWNGRADE — exclude secondary cluster, keep primary.
+            # - no price modifier:
+            #   SAME TIER — include all clusters, exclude vibe brand.
             # ---------------------------------------------------------
             if vibe_brand and not request.brands:
                 try:
                     from recs.brand_clusters import get_brand_clusters
                     from scoring.constants.brand_data import BRAND_CLUSTERS
-                    vibe_cluster_ids: set = set()
-                    for cid, _conf in get_brand_clusters(vibe_brand.lower()):
-                        vibe_cluster_ids.add(cid)
+
+                    all_clusters = get_brand_clusters(vibe_brand.lower())
+                    # all_clusters is [(cluster_id, confidence), ...]
+                    # First entry = primary, rest = secondary
+
+                    # Detect price direction from the search plan
+                    _has_min = search_plan.min_price is not None
+                    _has_max = search_plan.max_price is not None
+                    _upgrade = _has_min and not _has_max
+                    _downgrade = _has_max and not _has_min
+
+                    # Select which clusters to include
+                    if _upgrade and len(all_clusters) > 1:
+                        # Upgrade: drop primary (brand's own tier), keep
+                        # secondary+ (aspirational/higher tier)
+                        vibe_cluster_ids = {cid for cid, _ in all_clusters[1:]}
+                        direction = "upgrade"
+                    elif _downgrade and len(all_clusters) > 1:
+                        # Downgrade: keep primary (affordable tier), drop
+                        # secondary (premium tier)
+                        vibe_cluster_ids = {all_clusters[0][0]}
+                        direction = "downgrade"
+                    else:
+                        # Same tier or single cluster: include all
+                        vibe_cluster_ids = {cid for cid, _ in all_clusters}
+                        direction = "same_tier"
+
                     if vibe_cluster_ids:
                         cluster_brands: List[str] = []
                         seen_lower: set = set()
+                        vibe_lower = vibe_brand.lower()
                         for cid in vibe_cluster_ids:
                             for brand_name in BRAND_CLUSTERS.get(cid, []):
                                 key = brand_name.lower()
+                                # Always exclude the vibe brand itself —
+                                # user wants alternatives, not the brand
+                                if key == vibe_lower:
+                                    continue
                                 if key not in seen_lower:
                                     seen_lower.add(key)
                                     cluster_brands.append(brand_name)
@@ -254,6 +293,7 @@ class HybridSearchService:
                             logger.info(
                                 "Vibe-brand hard filter applied",
                                 vibe_brand=vibe_brand,
+                                direction=direction,
                                 clusters=sorted(vibe_cluster_ids),
                                 brand_count=len(cluster_brands),
                             )
