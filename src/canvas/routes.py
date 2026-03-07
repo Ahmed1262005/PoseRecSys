@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from supabase import Client
 
 from canvas.models import (
@@ -45,10 +46,14 @@ router = APIRouter(prefix="/api/canvas", tags=["Canvas"])
 def list_inspirations(
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
-) -> InspirationListResponse:
+) -> JSONResponse:
     svc = get_canvas_service()
     items = svc.list_inspirations(user.id, db)
-    return InspirationListResponse(inspirations=items, count=len(items))
+    body = InspirationListResponse(inspirations=items, count=len(items))
+    return JSONResponse(
+        content=body.model_dump(mode="json"),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,18 +157,31 @@ def sync_pinterest(
     "/inspirations/{inspiration_id}",
     response_model=DeleteInspirationResponse,
     summary="Remove an inspiration",
-    description="Delete an inspiration image and recompute the taste vector.",
+    description=(
+        "Delete an inspiration image and recompute the taste vector in the "
+        "background.  Idempotent: returns 200 even if the item was already "
+        "deleted (the desired state is achieved).  The response includes the "
+        "authoritative ``inspirations`` list so the frontend can replace its "
+        "cache without a separate GET."
+    ),
 )
 def delete_inspiration(
     inspiration_id: str,
+    background_tasks: BackgroundTasks,
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
-) -> DeleteInspirationResponse:
+) -> JSONResponse:
     svc = get_canvas_service()
     result = svc.remove_inspiration(user.id, inspiration_id, db)
-    if not result.deleted:
-        raise HTTPException(status_code=404, detail="Inspiration not found")
-    return result
+
+    # Schedule taste-vector recomputation in the background so the HTTP
+    # response returns immediately (~200ms instead of ~14s).
+    background_tasks.add_task(svc.recompute_taste_vector, user.id, db)
+
+    return JSONResponse(
+        content=result.model_dump(mode="json"),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------

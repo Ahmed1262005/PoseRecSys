@@ -49,6 +49,13 @@ class CanvasService:
     # Inspiration CRUD
     # -----------------------------------------------------------------------
 
+    # Columns needed by InspirationResponse (excludes the large embedding).
+    _LIST_COLUMNS = (
+        "id,source,image_url,original_url,title,"
+        "style_label,style_confidence,style_attributes,"
+        "pinterest_pin_id,created_at,updated_at"
+    )
+
     def list_inspirations(
         self,
         user_id: str,
@@ -56,7 +63,7 @@ class CanvasService:
     ) -> List[InspirationResponse]:
         result = (
             supabase.table("user_inspirations")
-            .select("*")
+            .select(self._LIST_COLUMNS)
             .eq("user_id", user_id)
             .order("created_at", desc=True)
             .execute()
@@ -253,8 +260,18 @@ class CanvasService:
         inspiration_id: str,
         supabase: Client,
     ) -> DeleteInspirationResponse:
-        """Delete an inspiration and recompute the taste vector."""
-        # Fetch row first (need image_url for Storage cleanup)
+        """
+        Delete an inspiration and return the authoritative surviving list.
+
+        Idempotent: if the row is already gone we still return ``deleted=True``
+        (the desired state is achieved) so the frontend never sees a 404 that
+        would trigger an ``onError`` rollback.
+
+        Taste-vector recomputation is **not** done here — the caller (route
+        handler) schedules it as a ``BackgroundTask`` so the HTTP response
+        returns immediately after the DELETE + list-fetch.
+        """
+        # Fetch row first (need source/image_url for Storage cleanup)
         result = (
             supabase.table("user_inspirations")
             .select("id, source, image_url")
@@ -263,35 +280,29 @@ class CanvasService:
             .execute()
         )
         rows = result.data or []
-        if not rows:
-            return DeleteInspirationResponse(
-                deleted=False, taste_vector_updated=False, remaining_count=0,
-            )
 
-        row = rows[0]
+        if rows:
+            row = rows[0]
 
-        # Delete from Storage if it was an upload
-        if row["source"] == InspirationSource.upload.value:
-            self._delete_from_storage(row["image_url"], supabase)
+            # Delete from Storage if it was an upload
+            if row["source"] == InspirationSource.upload.value:
+                self._delete_from_storage(row["image_url"], supabase)
 
-        # Delete row
-        supabase.table("user_inspirations").delete().eq("id", inspiration_id).execute()
+            # Delete row
+            supabase.table("user_inspirations").delete().eq(
+                "id", inspiration_id,
+            ).execute()
 
-        # Recompute
-        tv_updated = self.recompute_taste_vector(user_id, supabase)
-
-        remaining = (
-            supabase.table("user_inspirations")
-            .select("id", count="exact")
-            .eq("user_id", user_id)
-            .execute()
-        )
-        remaining_count = remaining.count if remaining.count is not None else 0
+        # Whether the row existed or was already gone, the desired state is
+        # the same: it's not in the table.  Fetch the authoritative list so
+        # the frontend can replace its cache without a separate GET.
+        surviving = self.list_inspirations(user_id, supabase)
 
         return DeleteInspirationResponse(
             deleted=True,
-            taste_vector_updated=tv_updated,
-            remaining_count=remaining_count,
+            taste_vector_updated=False,  # will be updated in background
+            remaining_count=len(surviving),
+            inspirations=surviving,
         )
 
     # -----------------------------------------------------------------------

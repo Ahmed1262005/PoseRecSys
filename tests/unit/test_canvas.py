@@ -239,6 +239,23 @@ class TestModels:
         )
         assert resp.deleted is True
         assert resp.remaining_count == 5
+        assert resp.inspirations == []  # default empty
+
+    def test_delete_response_with_surviving_inspirations(self):
+        from canvas.models import DeleteInspirationResponse, InspirationResponse
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        surviving = InspirationResponse(
+            id="surv-1", source="upload", image_url="https://example.com/a.jpg",
+            style_label="Casual", style_confidence=0.8, style_attributes={},
+            created_at=now, updated_at=now,
+        )
+        resp = DeleteInspirationResponse(
+            deleted=True, taste_vector_updated=False, remaining_count=1,
+            inspirations=[surviving],
+        )
+        assert len(resp.inspirations) == 1
+        assert resp.inspirations[0].id == "surv-1"
 
     def test_attribute_score(self):
         from canvas.models import AttributeScore
@@ -649,19 +666,27 @@ class TestCanvasServiceAddUrl:
 class TestCanvasServiceRemove:
     """CanvasService.remove_inspiration"""
 
-    def test_remove_not_found(self):
+    def test_remove_not_found_is_idempotent(self):
+        """DELETE for an already-gone item returns deleted=True (idempotent)."""
         from canvas.service import CanvasService
         svc = CanvasService()
         mock_sb = _mock_supabase_chain()
 
-        # Select returns empty
-        select_result = MagicMock()
-        select_result.data = []
-        mock_sb.table.return_value.execute.return_value = select_result
+        # First execute: row lookup returns empty (already deleted)
+        lookup_result = MagicMock()
+        lookup_result.data = []
+        # Second execute: list_inspirations returns empty
+        list_result = MagicMock()
+        list_result.data = []
+        mock_sb.table.return_value.execute.side_effect = [
+            lookup_result,
+            list_result,
+        ]
 
         result = svc.remove_inspiration("user-123", "nonexistent-id", mock_sb)
-        assert result.deleted is False
-        assert result.taste_vector_updated is False
+        assert result.deleted is True
+        assert result.remaining_count == 0
+        assert result.inspirations == []
 
     def test_remove_upload_triggers_storage_delete(self):
         from canvas.service import CanvasService
@@ -670,15 +695,23 @@ class TestCanvasServiceRemove:
 
         bucket_url = "https://proj.supabase.co/storage/v1/object/public/inspirations/user-123/abc.jpg"
         row = {"id": "ins-1", "source": "upload", "image_url": bucket_url}
-        select_result = MagicMock()
-        select_result.data = [row]
-        select_result.count = 0
+        lookup_result = MagicMock()
+        lookup_result.data = [row]
 
-        # Multiple execute calls: select, delete, recompute-select, remaining-count
-        mock_sb.table.return_value.execute.return_value = select_result
+        # After delete, list_inspirations returns empty
+        list_result = MagicMock()
+        list_result.data = []
+
+        # execute calls: lookup, delete, list_inspirations
+        mock_sb.table.return_value.execute.side_effect = [
+            lookup_result,   # row lookup
+            MagicMock(),     # delete execute
+            list_result,     # list_inspirations
+        ]
 
         result = svc.remove_inspiration("user-123", "ins-1", mock_sb)
         assert result.deleted is True
+        assert result.remaining_count == 0
         # Verify storage.from_("inspirations").remove() was called
         mock_sb.storage.from_.assert_called_with("inspirations")
 
@@ -688,15 +721,52 @@ class TestCanvasServiceRemove:
         mock_sb = _mock_supabase_chain()
 
         row = {"id": "ins-2", "source": "url", "image_url": "https://example.com/img.jpg"}
-        select_result = MagicMock()
-        select_result.data = [row]
-        select_result.count = 0
-        mock_sb.table.return_value.execute.return_value = select_result
+        lookup_result = MagicMock()
+        lookup_result.data = [row]
+
+        list_result = MagicMock()
+        list_result.data = []
+
+        mock_sb.table.return_value.execute.side_effect = [
+            lookup_result,   # row lookup
+            MagicMock(),     # delete execute
+            list_result,     # list_inspirations
+        ]
 
         result = svc.remove_inspiration("user-123", "ins-2", mock_sb)
         assert result.deleted is True
         # storage.from_ should NOT be called for URL source
         mock_sb.storage.from_.assert_not_called()
+
+    def test_remove_returns_surviving_inspirations(self):
+        """DELETE response includes authoritative surviving list."""
+        from canvas.service import CanvasService
+        svc = CanvasService()
+        mock_sb = _mock_supabase_chain()
+
+        row = {"id": "ins-del", "source": "url", "image_url": "https://example.com/del.jpg"}
+        lookup_result = MagicMock()
+        lookup_result.data = [row]
+
+        # One surviving inspiration after deletion
+        surviving_row = _make_db_row(
+            id="ins-surv", source="upload",
+            image_url="https://example.com/surv.jpg",
+        )
+        list_result = MagicMock()
+        list_result.data = [surviving_row]
+
+        mock_sb.table.return_value.execute.side_effect = [
+            lookup_result,
+            MagicMock(),
+            list_result,
+        ]
+
+        result = svc.remove_inspiration("user-123", "ins-del", mock_sb)
+        assert result.deleted is True
+        assert result.remaining_count == 1
+        assert len(result.inspirations) == 1
+        assert result.inspirations[0].id == "ins-surv"
 
 
 class TestCanvasServiceTasteVector:

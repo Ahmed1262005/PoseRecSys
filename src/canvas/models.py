@@ -70,6 +70,10 @@ class DeleteInspirationResponse(BaseModel):
     deleted: bool
     taste_vector_updated: bool
     remaining_count: int
+    inspirations: List["InspirationResponse"] = Field(
+        default_factory=list,
+        description="Surviving inspirations after deletion (authoritative list).",
+    )
 
 
 # ---------------------------------------------------------------------------
