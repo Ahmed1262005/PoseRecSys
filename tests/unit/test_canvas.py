@@ -914,21 +914,52 @@ class TestCanvasServiceClosestProduct:
         svc = CanvasService()
         mock_sb = _mock_supabase_chain()
 
-        # Step 1: fetch embedding
+        # Step 1: fetch embedding from user_inspirations
         emb_str = _make_embedding_str(seed=42)
         select_result = MagicMock()
         select_result.data = [{"embedding": emb_str}]
-        mock_sb.table.return_value.execute.return_value = select_result
 
-        # Step 2: RPC returns closest product
-        product = _make_product_row(product_id="prod-abc")
-        rpc_result = MagicMock()
-        rpc_result.data = [product]
-        mock_sb.rpc.return_value.execute.return_value = rpc_result
+        # Step 2: canvas_similar_search RPC returns sku_ids
+        nn_result = MagicMock()
+        nn_result.data = [{"sku_id": "prod-abc", "similarity": 0.87}]
+
+        # Step 3: batch-fetch product details from products table
+        product_result = MagicMock()
+        product_result.data = [{
+            "id": "prod-abc",
+            "name": "Boho Floral Maxi Dress",
+            "brand": "TestBrand",
+            "category": "dresses",
+            "broad_category": "dresses",
+            "colors": ["beige"],
+            "materials": ["cotton"],
+            "price": 59.99,
+            "original_price": 79.99,
+            "fit": "regular",
+            "length": "maxi",
+            "sleeve": "short",
+            "neckline": "v-neck",
+            "style_tags": ["Boho"],
+            "primary_image_url": "https://example.com/product.jpg",
+            "hero_image_url": None,
+            "in_stock": True,
+        }]
+
+        # Wire up: first table call = embedding lookup, second = product fetch
+        mock_sb.table.return_value.execute.side_effect = [
+            select_result,   # user_inspirations embedding lookup
+            product_result,  # products batch fetch
+        ]
+
+        # RPC returns canvas_similar_search results
+        rpc_exec = MagicMock()
+        rpc_exec.execute.return_value = nn_result
+        mock_sb.rpc.return_value = rpc_exec
 
         result = svc.find_closest_product("ins-1", "user-123", mock_sb)
         assert result is not None
         assert result["product_id"] == "prod-abc"
+        assert result["similarity"] == 0.87
 
     def test_rpc_failure_returns_none(self):
         from canvas.service import CanvasService

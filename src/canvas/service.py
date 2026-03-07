@@ -480,6 +480,89 @@ class CanvasService:
 
         return "[" + ",".join(f"{float(v):.8f}" for v in vec) + "]"
 
+    def _canvas_search(
+        self,
+        embedding_str: str,
+        supabase: Client,
+        count: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Two-step search: (1) ``canvas_similar_search`` RPC to find nearest
+        sku_ids via HNSW on ``image_embeddings`` (no products JOIN so the
+        index is always used), then (2) batch-fetch product details.
+
+        Falls back to ``match_products_with_hard_filters`` if the canvas
+        RPC is not yet deployed.
+        """
+        # --- Step 1: HNSW nearest-neighbor on image_embeddings ----------
+        try:
+            nn_result = supabase.rpc(
+                "canvas_similar_search",
+                {"query_embedding": embedding_str, "match_count": count},
+            ).execute()
+        except Exception:
+            # RPC not deployed yet — fall back to old approach
+            logger.warning("canvas_similar_search RPC unavailable, falling back")
+            try:
+                result = supabase.rpc(
+                    "match_products_with_hard_filters",
+                    {"query_embedding": embedding_str, "match_count": count},
+                ).execute()
+                return result.data or []
+            except Exception:
+                logger.exception("Fallback RPC also failed")
+                return []
+
+        nn_rows = nn_result.data or []
+        if not nn_rows:
+            return []
+
+        # Build similarity lookup and deduplicate sku_ids
+        sim_by_sku: Dict[str, float] = {}
+        for row in nn_rows:
+            sid = str(row["sku_id"])
+            if sid not in sim_by_sku:
+                sim_by_sku[sid] = row["similarity"]
+
+        sku_ids = list(sim_by_sku.keys())
+
+        # --- Step 2: batch-fetch product details -----------------------
+        # Supabase .in_() has a practical limit; chunk if needed.
+        products: List[Dict[str, Any]] = []
+        chunk_size = 200
+        for i in range(0, len(sku_ids), chunk_size):
+            chunk = sku_ids[i : i + chunk_size]
+            try:
+                pr = (
+                    supabase.table("products")
+                    .select(
+                        "id,name,brand,category,broad_category,colors,materials,"
+                        "price,original_price,fit,length,sleeve,neckline,"
+                        "style_tags,primary_image_url,hero_image_url,in_stock"
+                    )
+                    .in_("id", chunk)
+                    .eq("in_stock", True)
+                    .execute()
+                )
+                products.extend(pr.data or [])
+            except Exception:
+                logger.exception("Product batch fetch failed")
+
+        # --- Step 3: merge similarity + product details ----------------
+        prod_by_id = {str(p["id"]): p for p in products}
+        merged: List[Dict[str, Any]] = []
+        for sid in sku_ids:
+            prod = prod_by_id.get(sid)
+            if not prod:
+                continue
+            prod["product_id"] = prod.pop("id")
+            prod["similarity"] = sim_by_sku[sid]
+            merged.append(prod)
+
+        # Sort by similarity descending (HNSW order may differ slightly after JOIN)
+        merged.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+        return merged
+
     def find_closest_product(
         self,
         inspiration_id: str,
@@ -489,8 +572,8 @@ class CanvasService:
         """
         Find the single closest real product to an inspiration's embedding.
 
-        Returns the product row dict (from ``match_products_with_hard_filters``)
-        or ``None`` if not found.
+        Uses the two-step ``_canvas_search`` approach so the HNSW index
+        is always utilised, even for external (non-catalog) embeddings.
         """
         embedding_str = self._get_inspiration_embedding_str(
             inspiration_id, user_id, supabase,
@@ -498,20 +581,8 @@ class CanvasService:
         if not embedding_str:
             return None
 
-        try:
-            result = supabase.rpc(
-                "match_products_with_hard_filters",
-                {
-                    "query_embedding": embedding_str,
-                    "match_count": 1,
-                },
-            ).execute()
-        except Exception:
-            logger.exception("match_products_with_hard_filters failed for closest product")
-            return None
-
-        products = result.data or []
-        return products[0] if products else None
+        results = self._canvas_search(embedding_str, supabase, count=5)
+        return results[0] if results else None
 
     # Max items from the same brand in similar-items results
     _SIMILAR_MAX_PER_BRAND = 3
@@ -554,19 +625,7 @@ class CanvasService:
         if not embedding_str:
             return []
 
-        try:
-            result = supabase.rpc(
-                "match_products_with_hard_filters",
-                {
-                    "query_embedding": embedding_str,
-                    "match_count": count * 5,  # over-fetch for dedup headroom
-                },
-            ).execute()
-        except Exception:
-            logger.exception("match_products_with_hard_filters failed for similar products")
-            return []
-
-        rows = result.data or []
+        rows = self._canvas_search(embedding_str, supabase, count=count * 5)
 
         # ---- Pass 1: product_id dedup (multiple images per product) ----
         seen_ids: set = set()

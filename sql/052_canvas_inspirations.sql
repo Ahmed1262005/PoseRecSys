@@ -98,3 +98,38 @@ CREATE TRIGGER trg_user_inspirations_updated_at
     BEFORE UPDATE ON user_inspirations
     FOR EACH ROW
     EXECUTE FUNCTION update_user_inspirations_updated_at();
+
+-- =====================================================
+-- 5. Canvas similar-product search
+-- =====================================================
+-- Searches image_embeddings DIRECTLY (no products JOIN) so the HNSW
+-- index is always used. Returns sku_ids + similarity; the caller
+-- fetches product details in a second query.  This avoids the query-
+-- planner issue where the products JOIN prevents HNSW index usage
+-- for external (non-catalog) embeddings.
+
+CREATE OR REPLACE FUNCTION canvas_similar_search(
+    query_embedding vector(512),
+    match_count int DEFAULT 60
+)
+RETURNS TABLE(
+    sku_id uuid,
+    similarity float
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    SET LOCAL hnsw.ef_search = 200;
+
+    RETURN QUERY
+    SELECT
+        ie.sku_id,
+        (1 - (ie.embedding <=> query_embedding))::float AS similarity
+    FROM image_embeddings ie
+    WHERE ie.embedding IS NOT NULL
+      AND ie.sku_id IS NOT NULL
+    ORDER BY ie.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION canvas_similar_search TO anon, authenticated, service_role;
