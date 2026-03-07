@@ -384,7 +384,8 @@ Return a JSON object with these fields:
 - detail_terms: string[] (TRULY non-filterable product details — pearl buttons, hardware, zipper placement. NOT for pockets/backless/lace/slit which are now filterable via Section 4b)
 - detail_mode: boolean (true ONLY when the query's distinguishing feature has NO attribute mapping at all — see Section 8 rule 8)
 - prefilter_keywords: string[] (keywords likely in product names/descriptions for text prefiltering — only used when detail_mode=true)
-- brand: string | null
+- brand: string | null (for EXACT brand purchase — hard filter. See Section 7.)
+- vibe_brand: string | null (brand referenced as STYLE SIGNAL, not a purchase target — "like X", "X vibe". See Section 7. Mutually exclusive with brand.)
 - max_price: number | null
 - min_price: number | null
 - on_sale_only: boolean
@@ -607,6 +608,45 @@ Example for "blouse with pearl buttons":
 ```
 
 If you can only think of one meaningful angle, set semantic_queries to [semantic_query].
+
+**VIBE-BRAND QUERIES — when the user references a brand as a style signal:**
+
+Example for "Like Zara but better quality":
+```json
+{{
+  "intent": "vague",
+  "vibe_brand": "Zara",
+  "brand": null,
+  "min_price": 60,
+  "algolia_query": "",
+  "semantic_queries": [
+    "polished clean-cut basics in neutral tones, tailored minimalist everyday wardrobe essentials",
+    "elevated versatile knitwear and structured blazers with refined details, quality fabrics",
+    "modern classic blouses and trousers with clean lines, sophisticated muted palette"
+  ],
+  "modes": ["smart_casual", "quiet_luxury"],
+  "attributes": {{"category_l1": ["Tops", "Dresses", "Outerwear"]}},
+  "confidence": 0.85
+}}
+```
+
+Example for "Boho maxi dress like Anthropologie":
+```json
+{{
+  "intent": "specific",
+  "vibe_brand": "Anthropologie",
+  "brand": null,
+  "algolia_query": "boho maxi dress",
+  "semantic_queries": [
+    "flowing bohemian maxi dress with earthy layered textures and artisan details",
+    "printed boho maxi dress with tiered skirt, vintage-inspired romantic patterns",
+    "relaxed oversized maxi dress with embroidery or crochet details, festival style"
+  ],
+  "modes": ["boho"],
+  "attributes": {{"category_l1": ["Dresses"], "length": ["Maxi"]}},
+  "confidence": 0.9
+}}
+```
 
 ## SECTION 7: PRICE, BRAND, INTENT
 
