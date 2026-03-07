@@ -123,9 +123,15 @@ class SASRecRankerConfig:
         'offline by aerie',  # Aerie's activewear line
     )
 
-    # Model paths
-    CHECKPOINT_PATH: str = "/home/ubuntu/recSys/outfitTransformer/models/SASRec-Dec-11-2025_18-20-35.pth"
-    DATA_PATH: str = "/home/ubuntu/recSys/outfitTransformer/data/amazon_fashion/recbole"
+    # Model paths (configurable via env vars or Settings)
+    CHECKPOINT_PATH: str = os.environ.get(
+        "SASREC_MODEL_PATH",
+        "/home/ubuntu/recSys/outfitTransformer/models/SASRec-Dec-11-2025_18-20-35.pth",
+    )
+    DATA_PATH: str = os.environ.get(
+        "RECBOLE_DATA_PATH",
+        "/home/ubuntu/recSys/outfitTransformer/data/amazon_fashion/recbole",
+    )
     DATASET_NAME: str = "amazon_mens"
 
 
@@ -359,6 +365,13 @@ class SASRecRanker:
         if cap >= 1.0:
             return candidates  # No cap
 
+        # Auto-detect pool diversity: skip reshuffling when pool has <= 2
+        # brands (e.g., user applied a brand filter). Demoting items from
+        # the only brand in the pool serves no purpose.
+        distinct_brands = len({(c.brand or "unknown").lower() for c in candidates})
+        if distinct_brands <= 2:
+            return candidates
+
         from collections import defaultdict
 
         # Target is the number of items we're building diversity for
@@ -451,6 +464,15 @@ class SASRecRanker:
         cap = cap or self.config.SPORTSWEAR_FREQUENCY_CAP
         if cap >= 1.0:
             return candidates  # No cap
+
+        # Auto-detect pool composition: skip capping when pool is
+        # predominantly sportswear (> 80%). This means the user's filters
+        # (e.g., category=activewear) explicitly selected sportswear —
+        # penalising it would contradict their intent.
+        total = len(candidates)
+        sw_total = sum(1 for c in candidates if self._is_sportswear(c))
+        if total > 0 and sw_total / total > 0.80:
+            return candidates
 
         # Target is the number of items we're building for
         target = target_count or 50

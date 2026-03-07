@@ -437,14 +437,19 @@ class TestGreedyReranker:
         assert len(result) <= 10
 
     def test_brand_share_cap_enforced(self, reranker):
-        # 20 items all from Boohoo + 10 from others
+        # 20 items all from Boohoo + 5 from Reformation + 5 from Zara
+        # Need 3+ distinct brands so the default max_brand_share (0.40) applies.
+        # (Pools with <= 2 brands get a relaxed cap to support brand-filter UX.)
         target = 15
         candidates = [
             _make_candidate(item_id=f"boo{i}", brand="Boohoo", final_score=0.9 - i * 0.01)
             for i in range(20)
         ] + [
             _make_candidate(item_id=f"ref{i}", brand="Reformation", final_score=0.5 - i * 0.01)
-            for i in range(10)
+            for i in range(5)
+        ] + [
+            _make_candidate(item_id=f"zar{i}", brand="Zara", final_score=0.4 - i * 0.01)
+            for i in range(5)
         ]
 
         result = reranker.rerank(candidates, target_size=target)

@@ -199,8 +199,29 @@ class GreedyConstrainedReranker:
             target_size, cfg.category_proportions
         )
 
-        # Hard brand cap (the only hard diversity limit)
-        max_brand_items = max(3, int(target_size * cfg.max_brand_share))
+        # Step 3b: Auto-detect pool brand diversity.
+        # When users apply a brand filter the pool may contain only 1-2 brands.
+        # Diversity constraints that assume a heterogeneous pool would reject
+        # valid items, returning far fewer results than requested.
+        distinct_brands = len(
+            {(getattr(c, "brand", "") or "").lower() for c in available} - {""}
+        )
+
+        if distinct_brands <= 1:
+            # Single brand pool (e.g., brand filter active).
+            # Disable strict-diversity and brand cap entirely.
+            effective_strict_positions = 0
+            max_brand_items = len(available)
+        elif distinct_brands <= 2:
+            # Very low diversity — relax but don't disable.
+            effective_strict_positions = min(
+                cfg.strict_diversity_positions, distinct_brands
+            )
+            max_brand_items = max(3, int(target_size * 0.80))
+        else:
+            # Normal diverse pool — use configured defaults.
+            effective_strict_positions = cfg.strict_diversity_positions
+            max_brand_items = max(3, int(target_size * cfg.max_brand_share))
 
         # Step 4: Greedy selection with soft penalties
         result: List[Any] = []
@@ -252,7 +273,7 @@ class GreedyConstrainedReranker:
                     continue
 
                 # 2. Strict diversity in first N positions
-                if position < cfg.strict_diversity_positions:
+                if position < effective_strict_positions:
                     if brand and brand_counts[brand] > 0:
                         continue
 

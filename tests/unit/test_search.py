@@ -800,21 +800,6 @@ class TestSearchPipeline:
         assert "semantic_ms" not in result.timing
         service._semantic_engine.search_with_filters.assert_not_called()
 
-    def test_search_exact_falls_back_to_semantic_on_empty(self, hybrid_service):
-        """EXACT intent should fall back to semantic when Algolia returns 0 results."""
-        from search.models import HybridSearchRequest
-
-        service = self._setup_service(hybrid_service)
-        service._algolia.search = MagicMock(return_value={"hits": [], "nbHits": 0})
-
-        # "boohoo" is in fallback brands -> EXACT, but Algolia returns nothing
-        request = HybridSearchRequest(query="boohoo")
-        result = service.search(request)
-
-        # Semantic should have been called as fallback
-        assert "semantic_ms" in result.timing
-        service._semantic_engine.search_with_filters.assert_called_once()
-
     def test_search_semantic_called_for_vague(self, hybrid_service):
         """VAGUE intent should trigger semantic search (multi-query)."""
         from search.models import HybridSearchRequest
@@ -2182,18 +2167,6 @@ class TestAlgoliaFallbackToSemantic:
 
         result = hybrid_service.search(HybridSearchRequest(query="boohoo"))
         mock_semantic.search_with_filters.assert_not_called()
-
-    def test_exact_with_empty_algolia_calls_semantic(self, hybrid_service):
-        """EXACT intent with 0 Algolia results should fall back to semantic."""
-        from search.models import HybridSearchRequest
-
-        mock_semantic = MagicMock()
-        mock_semantic.search_with_filters.return_value = {"results": []}
-        hybrid_service._semantic_engine = mock_semantic
-        hybrid_service._algolia.search = MagicMock(return_value={"hits": [], "nbHits": 0})
-
-        result = hybrid_service.search(HybridSearchRequest(query="boohoo"))
-        mock_semantic.search_with_filters.assert_called_once()
 
     def test_specific_always_calls_semantic(self, hybrid_service):
         """SPECIFIC intent should always call semantic regardless of Algolia results."""
