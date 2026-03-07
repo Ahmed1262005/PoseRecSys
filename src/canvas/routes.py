@@ -229,23 +229,28 @@ def get_style_elements(
         "Find products visually similar to an inspiration image using "
         "FashionCLIP embedding similarity.  Results are deduplicated "
         "(product ID, image hash, sister-brand, size-variant, fuzzy name) "
-        "and brand-diversity-capped."
+        "and brand-diversity-capped.\n\n"
+        "Supports offset-based pagination for 'See all' views."
     ),
 )
 def similar_products(
     inspiration_id: str,
     count: int = 12,
+    offset: int = 0,
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
 ) -> SimilarProductsResponse:
+    count = min(count, 60)
+    offset = max(offset, 0)
     svc = get_canvas_service()
-    products = svc.find_similar_products(
+    products, total_available = svc.find_similar_products(
         inspiration_id=inspiration_id,
         user_id=user.id,
         supabase=db,
-        count=min(count, 30),
+        count=count,
+        offset=offset,
     )
-    if not products:
+    if not products and offset == 0:
         raise HTTPException(
             status_code=404,
             detail="Inspiration not found or no similar products",
@@ -253,6 +258,9 @@ def similar_products(
     return SimilarProductsResponse(
         products=products,
         count=len(products),
+        total_available=total_available,
+        offset=offset,
+        has_more=total_available > offset + len(products),
         inspiration_id=inspiration_id,
     )
 

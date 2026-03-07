@@ -600,10 +600,14 @@ class CanvasService:
         user_id: str,
         supabase: Client,
         count: int = 12,
-    ) -> List[Dict[str, Any]]:
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
         """
-        Find the *count* most similar real products to an inspiration's
-        embedding via pgvector cosine similarity.
+        Find products visually similar to an inspiration's embedding.
+
+        Returns ``(page, total_available)`` where *page* is the
+        ``offset:offset+count`` slice of the fully-deduplicated list and
+        *total_available* is how many unique products exist in total.
 
         Five-pass dedup (mirrors the search reranker + feed pipeline):
 
@@ -630,9 +634,13 @@ class CanvasService:
             inspiration_id, user_id, supabase,
         )
         if not embedding_str:
-            return []
+            return [], 0
 
-        rows = self._canvas_search(embedding_str, supabase, count=count * 5)
+        # Always fetch a fixed pool from HNSW so total_available is stable
+        # across pages.  300 candidates typically yield 40-60 unique products
+        # after the 5-pass dedup, which is enough for several pages.
+        _HNSW_POOL = 300
+        rows = self._canvas_search(embedding_str, supabase, count=_HNSW_POOL)
 
         # ---- Pass 1: product_id dedup (multiple images per product) ----
         seen_ids: set = set()
@@ -677,9 +685,9 @@ class CanvasService:
 
             fuzzy_deduped.append(item)
 
-        # ---- Pass 5: brand diversity cap ----
+        # ---- Pass 5: brand diversity cap (applied to FULL list) ----
         brand_counts: Dict[str, int] = {}
-        final: List[Dict[str, Any]] = []
+        all_deduped: List[Dict[str, Any]] = []
         max_brand = self._SIMILAR_MAX_PER_BRAND
 
         for item in fuzzy_deduped:
@@ -687,12 +695,12 @@ class CanvasService:
             canon = _sister.get(brand, brand)
             if brand_counts.get(canon, 0) >= max_brand:
                 continue
-            final.append(item)
+            all_deduped.append(item)
             brand_counts[canon] = brand_counts.get(canon, 0) + 1
-            if len(final) >= count:
-                break
 
-        return final
+        total_available = len(all_deduped)
+        page = all_deduped[offset : offset + count]
+        return page, total_available
 
     # -----------------------------------------------------------------------
     # Private helpers

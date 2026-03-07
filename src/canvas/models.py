@@ -125,7 +125,15 @@ class SimilarProductsResponse(BaseModel):
     products: List[Dict[str, Any]] = Field(
         description="Deduplicated list of similar products, ordered by similarity",
     )
-    count: int = Field(description="Number of products returned")
+    count: int = Field(description="Number of products returned in this page")
+    total_available: int = Field(
+        description="Total unique products available after dedup (before offset/count slice)",
+    )
+    offset: int = Field(default=0, description="Offset applied to the result set")
+    has_more: bool = Field(
+        default=False,
+        description="True if more products exist beyond offset + count",
+    )
     inspiration_id: str
 
 

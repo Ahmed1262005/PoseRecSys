@@ -288,6 +288,34 @@ class TestModels:
         with pytest.raises(Exception):
             CompleteFitFromInspirationRequest(limit=101)
 
+    def test_similar_products_response(self):
+        from canvas.models import SimilarProductsResponse
+        resp = SimilarProductsResponse(
+            products=[{"product_id": "a"}, {"product_id": "b"}],
+            count=2,
+            total_available=10,
+            offset=0,
+            has_more=True,
+            inspiration_id="ins-1",
+        )
+        assert resp.count == 2
+        assert resp.total_available == 10
+        assert resp.offset == 0
+        assert resp.has_more is True
+
+    def test_similar_products_response_last_page(self):
+        from canvas.models import SimilarProductsResponse
+        resp = SimilarProductsResponse(
+            products=[{"product_id": "c"}],
+            count=1,
+            total_available=5,
+            offset=4,
+            has_more=False,
+            inspiration_id="ins-1",
+        )
+        assert resp.has_more is False
+        assert resp.offset == 4
+
     def test_complete_fit_response(self):
         from canvas.models import CompleteFitFromInspirationResponse
         resp = CompleteFitFromInspirationResponse(
@@ -1044,6 +1072,127 @@ class TestCanvasServiceClosestProduct:
 
         result = svc.find_closest_product("ins-1", "user-123", mock_sb)
         assert result is None
+
+
+class TestCanvasServiceSimilarProducts:
+    """CanvasService.find_similar_products with offset pagination."""
+
+    def _setup_mock(self, n_products: int):
+        """Create a mock with n_products returned by the HNSW RPC."""
+        from canvas.service import CanvasService
+        svc = CanvasService()
+        mock_sb = _mock_supabase_chain()
+
+        emb_str = _make_embedding_str(seed=7)
+
+        # Step 1: embedding lookup
+        select_result = MagicMock()
+        select_result.data = [{"embedding": emb_str}]
+
+        # Step 2: HNSW RPC returns n sku_ids (distinct brands to survive dedup)
+        brands = [
+            "Brand_A", "Brand_B", "Brand_C", "Brand_D", "Brand_E",
+            "Brand_F", "Brand_G", "Brand_H", "Brand_I", "Brand_J",
+            "Brand_K", "Brand_L", "Brand_M", "Brand_N", "Brand_O",
+        ]
+        nn_rows = [
+            {"sku_id": f"prod-{i:03d}", "similarity": round(0.90 - i * 0.005, 4)}
+            for i in range(n_products)
+        ]
+        nn_result = MagicMock()
+        nn_result.data = nn_rows
+
+        # Step 3: products table returns matching rows
+        product_rows = [
+            {
+                "id": f"prod-{i:03d}",
+                "name": f"Product {i}",
+                "brand": brands[i % len(brands)],
+                "category": "tops",
+                "broad_category": "tops",
+                "colors": ["black"],
+                "materials": ["cotton"],
+                "price": 29.99 + i,
+                "original_price": 39.99 + i,
+                "fit": "regular",
+                "length": "regular",
+                "sleeve": "short",
+                "neckline": "crew",
+                "style_tags": ["Casual"],
+                "primary_image_url": f"https://example.com/prod-{i:03d}.jpg",
+                "hero_image_url": None,
+                "in_stock": True,
+            }
+            for i in range(n_products)
+        ]
+        product_result = MagicMock()
+        product_result.data = product_rows
+
+        mock_sb.table.return_value.execute.side_effect = [
+            select_result,   # embedding lookup
+            product_result,  # products batch fetch
+        ]
+
+        rpc_exec = MagicMock()
+        rpc_exec.execute.return_value = nn_result
+        mock_sb.rpc.return_value = rpc_exec
+
+        return svc, mock_sb
+
+    def test_returns_tuple(self):
+        svc, mock_sb = self._setup_mock(20)
+        result = svc.find_similar_products("ins-1", "user-1", mock_sb, count=6)
+        assert isinstance(result, tuple)
+        products, total = result
+        assert isinstance(products, list)
+        assert isinstance(total, int)
+
+    def test_default_offset_zero(self):
+        svc, mock_sb = self._setup_mock(20)
+        products, total = svc.find_similar_products(
+            "ins-1", "user-1", mock_sb, count=6,
+        )
+        assert len(products) == 6
+        assert total >= 6
+        # First product should be the highest similarity
+        assert products[0]["name"] == "Product 0"
+
+    def test_offset_skips_items(self):
+        svc, mock_sb = self._setup_mock(20)
+        page0, total0 = svc.find_similar_products(
+            "ins-1", "user-1", mock_sb, count=6, offset=0,
+        )
+        # Re-setup mock for second call (side_effect consumed)
+        svc2, mock_sb2 = self._setup_mock(20)
+        page1, total1 = svc2.find_similar_products(
+            "ins-1", "user-1", mock_sb2, count=6, offset=6,
+        )
+        # Pages should not overlap
+        ids_0 = {p["product_id"] for p in page0}
+        ids_1 = {p["product_id"] for p in page1}
+        assert ids_0.isdisjoint(ids_1), "Pages overlap"
+        # Totals should be consistent
+        assert total0 == total1
+
+    def test_offset_beyond_total_returns_empty(self):
+        svc, mock_sb = self._setup_mock(5)
+        products, total = svc.find_similar_products(
+            "ins-1", "user-1", mock_sb, count=6, offset=100,
+        )
+        assert products == []
+        assert total <= 5
+
+    def test_embedding_not_found_returns_empty(self):
+        from canvas.service import CanvasService
+        svc = CanvasService()
+        mock_sb = _mock_supabase_chain()
+        select_result = MagicMock()
+        select_result.data = []
+        mock_sb.table.return_value.execute.return_value = select_result
+
+        products, total = svc.find_similar_products("ins-1", "user-1", mock_sb)
+        assert products == []
+        assert total == 0
 
 
 class TestCanvasServiceHelpers:
