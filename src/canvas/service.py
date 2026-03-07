@@ -124,9 +124,8 @@ class CanvasService:
             pinterest_pin_id=None,
         )
 
-        # 5. Recompute taste vector
-        self.recompute_taste_vector(user_id, supabase)
-
+        # Taste-vector recomputation is deferred to the route handler
+        # (BackgroundTasks) so the HTTP response returns immediately.
         return _row_to_response(row)
 
     # -- URL --------------------------------------------------------------
@@ -162,7 +161,7 @@ class CanvasService:
             pinterest_pin_id=None,
         )
 
-        self.recompute_taste_vector(user_id, supabase)
+        # Taste-vector recomputation is deferred to the route handler.
         return _row_to_response(row)
 
     # -- Pinterest --------------------------------------------------------
@@ -246,10 +245,7 @@ class CanvasService:
             )
             added.append(_row_to_response(row))
 
-        # Recompute taste vector once after all pins processed
-        if added:
-            self.recompute_taste_vector(user_id, supabase)
-
+        # Taste-vector recomputation is deferred to the route handler.
         return added
 
     # -- Delete -----------------------------------------------------------

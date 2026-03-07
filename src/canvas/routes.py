@@ -71,6 +71,7 @@ def list_inspirations(
 )
 async def upload_inspiration(
     file: UploadFile = File(..., description="Image file (JPEG, PNG, WebP)"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
 ) -> InspirationResponse:
@@ -78,7 +79,7 @@ async def upload_inspiration(
     contents = await file.read()
     svc = get_canvas_service()
     try:
-        return svc.add_inspiration_upload(
+        result = svc.add_inspiration_upload(
             user_id=user.id,
             image_bytes=contents,
             filename=file.filename or "upload.jpg",
@@ -86,6 +87,8 @@ async def upload_inspiration(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    background_tasks.add_task(svc.recompute_taste_vector, user.id, db)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +103,13 @@ async def upload_inspiration(
 )
 def add_inspiration_url(
     body: UrlInspirationRequest,
+    background_tasks: BackgroundTasks,
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
 ) -> InspirationResponse:
     svc = get_canvas_service()
     try:
-        return svc.add_inspiration_url(
+        result = svc.add_inspiration_url(
             user_id=user.id,
             url=body.url,
             title=body.title,
@@ -116,6 +120,8 @@ def add_inspiration_url(
     except Exception as exc:
         logger.exception("Failed to add URL inspiration", url=body.url)
         raise HTTPException(status_code=502, detail=f"Could not fetch image: {exc}")
+    background_tasks.add_task(svc.recompute_taste_vector, user.id, db)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -133,12 +139,13 @@ def add_inspiration_url(
 )
 def sync_pinterest(
     body: PinterestSyncRequest,
+    background_tasks: BackgroundTasks,
     user: SupabaseUser = Depends(require_auth),
     db: Client = Depends(get_db),
 ) -> List[InspirationResponse]:
     svc = get_canvas_service()
     try:
-        return svc.add_inspiration_pinterest(
+        result = svc.add_inspiration_pinterest(
             user_id=user.id,
             supabase=db,
             pin_ids=body.pin_ids,
@@ -147,6 +154,9 @@ def sync_pinterest(
     except Exception as exc:
         logger.exception("Pinterest sync failed")
         raise HTTPException(status_code=502, detail=f"Pinterest sync error: {exc}")
+    if result:
+        background_tasks.add_task(svc.recompute_taste_vector, user.id, db)
+    return result
 
 
 # ---------------------------------------------------------------------------
