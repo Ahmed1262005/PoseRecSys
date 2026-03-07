@@ -607,12 +607,12 @@ def main():
         help="Max products to process (useful for testing). Default: all",
     )
     parser.add_argument(
-        "--workers", type=int, default=4,
-        help="Parallel DB upsert workers. Default: 4",
+        "--workers", type=int, default=3,
+        help="Parallel DB upsert workers per batch. Default: 3",
     )
     parser.add_argument(
         "--batch-workers", type=int, default=1,
-        help="Parallel batch processing workers (each processes a full batch concurrently). Default: 1",
+        help="Parallel batch processing workers. Keep low (1-3) to avoid Supabase connection limits. Default: 1",
     )
 
     args = parser.parse_args()
@@ -651,11 +651,14 @@ def main():
         elif hasattr(engine, '_model') and engine._model is not None:
             # Build a batch encoder from the underlying CLIP model
             def _batch_encode(texts: List[str]) -> List[np.ndarray]:
-                from transformers import CLIPTokenizerFast
                 import torch
                 model = engine._model
                 processor = engine._processor
-                inputs = processor(text=texts, return_tensors="pt", padding=True, truncation=True)
+                # Truncate to CLIP's 77-token max and pad
+                inputs = processor(
+                    text=texts, return_tensors="pt",
+                    padding=True, truncation=True, max_length=77,
+                )
                 if hasattr(model, 'device'):
                     inputs = {k: v.to(model.device) for k, v in inputs.items()}
                 with torch.no_grad():
