@@ -534,8 +534,8 @@ def process_batch(
 def upsert_records_parallel(
     supabase_client,
     records: List[Dict],
-    db_workers: int = 4,
-    chunk_size: int = 50,
+    db_workers: int = 3,
+    chunk_size: int = 10,
 ) -> Tuple[int, int]:
     """Upsert records in parallel chunks using ThreadPoolExecutor."""
     if not records:
