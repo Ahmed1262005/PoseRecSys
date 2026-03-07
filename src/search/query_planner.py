@@ -89,10 +89,18 @@ class SearchPlan(BaseModel):
         description="Concrete negative values the user explicitly wants to avoid"
     )
 
-    # Brand detected (if any)
+    # Brand detected (if any) — hard filter to this brand
     brand: Optional[str] = Field(
         default=None,
-        description="Detected brand name, if any"
+        description="Detected brand name for exact brand search (hard filter)"
+    )
+
+    # Brand referenced as a style signal — NOT a purchase target.
+    # Set for "like X", "X vibe", "X style", "similar to X" queries.
+    # Mutually exclusive with `brand`.
+    vibe_brand: Optional[str] = Field(
+        default=None,
+        description="Brand referenced as style signal ('like X' / 'X vibe'), NOT a hard filter"
     )
 
     # Price constraints extracted from query
@@ -603,11 +611,59 @@ If you can only think of one meaningful angle, set semantic_queries to [semantic
 ## SECTION 7: PRICE, BRAND, INTENT
 
 - **intent**: "exact" (pure brand search), "specific" (concrete product + attributes), "vague" (mood/aesthetic only)
-- **brand**: Detected brand name or null
+- **brand**: Detected brand name or null. For EXACT brand purchase — hard filter.
+- **vibe_brand**: Brand referenced as a STYLE SIGNAL, not a purchase target. Mutually exclusive with `brand`.
 - **max_price**: From "under $50" → 50.0. "Looks expensive" is NOT a price constraint.
 - **min_price**: From "over $200" → 200.0
 - **on_sale_only**: True for "on sale", "discounted", "clearance". NOT for "affordable" or "cheap".
 - **confidence**: 0.0-1.0
+
+### Brand-as-Vibe Queries
+
+When a user references a brand as a STYLE REFERENCE (not wanting to buy that specific brand):
+
+**Detection patterns** — set `vibe_brand`, do NOT set `brand`:
+- "like X", "X vibe", "X style", "X aesthetic", "similar to X"
+- "alternative to X", "X inspired", "X but ..."
+- "better quality than X", "cheaper than X", "more affordable X"
+- "X look for less", "dupes for X"
+
+**Exact brand patterns** — set `brand`, do NOT set `vibe_brand`:
+- "X dress", "X tops", just the brand name, "buy X", "shop X"
+
+**How to decompose a brand's aesthetic:**
+Use your fashion knowledge to identify the brand's style DNA, then translate it into
+concrete search attributes:
+
+1. Identify the brand's silhouette language → modes and attributes (e.g., Anthropologie = boho mode, Theory = smart_casual)
+2. Identify the brand's color world → inform semantic queries (e.g., Zara = neutral/muted, Free People = earthy/warm)
+3. Identify the brand's formality level → appropriate formality mode
+4. Identify the brand's typical occasions → relevant occasion modes
+5. Generate semantic_queries that capture the brand's visual DNA (e.g., for "like Anthropologie": "flowing bohemian maxi dress earthy layered textures")
+6. Correct misspelled brand names (e.g., "Antropologie" → vibe_brand: "Anthropologie")
+
+**Quality/price modifiers** — use the brand's price tier as reference:
+- "better quality than X" / "elevated X" → same style DNA, but set min_price ABOVE the brand's tier
+  (e.g., "better than Zara [$15-80]" → min_price: 50-80, target the same clean/basic aesthetic)
+- "cheaper than X" / "affordable X" / "X for less" → same style DNA, but set max_price BELOW the brand's tier
+  (e.g., "cheaper Aritzia [$100-400]" → max_price: 80-100, target the same minimal/neutral aesthetic)
+- "X dupe" → same style DNA, lower price, no brand filter
+
+**Style cluster landscape** (for reasoning about brand tiers and aesthetic DNA):
+
+VALUE ($8-80): basics/capsule | fast-trend/party | teen-casual | mall-trend
+MID ($30-200): boho/indie/layered | trendy-feminine/going-out | mainstream | y2k/edgy
+MID-PREMIUM ($60-400): modern-classic/tailored | feminine-eco-chic | resort-minimal | artsy-resort
+PREMIUM ($100-600): premium-denim | athleisure/wellness | quiet-lux/minimal | contemporary-designer | outdoor
+LUXURY ($150-3000): occasion/eventwear | quiet-luxury/investment
+
+Brands sharing aesthetic DNA span tiers. Use your fashion knowledge to identify the right
+tier and style family. For example: Zara (value/basics) → COS, Massimo Dutti, & Other Stories
+(mid-premium, same clean/versatile DNA); Anthropologie (mid/boho) → Free People (same cluster),
+Sezane (feminine eco-chic upgrade); Boohoo (value/party) → Princess Polly (mid, same going-out DNA).
+
+Think of brand DNA as: silhouette language + color palette + formality + construction quality.
+"Better quality" means same silhouette language and palette at a higher construction tier.
 
 ## SECTION 8: DECISION RULES
 
@@ -1822,7 +1878,15 @@ class QueryPlanner:
         # -----------------------------------------------------------
         # Step 4: Brand / price / sale injection
         # -----------------------------------------------------------
-        if plan.brand and "brands" not in request_updates:
+        if plan.vibe_brand:
+            # Vibe brand → do NOT set hard brand filter.
+            # Pass through as internal key for post-planner cluster boosting.
+            request_updates["_vibe_brand"] = plan.vibe_brand
+            logger.info(
+                "Vibe brand detected — skipping hard brand filter",
+                vibe_brand=plan.vibe_brand,
+            )
+        elif plan.brand and "brands" not in request_updates:
             request_updates["brands"] = [plan.brand]
 
         if plan.max_price is not None:

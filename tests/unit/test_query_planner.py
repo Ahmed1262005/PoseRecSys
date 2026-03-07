@@ -849,3 +849,221 @@ class TestPostFilterWithExpansion:
         filtered = service._post_filter_semantic(results, request)
         assert len(filtered) == 1
         assert filtered[0]["product_id"] == "p1"
+
+
+# =============================================================================
+# Vibe-Brand Tests
+# =============================================================================
+
+class TestVibeBrand:
+    """Tests for vibe_brand field on SearchPlan and plan_to_request_updates."""
+
+    def test_vibe_brand_field_accepted(self):
+        """SearchPlan accepts vibe_brand as a string."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="boho maxi dress",
+            semantic_query="flowing bohemian maxi dress earthy layered textures",
+            modes=["boho"],
+            attributes={"category_l1": ["Dresses"]},
+            avoid={},
+            brand=None,
+            vibe_brand="Anthropologie",
+            confidence=0.85,
+        )
+        assert plan.vibe_brand == "Anthropologie"
+        assert plan.brand is None
+
+    def test_vibe_brand_null_by_default(self):
+        """vibe_brand defaults to None."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="dress",
+            semantic_query="dress",
+            modes=[],
+            attributes={},
+            avoid={},
+        )
+        assert plan.vibe_brand is None
+
+    def test_vibe_brand_mutually_exclusive_with_brand(self):
+        """vibe_brand and brand can both be set (LLM contract: only one should
+        be non-null, but the model doesn't enforce mutual exclusion).
+        plan_to_request_updates gives vibe_brand priority."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="dress",
+            semantic_query="dress",
+            modes=[],
+            attributes={"category_l1": ["Dresses"]},
+            avoid={},
+            brand="Zara",
+            vibe_brand="Zara",
+            confidence=0.8,
+        )
+        planner = QueryPlanner.__new__(QueryPlanner)
+        planner._enabled = True
+        result = planner.plan_to_request_updates(plan)
+        plan_updates = result[0]
+
+        # vibe_brand takes precedence — no hard brand filter
+        assert "brands" not in plan_updates
+        assert plan_updates.get("_vibe_brand") == "Zara"
+
+    def test_plan_to_request_updates_vibe_brand_no_hard_filter(self):
+        """When vibe_brand is set, plan_to_request_updates should NOT set
+        brands in the request updates (no hard filter)."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="elevated basics neutral minimalist",
+            semantic_query="elevated clean basics neutral palette minimalist capsule wardrobe",
+            semantic_queries=[
+                "polished minimalist basics neutral tones elevated essentials",
+                "clean tailored basics muted palette capsule wardrobe staples",
+            ],
+            modes=["smart_casual"],
+            attributes={"category_l1": ["Tops", "Dresses"]},
+            avoid={},
+            brand=None,
+            vibe_brand="Zara",
+            min_price=50.0,
+            confidence=0.85,
+        )
+        planner = QueryPlanner.__new__(QueryPlanner)
+        planner._enabled = True
+        result = planner.plan_to_request_updates(plan)
+        plan_updates = result[0]
+
+        # Should NOT have hard brand filter
+        assert "brands" not in plan_updates
+        # Should have _vibe_brand internal key
+        assert plan_updates["_vibe_brand"] == "Zara"
+        # min_price should still be applied (from "better quality than Zara")
+        assert plan_updates.get("min_price") == 50.0
+
+    def test_plan_to_request_updates_exact_brand_unchanged(self):
+        """When brand is set (not vibe_brand), hard filter is applied as before."""
+        plan = SearchPlan(
+            intent="exact",
+            algolia_query="",
+            semantic_query="Zara fashion clothing",
+            modes=[],
+            attributes={},
+            avoid={},
+            brand="Zara",
+            vibe_brand=None,
+            confidence=0.95,
+        )
+        planner = QueryPlanner.__new__(QueryPlanner)
+        planner._enabled = True
+        result = planner.plan_to_request_updates(plan)
+        plan_updates = result[0]
+
+        # Should have hard brand filter
+        assert plan_updates.get("brands") == ["Zara"]
+        # Should NOT have vibe brand
+        assert "_vibe_brand" not in plan_updates
+
+    def test_vibe_brand_with_quality_modifier(self):
+        """'Like Zara but better quality' → vibe_brand + higher min_price."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="basics elevated quality",
+            semantic_query="elevated basics clean minimalist better quality knitwear",
+            modes=["smart_casual"],
+            attributes={
+                "category_l1": ["Tops", "Dresses"],
+            },
+            avoid={},
+            brand=None,
+            vibe_brand="Zara",
+            min_price=60.0,
+            confidence=0.8,
+        )
+        planner = QueryPlanner.__new__(QueryPlanner)
+        planner._enabled = True
+        result = planner.plan_to_request_updates(plan)
+        plan_updates = result[0]
+
+        assert "brands" not in plan_updates
+        assert plan_updates["_vibe_brand"] == "Zara"
+        assert plan_updates["min_price"] == 60.0
+
+    def test_vibe_brand_with_budget_modifier(self):
+        """'Cheaper than Aritzia' → vibe_brand + lower max_price."""
+        plan = SearchPlan(
+            intent="specific",
+            algolia_query="minimal basics neutral",
+            semantic_query="premium minimalist basics neutral quiet luxury affordable",
+            modes=["quiet_luxury"],
+            attributes={
+                "category_l1": ["Tops", "Dresses"],
+            },
+            avoid={},
+            brand=None,
+            vibe_brand="Aritzia",
+            max_price=80.0,
+            confidence=0.8,
+        )
+        planner = QueryPlanner.__new__(QueryPlanner)
+        planner._enabled = True
+        result = planner.plan_to_request_updates(plan)
+        plan_updates = result[0]
+
+        assert "brands" not in plan_updates
+        assert plan_updates["_vibe_brand"] == "Aritzia"
+        assert plan_updates["max_price"] == 80.0
+
+    def test_system_prompt_contains_vibe_brand_section(self):
+        """The system prompt should include the brand-as-vibe instructions."""
+        from search.query_planner import _build_system_prompt
+        prompt = _build_system_prompt()
+
+        assert "vibe_brand" in prompt
+        assert "Brand-as-Vibe Queries" in prompt
+        assert "like X" in prompt.lower() or '"like X"' in prompt
+        assert "Style cluster landscape" in prompt
+        assert "Massimo Dutti" in prompt  # example in tier landscape
+
+
+class TestVibeBrandFilters:
+    """Tests for _build_vibe_brand_filters in HybridSearchService."""
+
+    def _make_service(self):
+        from search.hybrid_search import HybridSearchService
+        return HybridSearchService(
+            algolia_client=MagicMock(),
+            analytics=MagicMock(),
+        )
+
+    def test_known_brand_returns_filters(self):
+        """A known brand (e.g., 'zara') should return cluster brand filters."""
+        service = self._make_service()
+        filters = service._build_vibe_brand_filters("Zara")
+        # Zara is in cluster G (and secondary A) — should have brands from those
+        assert len(filters) > 0
+        # All filters should be brand:"..." format
+        for f in filters:
+            assert f.startswith('brand:"')
+            assert f.endswith('"')
+
+    def test_unknown_brand_returns_empty(self):
+        """An unknown brand should return an empty list."""
+        service = self._make_service()
+        filters = service._build_vibe_brand_filters("TotallyFakeBrandXYZ")
+        assert filters == []
+
+    def test_case_insensitive_lookup(self):
+        """Brand lookup should be case-insensitive."""
+        service = self._make_service()
+        filters_lower = service._build_vibe_brand_filters("anthropologie")
+        filters_upper = service._build_vibe_brand_filters("Anthropologie")
+        assert len(filters_lower) == len(filters_upper)
+        assert set(filters_lower) == set(filters_upper)
+
+    def test_includes_cluster_adjacent_brands(self):
+        """Vibe filters for Anthropologie should include Free People (same cluster M)."""
+        service = self._make_service()
+        filters = service._build_vibe_brand_filters("Anthropologie")
+        brand_names = [f.split('"')[1].lower() for f in filters]
+        assert "free people" in brand_names or "anthropologie" in brand_names

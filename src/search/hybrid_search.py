@@ -179,6 +179,7 @@ class HybridSearchService:
         semantic_queries: Optional[List[str]] = None
         name_exclusions: List[str] = []
         follow_ups: Optional[List[FollowUpQuestion]] = None
+        vibe_brand: Optional[str] = None
 
         t_plan = time.time()
         if pre_plan is not None:
@@ -221,6 +222,7 @@ class HybridSearchService:
             # Extract internal pipeline keys (not real request fields)
             name_exclusions = plan_updates.pop("_name_exclusions", [])
             mode_excl_keys = plan_updates.pop("_mode_excl_keys", [])
+            vibe_brand = plan_updates.pop("_vibe_brand", None)
 
             # ---------------------------------------------------------
             # Filter application strategy per intent:
@@ -301,6 +303,8 @@ class HybridSearchService:
             timing["plan_exclusions"] = exclude_filters_from_plan
             if name_exclusions:
                 timing["plan_name_exclusions"] = name_exclusions
+            if vibe_brand:
+                timing["plan_vibe_brand"] = vibe_brand
 
             # Compute v1.0.0.2 attribute filters from the search plan.
             # These are used for attribute-filtered semantic search (pgvector
@@ -344,22 +348,42 @@ class HybridSearchService:
             algolia_filters = self._build_algolia_filters(request)
 
         # Step 2d: Boost cluster brands in Algolia retrieval.
-        # When the user has a profile with preferred brands, add their
-        # cluster brands as optionalFilters.  This gives cluster-appropriate
-        # brands a ranking boost at retrieval level — increasing the chance
-        # they appear in the candidate pool for reranking.
+        # Two sources of brand boosting:
+        #   (a) Vibe brand: when the LLM identified a brand-as-style-reference
+        #       (e.g., "like Zara but better"), boost brands from the same
+        #       style cluster(s) as the referenced brand.
+        #   (b) User profile: when the user has preferred brands from
+        #       onboarding, boost their cluster-adjacent brands.
         # Skip when user explicitly filtered by brand (already constrained).
-        if user_profile and not request.brands:
-            cluster_brand_filters = self._build_cluster_brand_filters(user_profile)
-            if cluster_brand_filters:
-                if algolia_optional_filters is None:
-                    algolia_optional_filters = []
-                algolia_optional_filters.extend(cluster_brand_filters)
-                logger.info(
-                    "Added cluster brand optionalFilters",
-                    cluster_brands=len(cluster_brand_filters),
-                    total_optional=len(algolia_optional_filters),
-                )
+        if not request.brands:
+            # (a) Vibe brand cluster boosting (query-level)
+            if vibe_brand:
+                vibe_filters = self._build_vibe_brand_filters(vibe_brand)
+                if vibe_filters:
+                    if algolia_optional_filters is None:
+                        algolia_optional_filters = []
+                    algolia_optional_filters.extend(vibe_filters)
+                    logger.info(
+                        "Added vibe-brand cluster optionalFilters",
+                        vibe_brand=vibe_brand,
+                        cluster_brands=len(vibe_filters),
+                        total_optional=len(algolia_optional_filters),
+                    )
+                    timing["vibe_brand"] = vibe_brand
+                    timing["vibe_brand_filters"] = len(vibe_filters)
+
+            # (b) User profile cluster boosting (session-level)
+            if user_profile:
+                cluster_brand_filters = self._build_cluster_brand_filters(user_profile)
+                if cluster_brand_filters:
+                    if algolia_optional_filters is None:
+                        algolia_optional_filters = []
+                    algolia_optional_filters.extend(cluster_brand_filters)
+                    logger.info(
+                        "Added cluster brand optionalFilters",
+                        cluster_brands=len(cluster_brand_filters),
+                        total_optional=len(algolia_optional_filters),
+                    )
 
         # =====================================================================
         # Compute v1.0.0.2 attribute filters from the search plan.
@@ -1958,6 +1982,64 @@ class HybridSearchService:
                     seen.add(key)
                     filters.append(f'brand:"{brand}"')
 
+        return filters
+
+    def _build_vibe_brand_filters(self, vibe_brand: str) -> List[str]:
+        """Build Algolia optionalFilters from a vibe brand's clusters.
+
+        When the LLM identifies a brand as a style reference (not a purchase
+        target), look up which cluster(s) that brand belongs to and collect
+        all in-inventory brands from those clusters.  These become
+        optionalFilters — Algolia boosts matching items without excluding
+        non-matching ones.
+
+        The LLM handles brand detection (including typo correction), so
+        ``vibe_brand`` is the LLM-normalized brand name (e.g.,
+        "Anthropologie" even if the user typed "Antropologie").
+
+        Args:
+            vibe_brand: Brand name as output by the LLM (may be properly cased
+                or lowercase).
+
+        Returns:
+            List of filter strings like ``'brand:"Ba&sh"'``.
+            Empty list if the brand is unknown or has no cluster data.
+        """
+        try:
+            from recs.brand_clusters import get_brand_clusters
+            from scoring.constants.brand_data import BRAND_CLUSTERS
+        except ImportError:
+            logger.debug("Brand cluster modules not available for vibe brand")
+            return []
+
+        vibe_lower = vibe_brand.lower()
+        cluster_ids: set = set()
+        for cid, _conf in get_brand_clusters(vibe_lower):
+            cluster_ids.add(cid)
+
+        if not cluster_ids:
+            logger.info(
+                "Vibe brand not found in cluster map — no optionalFilters",
+                vibe_brand=vibe_brand,
+            )
+            return []
+
+        # Collect all properly-cased brand names from the vibe brand's clusters
+        seen: set = set()
+        filters: List[str] = []
+        for cid in cluster_ids:
+            for brand in BRAND_CLUSTERS.get(cid, []):
+                key = brand.lower()
+                if key not in seen:
+                    seen.add(key)
+                    filters.append(f'brand:"{brand}"')
+
+        logger.info(
+            "Built vibe-brand cluster filters",
+            vibe_brand=vibe_brand,
+            clusters=sorted(cluster_ids),
+            brand_count=len(filters),
+        )
         return filters
 
     def _build_algolia_filters(self, request: HybridSearchRequest) -> Optional[str]:
