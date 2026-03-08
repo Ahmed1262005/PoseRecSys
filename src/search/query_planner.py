@@ -65,7 +65,7 @@ class SearchPlan(BaseModel):
     # When present, these REPLACE semantic_query for the search.
     semantic_queries: List[str] = Field(
         default_factory=list,
-        description="2-4 diverse FashionCLIP queries targeting different visual angles"
+        description="2-6 diverse FashionCLIP queries targeting different visual angles (5-6 for vague, 2-3 for specific, 1 for exact)"
     )
 
     # Mode tags — high-level intent labels from the mode menu
@@ -377,7 +377,7 @@ Return a JSON object with these fields:
 - intent: "exact" | "specific" | "vague"
 - algolia_query: string (product-name keywords for text search)
 - semantic_query: string (rich visual description for FashionCLIP — used as fallback)
-- semantic_queries: string[] (2-4 DIVERSE FashionCLIP queries — see Section 6b below)
+- semantic_queries: string[] (2-6 DIVERSE FashionCLIP queries — see Section 6b below)
 - modes: string[] (mode tags from the menu below)
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
@@ -518,7 +518,7 @@ avoid for specific concrete values that no mode covers.
 ## SECTION 6b: DIVERSE SEMANTIC QUERIES (semantic_queries)
 
 A single semantic query pulls visually-similar items that cluster together. To get DIVERSE results,
-generate 2-4 semantic queries that each target a DIFFERENT visual angle of the user's intent.
+generate multiple semantic queries that each target a DIFFERENT visual angle of the user's intent.
 
 RULES:
 - Each query follows the same positive-only rules as semantic_query (Principle 8)
@@ -526,19 +526,36 @@ RULES:
 - Do NOT repeat the same description with synonyms — each must pull a genuinely different cluster
 - For exact brand queries: just 1 query is fine (set semantic_queries to [semantic_query])
 - For specific queries: 2-3 queries exploring different interpretations
-- For vague queries: 3-4 queries covering different garment types or aesthetic angles
+- For vague/open queries: 5-6 queries — each MUST target a DIFFERENT garment category or type.
+  If the query is about "outfits" or a general occasion, cover: dresses, tops, bottoms (trousers/shorts/skirts),
+  outerwear/layering, and co-ord sets or jumpsuits. Do NOT generate multiple queries that describe
+  the same garment type with slightly different wording — that defeats the purpose.
 - Keep each query under 77 tokens (FashionCLIP model limit)
 
-Example for "work outfit":
+Example for "work outfit" (vague — 5 queries, each a DIFFERENT garment):
 ```json
 "semantic_queries": [
   "structured tailored blazer in solid neutral tones, professional office wear",
   "elegant silk button-up blouse with refined collar, polished workwear",
-  "fitted knee-length pencil dress in dark fabric, clean professional silhouette"
+  "fitted knee-length pencil dress in dark fabric, clean professional silhouette",
+  "high-waisted tailored wide-leg trousers in black or navy, polished office bottoms",
+  "matching coordinated two-piece blazer and trouser set, professional power suiting"
 ]
 ```
 
-Example for "cute summer dress":
+Example for "vacation outfits for Europe" (vague — 6 queries spanning garment categories):
+```json
+"semantic_queries": [
+  "lightweight floral midi sundress with strappy details, warm-weather resort wear",
+  "relaxed linen blouse in soft neutral tones, breezy European summer top",
+  "high-waisted wide-leg linen trousers in light earthy tones, comfortable travel bottoms",
+  "lightweight knit cardigan or linen blazer for layering, versatile outerwear for cool evenings",
+  "tailored high-waisted shorts in neutral cotton, casual chic summer bottoms",
+  "matching two-piece co-ord set in breathable fabric, effortless vacation outfit"
+]
+```
+
+Example for "cute summer dress" (specific — 3 queries, all dresses but different silhouettes):
 ```json
 "semantic_queries": [
   "flowy floral print midi sundress in soft pastel colors, lightweight fabric",
@@ -1067,11 +1084,16 @@ fresh. The user already searched, saw follow-up questions, and selected answers.
 
 3. **Generate new semantic_queries** that describe what the user NOW wants — original intent +
    all selected filters woven into visual descriptions. Each query should paint a picture
-   FashionCLIP can match.
+   FashionCLIP can match. Keep the SAME number of queries as the initial search would have
+   generated — the filters narrow WHAT to search for; the diverse queries vary HOW it looks
+   (different silhouettes, fabrics, color moods, or styling). Do NOT collapse to fewer queries
+   just because the user picked a filter — that's when variety matters most.
    Example: query="tops" + fitted + edgy → semantic_queries: [
      "fitted black faux leather crop top with edgy streetwear style",
      "slim fitted ribbed tank top in dark solid color, modern edge",
-     "structured fitted bodysuit in sleek fabric, edgy minimalist"
+     "structured fitted bodysuit in sleek fabric, edgy minimalist",
+     "fitted cropped denim jacket with moto edge, hardware details",
+     "slim stretch mesh top with bold graphic, dark edgy streetwear"
    ]
 
 4. **Generate 1-2 NEW follow-up questions** about dimensions NOT yet answered. The user message

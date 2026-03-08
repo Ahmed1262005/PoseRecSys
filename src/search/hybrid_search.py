@@ -1085,7 +1085,7 @@ class HybridSearchService:
         # the full pipeline with LLM planner (~12-15s).
         _search_session_id: Optional[str] = None
         _cursor: Optional[str] = None
-        if len(merged) > request.page_size:
+        if len(merged) > 0:
             try:
                 cache = SearchSessionCache.get_instance()
                 _search_session_id = cache.generate_session_id()
@@ -1148,6 +1148,10 @@ class HybridSearchService:
                     attribute_filters=attribute_filters,
                 ))
                 _cursor = encode_cursor(page=2)
+                # Extend-search fetches FRESH candidates from 96K products,
+                # so even if page 1 has fewer than page_size results, there
+                # are likely more to find. Override has_more to True.
+                has_more = True
             except Exception as exc:
                 logger.warning("Failed to cache search session", error=str(exc))
 
@@ -1418,7 +1422,13 @@ class HybridSearchService:
         # Paginate + format
         # -----------------------------------------------------------------
         page_results = merged[:entry.page_size]
-        has_more = len(merged) > entry.page_size
+
+        # Determine has_more:
+        # - If we got fewer than page_size results, both sources are likely
+        #   exhausted — signal no more results.
+        # - If we got 0 results, definitely exhausted.
+        # - If we got >= page_size, there are probably more.
+        has_more = len(page_results) >= entry.page_size
 
         products = [
             self._to_product_result(r, idx + 1)
@@ -1431,7 +1441,7 @@ class HybridSearchService:
         ]
         entry.add_seen_ids(new_ids)
 
-        # Build next cursor
+        # Build next cursor (None when exhausted)
         next_cursor = encode_cursor(page=page + 1) if has_more else None
 
         timing["total_ms"] = int((time.time() - t_start) * 1000)
@@ -1929,7 +1939,7 @@ class HybridSearchService:
             return idx, results
 
         # Run all pgvector RPC queries in parallel (embeddings already computed)
-        with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as executor:
             futures = {
                 executor.submit(_run_query, i, q): i
                 for i, q in enumerate(queries)

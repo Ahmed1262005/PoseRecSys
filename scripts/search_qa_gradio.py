@@ -440,16 +440,24 @@ def _search_meta_html(response: dict) -> str:
     pagination = response.get("pagination", {})
     sort_by = response.get("sort_by", "relevance")
 
+    is_extend = timing.get("extend_search", False)
     parts = [
         f'<span class="search-meta-badge">{intent}</span>',
         f'<span class="search-meta-item">Sort: <b>{sort_by}</b></span>',
     ]
 
+    if is_extend:
+        page_num = timing.get("page", "?")
+        seen_total = timing.get("seen_ids_total", 0)
+        parts.append(f'<span class="search-meta-badge" style="background:#d1fae5; color:#065f46;">Page {page_num} (extend)</span>')
+        parts.append(f'<span class="search-meta-item">Seen: <b>{seen_total}</b></span>')
+
     total = pagination.get("total_results", 0)
     parts.append(f'<span class="search-meta-item">Results: <b>{total}</b></span>')
 
     # Timing breakdown
-    for key in ["total_ms", "planner_ms", "algolia_ms", "semantic_ms", "reranker_ms"]:
+    timing_keys = ["total_ms", "planner_ms", "algolia_ms", "semantic_ms", "reranker_ms"]
+    for key in timing_keys:
         val = timing.get(key)
         if val is not None:
             label = key.replace("_ms", "").replace("_", " ").title()
@@ -470,6 +478,8 @@ def do_search(
     page: int = 1,
     page_size: int = 30,
     session_id: str = None,
+    search_session_id: str = None,
+    cursor: str = None,
 ) -> dict:
     """Call /api/search/hybrid with optional follow-up refinement.
 
@@ -478,6 +488,11 @@ def do_search(
     sees the original query plus the user's selections and generates updated
     semantic queries, modes, avoids, and new follow-up questions. Selected
     filters are force-injected into the plan so the LLM can't drop them.
+
+    When search_session_id + cursor are provided, the API uses extend-search
+    pagination (page 2+): skips the LLM planner, reuses cached embeddings
+    and filters, runs Algolia (native page=N) + semantic (exclude seen IDs)
+    in parallel for ~2-3s instead of ~12-15s.
     """
     body = {
         "query": query,
@@ -495,6 +510,11 @@ def do_search(
         body["selection_labels"] = selection_labels
     if session_id:
         body["session_id"] = session_id
+    # Extend-search pagination (page 2+)
+    if search_session_id:
+        body["search_session_id"] = search_session_id
+    if cursor:
+        body["cursor"] = cursor
 
     try:
         resp = requests.post(
@@ -755,6 +775,18 @@ def create_app():
                 # ---- Results (after follow-ups) ----
                 results_html = gr.HTML(value='<div style="color:#999; padding:40px; text-align:center;">Enter a query and click Search</div>')
 
+                # Load More button for extend-search pagination
+                load_more_btn = gr.Button(
+                    "Load More Results",
+                    variant="secondary",
+                    visible=False,
+                )
+
+                # State for extend-search pagination
+                pagination_session_id = gr.State(value=None)  # search_session_id from API
+                pagination_cursor = gr.State(value=None)       # cursor from API
+                accumulated_results = gr.State(value=[])       # all results across pages
+
                 # Raw response (debug)
                 with gr.Accordion("Raw API Response", open=False):
                     raw_json = gr.JSON(value={}, label="")
@@ -866,6 +898,7 @@ def create_app():
                         return [
                             "",
                             '<div style="color:#999; padding:20px;">Enter a query first</div>',
+                            gr.Button("Load More Results", visible=False, variant="secondary"),
                             "",
                             {},
                             {},
@@ -876,6 +909,9 @@ def create_app():
                             gr.Button("Search with selections", visible=False, variant="primary"),
                             {},   # fu_accumulated_filters (reset)
                             [],   # fu_accumulated_labels (reset)
+                            None,  # pagination_session_id
+                            None,  # pagination_cursor
+                            [],    # accumulated_results
                         ] + empty_btns
 
                     # Build planner context from onboarding
@@ -897,6 +933,7 @@ def create_app():
                         return [
                             f'<div style="color:red; padding:10px;">{response["error"]}</div>',
                             "",
+                            gr.Button("Load More Results", visible=False, variant="secondary"),
                             "",
                             ctx,
                             response,
@@ -907,6 +944,9 @@ def create_app():
                             gr.Button("Search with selections", visible=False, variant="primary"),
                             {},   # fu_accumulated_filters (reset)
                             [],   # fu_accumulated_labels (reset)
+                            None,  # pagination_session_id
+                            None,  # pagination_cursor
+                            [],    # accumulated_results
                         ] + empty_btns
 
                     # Meta
@@ -930,9 +970,16 @@ def create_app():
                     # Show apply button only if there are follow-ups
                     show_apply = gr.Button("Search with selections", visible=bool(follow_ups), variant="primary")
 
+                    # Extend-search pagination state
+                    resp_session_id = response.get("search_session_id")
+                    resp_cursor = response.get("cursor")
+                    has_more = response.get("pagination", {}).get("has_more", False)
+                    show_load_more = bool(resp_session_id and resp_cursor and has_more)
+
                     return [
                         meta,
                         grid,
+                        gr.Button("Load More Results", visible=show_load_more, variant="secondary"),
                         fu_html,
                         ctx,
                         response,
@@ -943,14 +990,18 @@ def create_app():
                         show_apply,         # apply_btn visibility
                         {},                 # fu_accumulated_filters (reset on new search)
                         [],                 # fu_accumulated_labels (reset on new search)
+                        resp_session_id,    # pagination_session_id
+                        resp_cursor,        # pagination_cursor
+                        results,            # accumulated_results (page 1)
                     ] + btn_updates
 
                 search_outputs = [
-                    meta_html, results_html, followup_html,
+                    meta_html, results_html, load_more_btn, followup_html,
                     planner_ctx_display, raw_json,
                     fu_state, fu_original_query,
                     fu_selections, selection_summary, apply_btn,
                     fu_accumulated_filters, fu_accumulated_labels,
+                    pagination_session_id, pagination_cursor, accumulated_results,
                 ] + all_fu_outputs
 
                 search_btn.click(
@@ -1084,6 +1135,7 @@ def create_app():
                         return [
                             "",
                             '<div style="color:#999;">No selections to apply</div>',
+                            gr.Button("Load More Results", visible=False, variant="secondary"),
                             "",
                             {},
                             {},
@@ -1094,6 +1146,9 @@ def create_app():
                             gr.Button("Search with selections", visible=False, variant="primary"),
                             acc_filters or {},   # preserve accumulators
                             acc_labels or [],
+                            None,  # pagination_session_id
+                            None,  # pagination_cursor
+                            [],    # accumulated_results
                         ] + empty_btns
 
                     # Merge this round's multi-select filters into a flat dict
@@ -1159,6 +1214,7 @@ def create_app():
                         return [
                             f'<div style="color:red;">{response["error"]}</div>',
                             "",
+                            gr.Button("Load More Results", visible=False, variant="secondary"),
                             "",
                             ctx,
                             response,
@@ -1169,6 +1225,9 @@ def create_app():
                             gr.Button("Search with selections", visible=True, variant="primary"),
                             new_acc_filters,   # keep accumulated state even on error
                             new_acc_labels,
+                            None,  # pagination_session_id
+                            None,  # pagination_cursor
+                            [],    # accumulated_results
                         ] + _build_button_updates(fu_data, selections)
 
                     # Meta — show ALL accumulated answers, not just this round
@@ -1223,8 +1282,16 @@ def create_app():
                     fu_html = _followup_html(active_follow_ups)
                     btn_updates = _build_button_updates(active_follow_ups, active_selections)
 
+                    # Extend-search pagination state from refinement response
+                    resp_session_id = response.get("search_session_id")
+                    resp_cursor = response.get("cursor")
+                    has_more = response.get("pagination", {}).get("has_more", False)
+                    show_load_more = bool(resp_session_id and resp_cursor and has_more)
+
                     return [
-                        meta, grid, fu_html, ctx, response,
+                        meta, grid,
+                        gr.Button("Load More Results", visible=show_load_more, variant="secondary"),
+                        fu_html, ctx, response,
                         active_follow_ups,
                         orig_query,
                         active_selections,
@@ -1232,14 +1299,18 @@ def create_app():
                         gr.Button("Search with selections", visible=bool(active_follow_ups), variant="primary"),
                         new_acc_filters,     # updated accumulators
                         new_acc_labels,
+                        resp_session_id,     # pagination_session_id
+                        resp_cursor,         # pagination_cursor
+                        results,             # accumulated_results (page 1 from refinement)
                     ] + btn_updates
 
                 apply_outputs = [
-                    meta_html, results_html, followup_html,
+                    meta_html, results_html, load_more_btn, followup_html,
                     planner_ctx_display, raw_json,
                     fu_state, fu_original_query,
                     fu_selections, selection_summary, apply_btn,
                     fu_accumulated_filters, fu_accumulated_labels,
+                    pagination_session_id, pagination_cursor, accumulated_results,
                 ] + all_fu_outputs
 
                 apply_btn.click(
@@ -1250,6 +1321,113 @@ def create_app():
                         age_slider, cluster_checkboxes, min_price, max_price, modesty,
                     ],
                     outputs=apply_outputs,
+                )
+
+                # ===========================================================
+                # Load More: extend-search pagination (page 2+)
+                # ===========================================================
+
+                def on_load_more(sess_id, cur, acc_results, orig_query):
+                    """Fetch next page using extend-search and append results."""
+                    if not sess_id or not cur:
+                        return [
+                            "",
+                            "",
+                            gr.Button("Load More Results", visible=False, variant="secondary"),
+                            None,
+                            None,
+                            acc_results or [],
+                            {},
+                        ]
+
+                    # Pass the original query (required by API validation)
+                    # The server uses the cached plan, not this query, for page 2+
+                    q = orig_query or "load more"
+                    response = do_search(
+                        query=q,
+                        planner_context={},
+                        search_session_id=sess_id,
+                        cursor=cur,
+                    )
+
+                    if "error" in response:
+                        return [
+                            f'<div style="color:red; padding:10px;">{response["error"]}</div>',
+                            "",  # keep existing grid (not overwritten)
+                            gr.Button("Load More Results", visible=True, variant="secondary"),
+                            sess_id,
+                            cur,  # keep same cursor for retry
+                            acc_results or [],
+                            response,
+                        ]
+
+                    # Meta for this page
+                    meta = _search_meta_html(response)
+
+                    # Append new results to accumulated
+                    new_results = response.get("results", [])
+                    all_results = list(acc_results or []) + new_results
+
+                    # Update pagination state
+                    next_session_id = response.get("search_session_id")
+                    next_cursor = response.get("cursor")
+                    has_more = response.get("pagination", {}).get("has_more", False)
+                    show_load_more = bool(next_session_id and next_cursor and has_more)
+
+                    # Re-render the full grid with all accumulated results
+                    if all_results:
+                        cards = [_product_card_html(r, i) for i, r in enumerate(all_results)]
+                        grid = f'<div class="results-grid">{"".join(cards)}</div>'
+                        # Add a count indicator
+                        count_label = (
+                            f'<div style="font-size:13px; color:#6b7280; padding:4px 0;">'
+                            f'Showing <b>{len(all_results)}</b> results '
+                            f'({len(all_results) - len(new_results)} + {len(new_results)} new)'
+                            f'</div>'
+                        )
+                        # Show "end of results" message when exhausted
+                        end_label = ""
+                        if not show_load_more and len(new_results) > 0:
+                            end_label = (
+                                '<div style="text-align:center; padding:12px 0; '
+                                'color:#9ca3af; font-size:13px; border-top:1px solid #e5e7eb; '
+                                'margin-top:8px;">'
+                                'All results loaded'
+                                '</div>'
+                            )
+                        elif not show_load_more and len(new_results) == 0:
+                            end_label = (
+                                '<div style="text-align:center; padding:12px 0; '
+                                'color:#9ca3af; font-size:13px; border-top:1px solid #e5e7eb; '
+                                'margin-top:8px;">'
+                                'No more results found'
+                                '</div>'
+                            )
+                        grid = count_label + grid + end_label
+                    else:
+                        grid = (
+                            '<div style="text-align:center; color:#9ca3af; padding:20px; '
+                            'font-size:14px;">No more results found</div>'
+                        )
+
+                    return [
+                        meta,
+                        grid,
+                        gr.Button("Load More Results", visible=show_load_more, variant="secondary"),
+                        next_session_id,
+                        next_cursor,
+                        all_results,
+                        response,
+                    ]
+
+                load_more_btn.click(
+                    fn=on_load_more,
+                    inputs=[pagination_session_id, pagination_cursor, accumulated_results, fu_original_query],
+                    outputs=[
+                        meta_html, results_html, load_more_btn,
+                        pagination_session_id, pagination_cursor, accumulated_results,
+                        raw_json,
+                    ],
                 )
 
     return app
