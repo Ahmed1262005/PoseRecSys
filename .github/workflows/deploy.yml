@@ -58,10 +58,22 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          script_stop: true
+          command_timeout: 10m
           script: |
             set -e
-            cd /opt/outfit-transformer
+
+            DEPLOY_DIR="/opt/outfit-transformer"
+            REPO_URL="https://github.com/Ahmed1262005/PoseRecSys.git"
+
+            # First-time setup: clone the repo if directory doesn't exist
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              echo "=== First deploy: cloning repo ==="
+              sudo mkdir -p "$DEPLOY_DIR"
+              sudo chown "$(whoami):$(whoami)" "$DEPLOY_DIR"
+              git clone "$REPO_URL" "$DEPLOY_DIR"
+            fi
+
+            cd "$DEPLOY_DIR"
 
             echo "=== Pulling latest code ==="
             git pull origin main
@@ -69,7 +81,7 @@ jobs:
             echo "=== Building Docker image ==="
             docker compose build
 
-            echo "=== Deploying (zero-downtime) ==="
+            echo "=== Deploying ==="
             docker compose up -d
 
             echo "=== Waiting for health check ==="
