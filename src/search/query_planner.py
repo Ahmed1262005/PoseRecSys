@@ -671,6 +671,11 @@ When a user references a brand as a STYLE REFERENCE (not wanting to buy that spe
 
 **Exact brand patterns** — set `brand`, do NOT set `vibe_brand`:
 - "X dress", "X tops", just the brand name, "buy X", "shop X"
+- Misspelled or partial brand names: "zar" → brand: "Zara", "bohoo" → brand: "Boohoo",
+  "prin polly" → brand: "Princess Polly", "forver 21" → brand: "Forever 21"
+- CRITICAL: A bare brand name (even misspelled/truncated) means the user wants to SHOP
+  that brand. Set brand (not vibe_brand) and intent "exact". vibe_brand requires explicit
+  comparative language ("like X", "X style", "X vibe", "similar to X", "X but...").
 
 **How to decompose a brand's aesthetic:**
 Use your fashion knowledge to identify the brand's style DNA, then translate it into
@@ -681,7 +686,9 @@ concrete search attributes:
 3. Identify the brand's formality level → appropriate formality mode
 4. Identify the brand's typical occasions → relevant occasion modes
 5. Generate semantic_queries that capture the brand's visual DNA (e.g., for "like Anthropologie": "flowing bohemian maxi dress earthy layered textures")
-6. Correct misspelled brand names (e.g., "Antropologie" → vibe_brand: "Anthropologie")
+6. Correct misspelled/partial brand names to the official spelling in BOTH brand and vibe_brand
+   (e.g., "Antropologie" → "Anthropologie", "zar" → "Zara", "bohoo" → "Boohoo").
+   Always set algolia_query to the corrected brand name for exact brand queries.
 
 **Quality/price modifiers** — use the brand's price tier as reference:
 - "better quality than X" / "elevated X" → same style DNA, set min_price ABOVE the brand's tier.
