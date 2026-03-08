@@ -75,6 +75,19 @@ jobs:
 
             cd "$DEPLOY_DIR"
 
+            # Pre-flight: .env must exist (create manually once via SSH)
+            if [ ! -f .env ]; then
+              echo "ERROR: .env file not found at $DEPLOY_DIR/.env"
+              echo ""
+              echo "SSH into the EC2 and create it:"
+              echo "  sudo cp $DEPLOY_DIR/.env.example $DEPLOY_DIR/.env"
+              echo "  sudo nano $DEPLOY_DIR/.env   # fill in real values"
+              echo ""
+              echo "Required vars: SUPABASE_URL, SUPABASE_SERVICE_KEY,"
+              echo "  SUPABASE_JWT_SECRET, ALGOLIA_APP_ID, ALGOLIA_SEARCH_KEY"
+              exit 1
+            fi
+
             echo "=== Pulling latest code ==="
             git pull origin main
 
