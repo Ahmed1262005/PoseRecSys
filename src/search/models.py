@@ -82,6 +82,10 @@ class HybridSearchRequest(BaseModel):
     # Session
     session_id: Optional[str] = Field(None, description="Session ID for deduplication")
 
+    # Infinite-scroll pagination (cached)
+    search_session_id: Optional[str] = Field(None, description="Search session ID for cached pagination (page 2+ served from cache)")
+    cursor: Optional[str] = Field(None, description="Opaque pagination cursor from previous response")
+
     # Sort
     sort_by: SortBy = Field(SortBy.RELEVANCE, description="Sort order: relevance, price_asc, price_desc, trending")
 
@@ -234,6 +238,8 @@ class HybridSearchResponse(BaseModel):
     sort_by: str = Field("relevance", description="Applied sort order")
     results: List[ProductResult]
     pagination: PaginationInfo
+    search_session_id: Optional[str] = Field(None, description="Search session ID — pass back for cached page 2+")
+    cursor: Optional[str] = Field(None, description="Opaque cursor — pass back with search_session_id for next page")
     timing: Dict[str, Any] = Field(default_factory=dict, description="Timing breakdown in ms (includes relaxation_level if progressive relaxation triggered)")
     facets: Optional[Dict[str, List[FacetValue]]] = Field(
         None,

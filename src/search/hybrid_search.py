@@ -45,6 +45,12 @@ from search.models import (
     QueryIntent,
     SortBy,
 )
+from search.session_cache import (
+    SearchSessionCache,
+    SearchSessionEntry,
+    decode_cursor,
+    encode_cursor,
+)
 
 logger = get_logger(__name__)
 
@@ -162,6 +168,22 @@ class HybridSearchService:
         # -----------------------------------------------------------------
         if request.sort_by != SortBy.RELEVANCE:
             return self._search_sorted(request, user_id)
+
+        # -----------------------------------------------------------------
+        # CACHED PAGINATION FAST PATH
+        # When the client passes back a search_session_id + cursor from a
+        # previous response, serve the next page directly from the in-memory
+        # cache (~1ms) instead of re-running the full pipeline (~15s).
+        # -----------------------------------------------------------------
+        if request.search_session_id and request.cursor:
+            cached = self._serve_cached_page(request)
+            if cached is not None:
+                return cached
+            # Cache miss (expired or invalid) — fall through to full pipeline
+            logger.info(
+                "Search session cache miss, running full pipeline",
+                search_session_id=request.search_session_id,
+            )
 
         # =====================================================================
         # STEP 1: Query Understanding (LLM Planner with regex fallback)
@@ -1050,6 +1072,32 @@ class HybridSearchService:
                 selected_filters
             )
 
+        # Step 10: Cache results for infinite-scroll pagination.
+        # Store the full merged list so page 2+ can be served from cache
+        # in ~1ms instead of re-running the full pipeline (~15s).
+        _search_session_id: Optional[str] = None
+        _cursor: Optional[str] = None
+        if len(merged) > request.page_size:
+            try:
+                cache = SearchSessionCache.get_instance()
+                _search_session_id = cache.generate_session_id()
+                cache.store(SearchSessionEntry(
+                    session_id=_search_session_id,
+                    query=request.query,
+                    intent=intent.value,
+                    sort_by=request.sort_by.value,
+                    all_results=merged,
+                    facets=facets,
+                    follow_ups=follow_ups,
+                    applied_filters=_applied_filters,
+                    answered_dimensions=_answered_dims,
+                    timing=timing,
+                    page_size=request.page_size,
+                ))
+                _cursor = encode_cursor(page=2, offset=request.page_size)
+            except Exception as exc:
+                logger.warning("Failed to cache search session", error=str(exc))
+
         return HybridSearchResponse(
             query=request.query,
             intent=intent.value,
@@ -1061,11 +1109,79 @@ class HybridSearchService:
                 has_more=has_more,
                 total_results=len(merged),
             ),
+            search_session_id=_search_session_id,
+            cursor=_cursor,
             timing=timing,
             facets=facets,
             follow_ups=follow_ups,
             applied_filters=_applied_filters,
             answered_dimensions=_answered_dims,
+        )
+
+    # =========================================================================
+    # Cached Pagination (infinite scroll)
+    # =========================================================================
+
+    def _serve_cached_page(
+        self, request: HybridSearchRequest
+    ) -> Optional[HybridSearchResponse]:
+        """Serve a page from the search session cache.
+
+        Returns a HybridSearchResponse if the cache hit succeeds, or None
+        if the session is expired / missing / cursor is invalid (caller
+        should fall through to the full pipeline).
+        """
+        t0 = time.time()
+        cache = SearchSessionCache.get_instance()
+        entry = cache.get(request.search_session_id)
+        if entry is None:
+            return None
+
+        try:
+            cursor_data = decode_cursor(request.cursor)
+            page = cursor_data["p"]
+        except (ValueError, KeyError):
+            logger.warning(
+                "Invalid search cursor, cache miss",
+                search_session_id=request.search_session_id,
+            )
+            return None
+
+        page_results, has_more, next_cursor = entry.get_page(page)
+        start_idx = (page - 1) * entry.page_size
+        products = [
+            self._to_product_result(r, idx + start_idx + 1)
+            for idx, r in enumerate(page_results)
+        ]
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "Served search page from cache",
+            search_session_id=request.search_session_id,
+            page=page,
+            results=len(products),
+            has_more=has_more,
+            cache_ms=elapsed_ms,
+        )
+
+        return HybridSearchResponse(
+            query=entry.query,
+            intent=entry.intent,
+            sort_by=entry.sort_by,
+            results=products,
+            pagination=PaginationInfo(
+                page=page,
+                page_size=entry.page_size,
+                has_more=has_more,
+                total_results=entry.total_results,
+            ),
+            search_session_id=request.search_session_id,
+            cursor=next_cursor,
+            timing={"cache_hit": True, "cache_ms": elapsed_ms},
+            facets=entry.facets,
+            follow_ups=entry.follow_ups,
+            applied_filters=entry.applied_filters,
+            answered_dimensions=entry.answered_dimensions,
         )
 
     # =========================================================================
