@@ -1,16 +1,23 @@
 """
-Search session cache for infinite-scroll pagination.
+Search session cache for "extend search" pagination.
 
-Caches merged+reranked search results server-side so that page 2+
-can be served instantly from cache (~1ms) instead of re-running the
-full hybrid pipeline (~15s).
+Instead of caching stale results, caches the *plan state* from page 1:
+- LLM planner outputs (intent, filters, algolia_query, semantic queries)
+- Pre-computed FashionCLIP embeddings (numpy arrays)
+- Algolia filter strings, RRF weights, reranker config
+- Seen product IDs (grows each page)
+
+Page 2+ reuses the cached plan to extend the search:
+- Algolia: native page=N pagination (same query/filters)
+- Semantic: reuse cached embeddings + exclude seen IDs → fresh pgvector results
+- RRF merge + rerank on fresh candidates
+
+This gives ~2-3s page 2+ instead of 12-15s (re-running full pipeline).
 
 Architecture:
 - Thread-safe in-memory dict (production: swap for Redis).
-- 10-minute TTL per session (search sessions are short-lived).
+- 10-minute TTL per session.
 - Background cleanup every 2 minutes.
-- Each cached session stores the full ranked result list, facets,
-  follow-ups, and metadata needed to reconstruct paginated responses.
 """
 
 from __future__ import annotations
@@ -21,7 +28,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+import numpy as np
 
 from core.logging import get_logger
 
@@ -31,63 +40,86 @@ logger = get_logger(__name__)
 # Cursor helpers
 # ---------------------------------------------------------------------------
 
-def encode_cursor(page: int, offset: int) -> str:
+def encode_cursor(page: int) -> str:
     """Encode pagination state as an opaque base64 cursor."""
-    payload = json.dumps({"p": page, "o": offset}, separators=(",", ":"))
+    payload = json.dumps({"p": page}, separators=(",", ":"))
     return base64.urlsafe_b64encode(payload.encode()).decode()
 
 
 def decode_cursor(cursor: str) -> dict:
     """Decode a cursor back to pagination state.
 
-    Returns {"p": <page>, "o": <offset>} or raises ValueError.
+    Returns {"p": <page>} or raises ValueError.
     """
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
         data = json.loads(raw)
-        if "p" not in data or "o" not in data:
-            raise ValueError("missing fields")
+        if "p" not in data:
+            raise ValueError("missing 'p' field")
         return data
     except Exception as exc:
         raise ValueError(f"Invalid search cursor: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
-# Cached session entry
+# Cached session entry — stores plan state, not results
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SearchSessionEntry:
-    """A single cached search session."""
+    """Cached plan state from page 1 for extend-search pagination."""
 
     session_id: str
     query: str
-    intent: str
+    intent: str                         # "exact" / "specific" / "vague"
     sort_by: str
-    all_results: List[dict]          # Full merged+reranked result dicts
+
+    # Algolia state (for native pagination)
+    algolia_query: str = ""
+    algolia_filters: str = ""
+    algolia_optional_filters: Optional[List[str]] = None
+
+    # Semantic state (for extend search with exclude_ids)
+    semantic_queries: Optional[List[str]] = None
+    semantic_embeddings: Optional[List[np.ndarray]] = None  # pre-computed
+    semantic_request_updates: Optional[Dict[str, Any]] = None  # relaxed filter overrides
+
+    # RRF weights
+    algolia_weight: float = 0.5
+    semantic_weight: float = 0.5
+
+    # Reranker config carried from page 1
+    rerank_kwargs: Optional[Dict[str, Any]] = None
+
+    # Pagination tracking
+    seen_product_ids: Set[str] = field(default_factory=set)
+    algolia_page: int = 0               # last Algolia page fetched (0-indexed, page 1 uses 0)
+    page_size: int = 50
+    fetch_size: int = 150               # per-source fetch size
+
+    # Response metadata from page 1 (returned on all pages)
     facets: Optional[Dict[str, Any]] = None
     follow_ups: Optional[List[Any]] = None
     applied_filters: Optional[Dict[str, Any]] = None
     answered_dimensions: Optional[List[str]] = None
-    timing: Dict[str, Any] = field(default_factory=dict)
+
+    # Flags
+    skip_algolia: bool = False          # empty query + no brand filter
+    use_attribute_search: bool = False  # attribute-filtered semantic path
+
+    # Attribute search state (if applicable)
+    attribute_filters: Optional[Any] = None  # AttributeFilters object
+
     created_at: float = field(default_factory=time.time)
-    page_size: int = 50
 
-    @property
-    def total_results(self) -> int:
-        return len(self.all_results)
+    def add_seen_ids(self, product_ids: List[str]) -> None:
+        """Add product IDs to the seen set."""
+        self.seen_product_ids.update(product_ids)
 
-    def get_page(self, page: int) -> tuple:
-        """Return (page_results, has_more, next_cursor).
-
-        ``page`` is 1-indexed.
-        """
-        start = (page - 1) * self.page_size
-        end = start + self.page_size
-        page_results = self.all_results[start:end]
-        has_more = end < len(self.all_results)
-        next_cursor = encode_cursor(page + 1, end) if has_more else None
-        return page_results, has_more, next_cursor
+    def next_algolia_page(self) -> int:
+        """Return the next Algolia page (0-indexed) and increment."""
+        self.algolia_page += 1
+        return self.algolia_page
 
     def is_expired(self, ttl_seconds: int) -> bool:
         return (time.time() - self.created_at) > ttl_seconds
@@ -135,11 +167,12 @@ class SearchSessionCache:
             self._store[entry.session_id] = entry
             self._maybe_cleanup()
         logger.info(
-            "Cached search session",
+            "Cached search session (plan state)",
             session_id=entry.session_id,
-            total_results=entry.total_results,
-            page_size=entry.page_size,
-            pages_available=max(1, -(-entry.total_results // entry.page_size)),
+            intent=entry.intent,
+            seen_ids=len(entry.seen_product_ids),
+            has_embeddings=entry.semantic_embeddings is not None,
+            semantic_queries=len(entry.semantic_queries or []),
         )
 
     def get(self, session_id: str) -> Optional[SearchSessionEntry]:

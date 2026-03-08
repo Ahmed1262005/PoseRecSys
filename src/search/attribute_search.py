@@ -471,6 +471,8 @@ class AttributeSearchEngine:
         query: str,
         filters: AttributeFilters | None = None,
         semantic_query: str | None = None,
+        query_embedding: "np.ndarray | None" = None,
+        exclude_product_ids: list[str] | None = None,
     ) -> tuple[list[SearchResult], dict]:
         """
         Run semantic search with optional attribute filters.
@@ -480,6 +482,12 @@ class AttributeSearchEngine:
             filters: Attribute filters (from plan_to_attribute_filters)
             semantic_query: Override semantic query (from planner's semantic_query).
                            If None, uses the raw query.
+            query_embedding: Pre-computed FashionCLIP embedding (skips encode).
+                           Used by extend-search pagination to reuse cached
+                           embeddings from page 1.
+            exclude_product_ids: Product IDs to exclude from results (seen items).
+                               Passed through to the SQL RPC's exclude_product_ids
+                               parameter for efficient server-side exclusion.
 
         Returns:
             (results, meta_dict)
@@ -487,16 +495,22 @@ class AttributeSearchEngine:
         t0 = time.time()
         filters = filters or AttributeFilters()
 
-        # 1. Encode query with FashionCLIP
-        encode_query = semantic_query or query
-        embedding = self.encode_text(encode_query)
+        # 1. Encode query with FashionCLIP (or reuse precomputed embedding)
+        if query_embedding is not None:
+            embedding = query_embedding
+        else:
+            encode_query = semantic_query or query
+            embedding = self.encode_text(encode_query)
 
         # 2. Format embedding for pgvector
         embedding_list = embedding.astype("float32").tolist()
         vector_str = f"[{','.join(map(str, embedding_list))}]"
 
         # 3. Build RPC params
-        rpc_params = self._build_rpc_params(vector_str, filters)
+        rpc_params = self._build_rpc_params(
+            vector_str, filters,
+            exclude_product_ids=exclude_product_ids,
+        )
 
         # 4. Call RPC
         try:
@@ -509,6 +523,7 @@ class AttributeSearchEngine:
         # 5. Map to SearchResult objects
         results = [self._map_rpc_result(r) for r in rows]
 
+        encode_query = semantic_query or query
         elapsed = time.time() - t0
         meta = {
             "query": query,
@@ -530,18 +545,33 @@ class AttributeSearchEngine:
         queries: list[str],
         filters: AttributeFilters | None = None,
         per_query_limit: int = 30,
+        precomputed_embeddings: "list[np.ndarray] | None" = None,
+        exclude_product_ids: list[str] | None = None,
     ) -> tuple[list[SearchResult], dict]:
         """
         Run multiple semantic queries and merge results (deduped, best score wins).
 
         This mirrors the multi-query approach in hybrid_search._search_semantic_multi().
+
+        Args:
+            queries: List of semantic query strings.
+            filters: Attribute filters.
+            per_query_limit: Max results per individual query.
+            precomputed_embeddings: Pre-computed FashionCLIP embeddings (one per
+                query). When provided, skips encode_text for each query.
+            exclude_product_ids: Product IDs to exclude from all queries.
         """
         t0 = time.time()
         filters = filters or AttributeFilters()
         seen: dict[str, SearchResult] = {}
 
-        for q in queries:
-            results, _ = self.search(q, filters=filters)
+        for idx, q in enumerate(queries):
+            emb = precomputed_embeddings[idx] if precomputed_embeddings and idx < len(precomputed_embeddings) else None
+            results, _ = self.search(
+                q, filters=filters,
+                query_embedding=emb,
+                exclude_product_ids=exclude_product_ids,
+            )
             results = results[:per_query_limit]
             for r in results:
                 if r.product_id not in seen or r.similarity > seen[r.product_id].similarity:
@@ -561,7 +591,12 @@ class AttributeSearchEngine:
     # RPC parameter builder
     # -----------------------------------------------------------------------
 
-    def _build_rpc_params(self, vector_str: str, f: AttributeFilters) -> dict:
+    def _build_rpc_params(
+        self,
+        vector_str: str,
+        f: AttributeFilters,
+        exclude_product_ids: list[str] | None = None,
+    ) -> dict:
         """Build the RPC parameter dict from AttributeFilters."""
         params: dict[str, Any] = {
             "query_embedding": vector_str,
@@ -569,6 +604,10 @@ class AttributeSearchEngine:
             "match_offset": f.offset,
             "embedding_version": 1,
         }
+
+        # Exclude seen products (for extend-search pagination)
+        if exclude_product_ids:
+            params["exclude_product_ids"] = exclude_product_ids
 
         # Basic
         if f.category_l1:

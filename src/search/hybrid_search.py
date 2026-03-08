@@ -591,6 +591,11 @@ class HybridSearchService:
             )
             return results, fcts, int((time.time() - t0) * 1000)
 
+        # Mutable container to capture semantic embeddings from _run_semantic().
+        # Populated by _search_semantic_multi() when it batch-encodes queries.
+        # Used later to cache in SearchSessionEntry for extend-search pagination.
+        _captured_embeddings: List[Optional[List[np.ndarray]]] = [None]
+
         def _run_semantic() -> tuple:
             """Run semantic search, return (results, query_count, elapsed_ms).
 
@@ -631,12 +636,13 @@ class HybridSearchService:
 
             # Standard semantic search path (no attribute filters)
             if len(_queries_to_run) > 1:
-                results = self._search_semantic_multi(
+                results, embeddings = self._search_semantic_multi(
                     queries=_queries_to_run,
                     request=semantic_request,
                     limit_per_query=max(fetch_size // len(_queries_to_run), 30),
                     user_id=user_id,
                 )
+                _captured_embeddings[0] = embeddings
                 qcount = len(_queries_to_run)
             else:
                 results = self._search_semantic(
@@ -1072,29 +1078,76 @@ class HybridSearchService:
                 selected_filters
             )
 
-        # Step 10: Cache results for infinite-scroll pagination.
-        # Store the full merged list so page 2+ can be served from cache
-        # in ~1ms instead of re-running the full pipeline (~15s).
+        # Step 10: Cache plan state for extend-search pagination.
+        # Store the plan state (embeddings, filters, seen_ids, reranker config)
+        # so page 2+ can re-run Algolia (native page=N) + semantic (reuse
+        # cached embeddings + exclude seen_ids) in ~2-3s instead of re-running
+        # the full pipeline with LLM planner (~12-15s).
         _search_session_id: Optional[str] = None
         _cursor: Optional[str] = None
         if len(merged) > request.page_size:
             try:
                 cache = SearchSessionCache.get_instance()
                 _search_session_id = cache.generate_session_id()
+
+                # Collect page-1 product IDs as the initial seen set
+                _page1_ids: Set[str] = {
+                    r["product_id"] for r in merged
+                    if r.get("product_id")
+                }
+
+                # Build the semantic_request_updates dict so extend-search
+                # can reconstruct the relaxed semantic request.
+                _semantic_request_updates: Optional[Dict[str, Any]] = None
+                if search_plan is not None or skip_planner:
+                    _semantic_request_updates = {
+                        "categories": None,
+                        "colors": None,
+                        "patterns": None,
+                        "occasions": None,
+                    }
+
                 cache.store(SearchSessionEntry(
                     session_id=_search_session_id,
                     query=request.query,
                     intent=intent.value,
                     sort_by=request.sort_by.value,
-                    all_results=merged,
+                    # Algolia state
+                    algolia_query=algolia_query or "",
+                    algolia_filters=algolia_filters or "",
+                    algolia_optional_filters=algolia_optional_filters,
+                    # Semantic state
+                    semantic_queries=_queries_to_run,
+                    semantic_embeddings=_captured_embeddings[0],
+                    semantic_request_updates=_semantic_request_updates,
+                    # RRF weights
+                    algolia_weight=algolia_weight,
+                    semantic_weight=semantic_weight,
+                    # Reranker config
+                    rerank_kwargs={
+                        "user_profile": user_profile,
+                        "user_context": user_context,
+                        "session_scores": session_scores,
+                        "page_size": _cat_cap_page_size,
+                        **({"max_per_brand": brand_cap} if brand_cap is not None else {}),
+                        **({"vibe_brand_clusters": vibe_clusters} if vibe_clusters else {}),
+                    },
+                    # Pagination tracking
+                    seen_product_ids=_page1_ids,
+                    algolia_page=0,  # page 1 used Algolia page 0
+                    page_size=request.page_size,
+                    fetch_size=fetch_size,
+                    # Response metadata (returned on all pages)
                     facets=facets,
                     follow_ups=follow_ups,
                     applied_filters=_applied_filters,
                     answered_dimensions=_answered_dims,
-                    timing=timing,
-                    page_size=request.page_size,
+                    # Flags
+                    skip_algolia=_skip_algolia,
+                    use_attribute_search=_use_attribute_search,
+                    attribute_filters=attribute_filters,
                 ))
-                _cursor = encode_cursor(page=2, offset=request.page_size)
+                _cursor = encode_cursor(page=2)
             except Exception as exc:
                 logger.warning("Failed to cache search session", error=str(exc))
 
@@ -1119,49 +1172,281 @@ class HybridSearchService:
         )
 
     # =========================================================================
-    # Cached Pagination (infinite scroll)
+    # Extend-Search Pagination (page 2+)
     # =========================================================================
 
     def _serve_cached_page(
         self, request: HybridSearchRequest
     ) -> Optional[HybridSearchResponse]:
-        """Serve a page from the search session cache.
+        """Extend search for page 2+ using cached plan state.
+
+        Instead of re-running the full pipeline (~12-15s), reuses the
+        cached plan state from page 1:
+        - Algolia: native page=N pagination (same query/filters) ~200ms
+        - Semantic: reuse cached embeddings + exclude seen IDs ~1-2s
+        - RRF merge + rerank on fresh candidates ~500ms
+        - LLM planner: SKIP entirely (saves ~5-8s)
 
         Returns a HybridSearchResponse if the cache hit succeeds, or None
         if the session is expired / missing / cursor is invalid (caller
         should fall through to the full pipeline).
         """
-        t0 = time.time()
         cache = SearchSessionCache.get_instance()
-        entry = cache.get(request.search_session_id)
+        sid = request.search_session_id
+        assert sid is not None  # caller checks before calling
+        entry = cache.get(sid)
         if entry is None:
             return None
 
+        cur = request.cursor
+        assert cur is not None  # caller checks before calling
         try:
-            cursor_data = decode_cursor(request.cursor)
+            cursor_data = decode_cursor(cur)
             page = cursor_data["p"]
         except (ValueError, KeyError):
             logger.warning(
                 "Invalid search cursor, cache miss",
-                search_session_id=request.search_session_id,
+                search_session_id=sid,
             )
             return None
 
-        page_results, has_more, next_cursor = entry.get_page(page)
-        start_idx = (page - 1) * entry.page_size
+        return self._extend_search(entry, page, sid)
+
+    def _extend_search(
+        self,
+        entry: SearchSessionEntry,
+        page: int,
+        session_id: str,
+    ) -> HybridSearchResponse:
+        """Core extend-search logic: run Algolia + semantic with cached plan.
+
+        Args:
+            entry: Cached plan state from page 1.
+            page: The requested page number (2+).
+            session_id: The search session ID (for response + logging).
+
+        Returns:
+            HybridSearchResponse with fresh results for the requested page.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        t_start = time.time()
+        timing: Dict[str, Any] = {"extend_search": True, "page": page}
+
+        seen_ids_list = list(entry.seen_product_ids)
+
+        # -----------------------------------------------------------------
+        # Algolia: native page=N pagination (same query/filters)
+        # -----------------------------------------------------------------
+        algolia_results: List[dict] = []
+        algolia_facets = None
+
+        def _run_algolia_extend():
+            if entry.skip_algolia:
+                return [], None, 0
+            t0 = time.time()
+            next_page = entry.next_algolia_page()
+            # Call the raw Algolia client with the correct page offset.
+            # Unlike _search_algolia() which always uses page=0, we need
+            # native Algolia pagination for extend-search.
+            try:
+                resp = self.algolia.search(
+                    query=entry.algolia_query,
+                    filters=entry.algolia_filters or None,
+                    optional_filters=entry.algolia_optional_filters,
+                    hits_per_page=entry.fetch_size,
+                    page=next_page,
+                    facets=_FACET_FIELDS,
+                )
+                results = []
+                for hit in resp.get("hits", []):
+                    results.append({
+                        "product_id": hit.get("objectID"),
+                        "name": hit.get("name", ""),
+                        "brand": hit.get("brand", ""),
+                        "image_url": hit.get("image_url"),
+                        "gallery_images": filter_gallery_images(hit.get("gallery_images") or []),
+                        "price": float(hit.get("price", 0) or 0),
+                        "original_price": hit.get("original_price"),
+                        "is_on_sale": hit.get("is_on_sale", False),
+                        "category_l1": hit.get("category_l1"),
+                        "category_l2": hit.get("category_l2"),
+                        "broad_category": hit.get("broad_category"),
+                        "article_type": hit.get("article_type"),
+                        "primary_color": hit.get("primary_color"),
+                        "color_family": hit.get("color_family"),
+                        "pattern": hit.get("pattern"),
+                        "apparent_fabric": hit.get("apparent_fabric"),
+                        "fit_type": hit.get("fit_type"),
+                        "formality": hit.get("formality"),
+                        "silhouette": hit.get("silhouette"),
+                        "length": hit.get("length"),
+                        "neckline": hit.get("neckline"),
+                        "sleeve_type": hit.get("sleeve_type"),
+                        "rise": hit.get("rise"),
+                        "style_tags": hit.get("style_tags") or [],
+                        "occasions": hit.get("occasions") or [],
+                        "seasons": hit.get("seasons") or [],
+                        "colors": hit.get("colors") or [],
+                        "materials": hit.get("materials") or [],
+                        "trending_score": hit.get("trending_score", 0),
+                        "source": "algolia",
+                    })
+                fcts = None
+                raw_facets = resp.get("facets")
+                if raw_facets:
+                    fcts = {}
+                    for facet_name, value_counts in raw_facets.items():
+                        values = [
+                            FacetValue(value=val, count=cnt)
+                            for val, cnt in sorted(value_counts.items(), key=lambda x: -x[1])
+                            if cnt > 1 and val and val.lower() not in ("null", "n/a", "none", "")
+                        ]
+                        if len(values) >= 2:
+                            fcts[facet_name] = values
+            except Exception as e:
+                logger.warning("Extend-search Algolia page=%d failed", next_page, error=str(e))
+                results, fcts = [], None
+
+            return results, fcts, int((time.time() - t0) * 1000)
+
+        # -----------------------------------------------------------------
+        # Semantic: reuse cached embeddings + exclude seen IDs
+        # -----------------------------------------------------------------
+        def _run_semantic_extend():
+            t0 = time.time()
+
+            if entry.use_attribute_search:
+                # Attribute-filtered path — no embedding reuse yet
+                # (AttributeSearchEngine doesn't support exclude_product_ids)
+                # Fall back to standard semantic with embeddings
+                pass
+
+            queries = entry.semantic_queries or [entry.query]
+
+            # Build relaxed request for semantic search
+            base_request = HybridSearchRequest(query=entry.query)
+            if entry.semantic_request_updates:
+                base_request = base_request.model_copy(
+                    update=entry.semantic_request_updates
+                )
+
+            if len(queries) > 1 and entry.semantic_embeddings is not None:
+                results, _ = self._search_semantic_multi(
+                    queries=queries,
+                    request=base_request,
+                    limit_per_query=max(entry.fetch_size // len(queries), 30),
+                    precomputed_embeddings=entry.semantic_embeddings,
+                    exclude_product_ids=seen_ids_list,
+                )
+            elif entry.semantic_embeddings and len(entry.semantic_embeddings) >= 1:
+                # Single query with precomputed embedding
+                results = self._search_semantic(
+                    query=queries[0],
+                    request=base_request,
+                    limit=entry.fetch_size,
+                    query_embedding=entry.semantic_embeddings[0],
+                    exclude_product_ids=seen_ids_list,
+                )
+            else:
+                # No cached embeddings — re-encode (shouldn't happen normally)
+                logger.warning("Extend search: no cached embeddings, re-encoding")
+                results = self._search_semantic(
+                    query=queries[0],
+                    request=base_request,
+                    limit=entry.fetch_size,
+                    exclude_product_ids=seen_ids_list,
+                )
+
+            return results, int((time.time() - t0) * 1000)
+
+        # -----------------------------------------------------------------
+        # Run Algolia + Semantic in parallel
+        # -----------------------------------------------------------------
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_algolia = executor.submit(_run_algolia_extend)
+            future_semantic = executor.submit(_run_semantic_extend)
+
+            try:
+                algolia_results, algolia_facets, algolia_ms = future_algolia.result()
+                timing["algolia_ms"] = algolia_ms
+            except Exception as e:
+                logger.warning("Extend-search Algolia failed", error=str(e))
+                algolia_results, algolia_facets = [], None
+                timing["algolia_ms"] = 0
+
+            try:
+                semantic_results, semantic_ms = future_semantic.result()
+                timing["semantic_ms"] = semantic_ms
+            except Exception as e:
+                logger.warning("Extend-search semantic failed", error=str(e))
+                semantic_results = []
+                timing["semantic_ms"] = 0
+
+        # Enrich semantic results from Algolia (same as page 1)
+        if semantic_results and not entry.use_attribute_search:
+            semantic_results = self._enrich_semantic_results(semantic_results)
+
+        # -----------------------------------------------------------------
+        # RRF merge fresh candidates
+        # -----------------------------------------------------------------
+        merged = self._reciprocal_rank_fusion(
+            algolia_results=algolia_results,
+            semantic_results=semantic_results,
+            algolia_weight=entry.algolia_weight,
+            semantic_weight=entry.semantic_weight,
+        )
+
+        # Remove already-seen products from merged results
+        merged = [
+            r for r in merged
+            if r.get("product_id") not in entry.seen_product_ids
+        ]
+
+        # -----------------------------------------------------------------
+        # Rerank with cached config
+        # -----------------------------------------------------------------
+        if merged and entry.rerank_kwargs:
+            # Load fresh impression counts if user_id available
+            rerank_args = dict(entry.rerank_kwargs)
+            rerank_args["results"] = merged
+            # Use cumulative seen_ids for session dedup
+            rerank_args["seen_ids"] = entry.seen_product_ids
+            merged = self._reranker.rerank(**rerank_args)
+
+        # -----------------------------------------------------------------
+        # Paginate + format
+        # -----------------------------------------------------------------
+        page_results = merged[:entry.page_size]
+        has_more = len(merged) > entry.page_size
+
         products = [
-            self._to_product_result(r, idx + start_idx + 1)
+            self._to_product_result(r, idx + 1)
             for idx, r in enumerate(page_results)
         ]
 
-        elapsed_ms = int((time.time() - t0) * 1000)
+        # Update seen IDs with this page's results
+        new_ids: List[str] = [
+            r["product_id"] for r in page_results if r.get("product_id")
+        ]
+        entry.add_seen_ids(new_ids)
+
+        # Build next cursor
+        next_cursor = encode_cursor(page=page + 1) if has_more else None
+
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+        timing["seen_ids_total"] = len(entry.seen_product_ids)
+
         logger.info(
-            "Served search page from cache",
-            search_session_id=request.search_session_id,
+            "Extend-search page served",
+            search_session_id=session_id,
             page=page,
             results=len(products),
             has_more=has_more,
-            cache_ms=elapsed_ms,
+            algolia_fresh=len(algolia_results),
+            semantic_fresh=len(semantic_results),
+            merged_after_dedup=len(merged),
+            total_ms=timing["total_ms"],
         )
 
         return HybridSearchResponse(
@@ -1173,12 +1458,12 @@ class HybridSearchService:
                 page=page,
                 page_size=entry.page_size,
                 has_more=has_more,
-                total_results=entry.total_results,
+                total_results=len(products),
             ),
-            search_session_id=request.search_session_id,
+            search_session_id=session_id,
             cursor=next_cursor,
-            timing={"cache_hit": True, "cache_ms": elapsed_ms},
-            facets=entry.facets,
+            timing=timing,
+            facets=entry.facets or algolia_facets,
             follow_ups=entry.follow_ups,
             applied_filters=entry.applied_filters,
             answered_dimensions=entry.answered_dimensions,
@@ -1533,6 +1818,7 @@ class HybridSearchService:
         limit: int = 100,
         query_embedding: Optional[np.ndarray] = None,
         user_id: Optional[str] = None,
+        exclude_product_ids: Optional[List[str]] = None,
     ) -> List[dict]:
         """
         Search using FashionCLIP + pgvector and return normalized results.
@@ -1564,6 +1850,7 @@ class HybridSearchService:
                 query=query, request=request, limit=limit,
                 version=settings.multimodal_embedding_version,
                 query_embedding=query_embedding,
+                exclude_product_ids=exclude_product_ids,
             )
             if multimodal_results:
                 return multimodal_results
@@ -1577,6 +1864,7 @@ class HybridSearchService:
         return self._search_image_only(
             query=query, request=request, limit=limit,
             query_embedding=query_embedding,
+            exclude_product_ids=exclude_product_ids,
         )
 
     def _search_semantic_multi(
@@ -1585,7 +1873,9 @@ class HybridSearchService:
         request: HybridSearchRequest,
         limit_per_query: int = 50,
         user_id: Optional[str] = None,
-    ) -> List[dict]:
+        exclude_product_ids: Optional[List[str]] = None,
+        precomputed_embeddings: Optional[List[np.ndarray]] = None,
+    ) -> Tuple[List[dict], Optional[List[np.ndarray]]]:
         """
         Run multiple diverse semantic queries in parallel and merge results.
 
@@ -1600,22 +1890,32 @@ class HybridSearchService:
         Dedup by product_id: if the same product appears in multiple query
         results, keep the one with the highest semantic_score.
 
-        Returns a single merged list, interleaved round-robin by query to
-        ensure diversity in the top results, then sorted by score.
+        Returns:
+            Tuple of (merged_results, embeddings). The embeddings are the
+            batch-encoded query vectors (or precomputed ones) — returned so
+            callers can cache them for extend-search pagination.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import time as _time
 
-        # Batch-encode ALL query embeddings in a single forward pass.
-        # This replaces N separate encode_text() calls with one batch call.
-        t0 = _time.perf_counter()
-        embeddings = self.semantic_engine.encode_text_batch(queries)
-        encode_ms = (_time.perf_counter() - t0) * 1000
-        logger.info(
-            "Batch-encoded semantic queries",
-            query_count=len(queries),
-            encode_ms=round(encode_ms, 1),
-        )
+        # Batch-encode ALL query embeddings in a single forward pass,
+        # OR reuse precomputed embeddings from a cached session (page 2+).
+        if precomputed_embeddings is not None:
+            embeddings = precomputed_embeddings
+            encode_ms = 0.0
+            logger.info(
+                "Reusing precomputed semantic embeddings (extend search)",
+                query_count=len(queries),
+            )
+        else:
+            t0 = _time.perf_counter()
+            embeddings = self.semantic_engine.encode_text_batch(queries)
+            encode_ms = (_time.perf_counter() - t0) * 1000
+            logger.info(
+                "Batch-encoded semantic queries",
+                query_count=len(queries),
+                encode_ms=round(encode_ms, 1),
+            )
 
         results_per_query: List[List[dict]] = [[] for _ in queries]
 
@@ -1624,6 +1924,7 @@ class HybridSearchService:
                 query=query, request=request, limit=limit_per_query,
                 query_embedding=embeddings[idx],
                 user_id=user_id,
+                exclude_product_ids=exclude_product_ids,
             )
             return idx, results
 
@@ -1678,7 +1979,7 @@ class HybridSearchService:
                         query_assignments[pid] = q_idx
 
         if not seen:
-            return []
+            return [], embeddings
 
         # Multi-query overlap boost: products found by 2+ queries get
         # a semantic_score bonus.  When all semantic queries describe
@@ -1734,7 +2035,7 @@ class HybridSearchService:
             after=len(merged),
             duplicates_removed=sum(counts) - len(merged),
         )
-        return merged
+        return merged, embeddings
 
     def _search_multimodal(
         self,
@@ -1743,6 +2044,7 @@ class HybridSearchService:
         limit: int = 100,
         version: int = 1,
         query_embedding: Optional[np.ndarray] = None,
+        exclude_product_ids: Optional[List[str]] = None,
     ) -> List[dict]:
         """Search using multimodal embeddings (combined image + text vectors)."""
         try:
@@ -1765,6 +2067,7 @@ class HybridSearchService:
                 min_price=request.min_price,
                 max_price=request.max_price,
                 query_embedding=query_embedding,
+                exclude_product_ids=exclude_product_ids,
             )
 
             results = []
@@ -1826,6 +2129,7 @@ class HybridSearchService:
         request: HybridSearchRequest,
         limit: int = 100,
         query_embedding: Optional[np.ndarray] = None,
+        exclude_product_ids: Optional[List[str]] = None,
     ) -> List[dict]:
         """Search using FashionCLIP image-only embeddings (original path)."""
         try:
@@ -1846,6 +2150,7 @@ class HybridSearchService:
                 patterns=request.patterns,
                 use_hybrid_search=False,  # Pure semantic - Algolia handles keyword
                 query_embedding=query_embedding,
+                exclude_product_ids=exclude_product_ids,
             )
             results = []
             for item in resp.get("results", []):
