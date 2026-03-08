@@ -36,6 +36,9 @@ PyJWT>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv
 
+# Logging
+structlog>=23.0.0
+
 # ML utilities
 scikit-learn
 
