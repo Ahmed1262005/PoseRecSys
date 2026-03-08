@@ -56,5 +56,10 @@ htmlcov/
 # Gradio
 .gradio/
 
-# Claude
+# Claude / OpenCode
 .claude/
+.opencode/
+
+# SSL certificates (Cloudflare origin certs)
+ssl/
+*.pem

@@ -896,6 +896,11 @@ class HybridSearchService:
             except Exception:
                 pass  # Non-fatal — skip cluster boost if lookup fails
 
+        # Only enforce category proportional caps for VAGUE queries where
+        # we're mixing multiple categories.  For SPECIFIC/EXACT the user
+        # targeted a category (e.g., "midi skirt") — capping bottoms to
+        # 25% would artificially suppress the results they asked for.
+        _cat_cap_page_size = request.page_size if intent == QueryIntent.VAGUE else 0
         rerank_kwargs: Dict[str, Any] = dict(
             results=merged,
             user_profile=user_profile,
@@ -903,6 +908,7 @@ class HybridSearchService:
             user_context=user_context,
             session_scores=session_scores,
             impression_counts=impression_counts,
+            page_size=_cat_cap_page_size,
         )
         if brand_cap is not None:
             rerank_kwargs["max_per_brand"] = brand_cap

@@ -1,9 +1,11 @@
-"""Pinterest style extraction using FashionCLIP image embeddings."""
+"""Pinterest style extraction using FashionCLIP image embeddings.
+
+Uses the shared CLIPService singleton for all model operations.
+"""
 
 from __future__ import annotations
 
 import io
-import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,6 +13,7 @@ import requests
 from PIL import Image
 
 from core.logging import get_logger
+from core.clip_service import get_clip_service
 from integrations.pinterest_signals import score_pin_intent
 
 logger = get_logger(__name__)
@@ -19,54 +22,9 @@ logger = get_logger(__name__)
 class PinterestStyleExtractor:
     """Compute a taste vector from Pinterest pin images."""
 
-    def __init__(self) -> None:
-        self._model = None
-        self._processor = None
-        self._model_lock = threading.Lock()
-
-    def _load_model(self) -> None:
-        if self._model is None:
-            with self._model_lock:
-                if self._model is None:
-                    import torch
-                    from transformers import CLIPModel, CLIPProcessor
-
-                    logger.info("Loading FashionCLIP model for Pinterest embeddings...")
-                    model = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip")
-                    processor = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
-
-                    if torch.cuda.is_available():
-                        model = model.cuda()
-
-                    model.eval()
-                    self._model = model
-                    self._processor = processor
-                    logger.info("FashionCLIP model loaded")
-
     def encode_image(self, image: Image.Image) -> np.ndarray:
-        import torch
-
-        self._load_model()
-        if self._processor is None or self._model is None:
-            raise RuntimeError("FashionCLIP model failed to initialize")
-
-        with torch.no_grad():
-            inputs = self._processor(images=[image], return_tensors="pt")
-            if torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
-            emb = self._model.get_image_features(**inputs)
-            if isinstance(emb, torch.Tensor):
-                pass
-            elif hasattr(emb, "image_embeds") and emb.image_embeds is not None:
-                emb = emb.image_embeds
-            elif hasattr(emb, "pooler_output") and emb.pooler_output is not None:
-                emb = emb.pooler_output
-            else:
-                raise ValueError(
-                    f"Unexpected return type from get_image_features: {type(emb)}"
-                )
-            emb = emb / emb.norm(dim=-1, keepdim=True)
-            return emb.cpu().numpy().flatten()
+        """Encode a PIL image via the shared CLIPService."""
+        return get_clip_service().encode_image(image)
 
     def compute_taste_vector(
         self,

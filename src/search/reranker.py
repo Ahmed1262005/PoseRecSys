@@ -101,10 +101,17 @@ def _get_item_attr_values(item: dict, prefix: str) -> Set[str]:
 
 
 def _resolve_category_group_dict(item: dict) -> str:
-    """Map a search result dict's broad_category to a canonical group name."""
+    """Map a search result dict's category to a canonical group name.
+
+    Tries multiple fields in priority order: broad_category (original
+    product data), article_type, then category_l1 (Gemini-enriched).
+    Many semantic results only have category_l1 after Algolia enrichment,
+    so this fallback is critical for correct category cap enforcement.
+    """
     raw = (
         item.get("broad_category")
         or item.get("article_type")
+        or item.get("category_l1")
         or ""
     ).lower().strip()
     return CATEGORY_GROUP_MAP.get(raw, "_other")
@@ -154,6 +161,7 @@ class SessionReranker:
         session_scores: Optional[Any] = None,
         impression_counts: Optional[Dict[str, int]] = None,
         vibe_brand_clusters: Optional[Set[str]] = None,
+        page_size: int = 0,
     ) -> List[dict]:
         """
         Rerank results with session awareness.
@@ -172,6 +180,9 @@ class SessionReranker:
             vibe_brand_clusters: Set of cluster IDs from the query's vibe brand
                 (e.g., {"G", "A"} for Zara).  When present, brands belonging
                 to these clusters get a score boost.
+            page_size: Target page size for category cap computation.
+                When >0, category proportional caps are based on this value
+                instead of the input result count.
 
         Returns:
             Reranked and filtered results.
@@ -208,7 +219,9 @@ class SessionReranker:
 
         # Step 4: Greedy constrained diversity selection
         if max_per_brand > 0:
-            results = self._apply_constrained_diversity(results, max_per_brand)
+            results = self._apply_constrained_diversity(
+                results, max_per_brand, page_size=page_size,
+            )
 
         return results
 
@@ -507,6 +520,7 @@ class SessionReranker:
         self,
         results: List[dict],
         max_per_brand: int,
+        page_size: int = 0,
     ) -> List[dict]:
         """Greedy constrained selection with brand, category, and combo diversity.
 
@@ -517,11 +531,17 @@ class SessionReranker:
         4. Combo dedup — skip items too similar in (brand_group, category, color, fit)
 
         Falls back to a simple brand-cap filter if no category data is available.
+
+        Args:
+            page_size: Compute category caps based on this size instead of
+                len(results).  When 0 (default), uses len(results).  Pass the
+                request page_size so caps are proportional to what the user
+                actually sees, not the over-fetched candidate pool.
         """
         if not results:
             return results
 
-        target_size = len(results)
+        target_size = page_size if page_size > 0 else len(results)
         category_caps = compute_category_caps(target_size, DEFAULT_CATEGORY_PROPORTIONS)
 
         brand_counts: Dict[str, int] = defaultdict(int)

@@ -2050,21 +2050,12 @@ class OutfitEngine:
     - get_similar_scored(): Same-category similar items with 9-dim scoring
     """
 
-    # Maximum cached prompt embeddings (bounded to avoid memory growth)
-    _EMBEDDING_CACHE_SIZE = 512
-
     # Profile cache TTL in seconds.  The demo pre-loads 6 cards in parallel
     # so without caching the same profile would be fetched 6+ times.
     _PROFILE_CACHE_TTL = 60
 
     def __init__(self, supabase: Client):
         self.supabase = supabase
-        self._clip_model = None
-        self._clip_processor = None
-        self._clip_lock = threading.Lock()
-        # Phase 4: LRU prompt embedding cache  {prompt_text -> pgvector_str}
-        self._embedding_cache: Dict[str, str] = {}
-        self._embedding_cache_order: List[str] = []  # insertion order for eviction
         # Thread pool — large enough to avoid deadlock from nested submissions
         # (build_outfit -> _score_category -> _retrieve_text_candidates all submit here)
         self._io_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="outfit_io")
@@ -2337,106 +2328,21 @@ class OutfitEngine:
                     raise
 
     # ------------------------------------------------------------------
-    # FashionCLIP text encoder (lazy-loaded, batched, cached)
+    # FashionCLIP text encoder (delegates to shared CLIPService)
     # ------------------------------------------------------------------
 
-    def _load_clip(self):
-        """Lazy-load FashionCLIP for text prompt encoding (thread-safe)."""
-        if self._clip_model is None:
-            with self._clip_lock:
-                if self._clip_model is None:
-                    import torch
-                    from transformers import CLIPProcessor, CLIPModel
-                    logger.info("OutfitEngine: loading FashionCLIP model...")
-                    model = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip")
-                    processor = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
-                    if torch.cuda.is_available():
-                        model = model.cuda()
-                        logger.info("OutfitEngine: FashionCLIP on CUDA")
-                    else:
-                        logger.info("OutfitEngine: FashionCLIP on CPU")
-                    model.eval()
-                    self._clip_processor = processor
-                    self._clip_model = model
-                    logger.info("OutfitEngine: FashionCLIP model loaded")
-
-    def _cache_put(self, key: str, value: str) -> None:
-        """Add to embedding cache with bounded eviction."""
-        if key in self._embedding_cache:
-            return
-        if len(self._embedding_cache) >= self._EMBEDDING_CACHE_SIZE:
-            # Evict oldest
-            evict_key = self._embedding_cache_order.pop(0)
-            self._embedding_cache.pop(evict_key, None)
-        self._embedding_cache[key] = value
-        self._embedding_cache_order.append(key)
-
     def _encode_text(self, text: str) -> str:
-        """Encode a single text to a pgvector-compatible embedding string.
-
-        Uses cache if available, otherwise delegates to batch encode.
-        """
-        cached = self._embedding_cache.get(text)
-        if cached is not None:
-            return cached
-        results = self._encode_texts_batch([text])
-        return results[0]
+        """Encode a single text to a pgvector-compatible embedding string."""
+        from core.clip_service import get_clip_service
+        return get_clip_service().encode_text_pgvector(text)
 
     def _encode_texts_batch(self, texts: List[str]) -> List[str]:
-        """Batch-encode multiple texts in a single FashionCLIP forward pass.
+        """Batch-encode multiple texts via the shared CLIPService.
 
         Returns list of pgvector-compatible embedding strings, one per input.
-        Cache hits are served from cache; only uncached texts hit the model.
         """
-        import torch
-        self._load_clip()
-
-        # Separate cached vs uncached
-        results = [None] * len(texts)
-        uncached_indices = []
-        uncached_texts = []
-        for i, text in enumerate(texts):
-            cached = self._embedding_cache.get(text)
-            if cached is not None:
-                results[i] = cached
-            else:
-                uncached_indices.append(i)
-                uncached_texts.append(text)
-
-        if not uncached_texts:
-            return results  # all cached
-
-        # Batch encode uncached texts in one forward pass
-        with torch.no_grad():
-            inputs = self._clip_processor(
-                text=uncached_texts, return_tensors="pt",
-                padding=True, truncation=True, max_length=77,
-            )
-            if torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
-
-            emb = self._clip_model.get_text_features(**inputs)
-            if isinstance(emb, torch.Tensor):
-                pass
-            elif hasattr(emb, "pooler_output") and emb.pooler_output is not None:
-                emb = emb.pooler_output
-            elif hasattr(emb, "text_embeds") and emb.text_embeds is not None:
-                emb = emb.text_embeds
-            emb = emb / emb.norm(dim=-1, keepdim=True)
-            vecs = emb.cpu().numpy().astype("float32")
-
-        # Store results and populate cache
-        for j, idx in enumerate(uncached_indices):
-            vec_list = vecs[j].tolist()
-            vec_str = f"[{','.join(map(str, vec_list))}]"
-            self._cache_put(uncached_texts[j], vec_str)
-            results[idx] = vec_str
-
-        logger.debug(
-            "Batch encoded %d texts (%d cached, %d computed)",
-            len(texts), len(texts) - len(uncached_texts), len(uncached_texts),
-        )
-        return results
+        from core.clip_service import get_clip_service
+        return get_clip_service().encode_texts_pgvector_batch(texts)
 
     # ------------------------------------------------------------------
     # Diverse prompt generation

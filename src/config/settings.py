@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     # Path Configuration
     # ==========================================================================
     base_dir: Path = Field(
-        default=Path("/home/ubuntu/recSys/outfitTransformer"),
+        default=Path(os.environ.get("BASE_DIR", "/home/ubuntu/recSys/outfitTransformer")),
         description="Base directory for data files"
     )
     

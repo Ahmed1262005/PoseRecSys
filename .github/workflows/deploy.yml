@@ -1,0 +1,87 @@
+# ==============================================================================
+# OutfitTransformer - CI/CD Pipeline
+# ==============================================================================
+# Triggers on push to main:
+#   1. Run unit tests
+#   2. SSH into EC2 and deploy via docker compose
+# ==============================================================================
+
+name: Test & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Unit Tests (runs on every push and PR)
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: |
+          PYTHONPATH=src python -m pytest tests/unit/ -v --tb=short
+        env:
+          # Minimal env for tests (services are mocked)
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_SERVICE_KEY: test-key
+          SUPABASE_JWT_SECRET: test-secret
+          ALGOLIA_APP_ID: test
+          ALGOLIA_SEARCH_KEY: test
+
+  # ---------------------------------------------------------------------------
+  # Deploy to EC2 (only on push to main, after tests pass)
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/outfit-transformer
+
+            echo "=== Pulling latest code ==="
+            git pull origin main
+
+            echo "=== Building Docker image ==="
+            docker compose build
+
+            echo "=== Deploying (zero-downtime) ==="
+            docker compose up -d
+
+            echo "=== Waiting for health check ==="
+            sleep 10
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                echo "Health check passed!"
+                exit 0
+              fi
+              echo "Waiting for API to become healthy... ($i/30)"
+              sleep 5
+            done
+            echo "ERROR: Health check failed after 150 seconds"
+            docker compose logs api --tail 50
+            exit 1

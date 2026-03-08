@@ -1,43 +1,43 @@
-# Fashion Personalized Feed - Dependencies
-# RecBole + FashionCLIP with Polyvore Dataset
+# OutfitTransformer - Production Dependencies
+# =============================================
 
 # Core ML/DL
 recbole==1.2.0
-torch>=1.10.0
+torch>=2.0.0
 torchvision
-
-# FashionCLIP for visual embeddings
-fashion-clip
-
-# Vector search
-faiss-gpu
+transformers>=4.30.0
 
 # API
-fastapi
+fastapi>=0.100.0
 uvicorn[standard]
+gunicorn
 
-# Data processing
-pandas
-numpy
-pillow
-tqdm
-requests
-
-# Testing
-pytest
-pytest-asyncio
-httpx
+# Database
+supabase>=2.0.0
 
 # Search
 algoliasearch>=4.0.0
 
-# LLM (query planner)
+# LLM (query planner, optional)
 openai>=1.0.0
 
-# Session storage
+# Session storage (optional)
 redis>=5.0.0
 
-# Utilities
-pydantic-settings
-pyyaml
+# Data processing
+numpy<2.0
+pillow
+requests
+
+# Auth
+PyJWT>=2.0.0
+
+# Config
+pydantic-settings>=2.0.0
+python-dotenv
+
+# ML utilities
 scikit-learn
+
+# Observability (Datadog APM)
+ddtrace>=2.0.0

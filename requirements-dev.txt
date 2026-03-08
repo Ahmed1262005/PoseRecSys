@@ -1,0 +1,16 @@
+# Development / Testing Dependencies
+# Inherits all production dependencies
+-r requirements.txt
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# UI (Gradio test interfaces)
+gradio>=6.5.1
+
+# Data scripts
+pandas
+tqdm
+pyyaml
