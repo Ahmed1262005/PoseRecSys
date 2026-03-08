@@ -239,13 +239,16 @@ def auth_headers(test_jwt_token: str) -> dict:
 def pytest_collection_modifyitems(config, items):
     """Auto-skip integration tests if no server URL is configured."""
     skip_integration = pytest.mark.skip(reason="Integration tests require running server")
-    skip_supabase = pytest.mark.skip(reason="Supabase tests require credentials")
+    skip_supabase = pytest.mark.skip(reason="Supabase tests require real credentials")
     
     server_url = os.getenv("TEST_SERVER_URL")
-    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    
+    # Consider Supabase unavailable if URL is missing or is the test placeholder
+    supabase_available = bool(supabase_url) and "test.supabase.co" not in supabase_url
     
     for item in items:
         if "integration" in item.keywords and not server_url:
             item.add_marker(skip_integration)
-        if "supabase" in item.keywords and not supabase_url:
+        if "supabase" in item.keywords and not supabase_available:
             item.add_marker(skip_supabase)

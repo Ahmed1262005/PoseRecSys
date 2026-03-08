@@ -30,6 +30,7 @@ from search.attribute_search import (
     plan_to_attribute_filters,
 )
 from search.mode_config import get_rrf_weights
+from search.query_classifier import QueryClassifier
 from search.query_planner import QueryPlanner, SearchPlan, get_query_planner
 from search.reranker import SessionReranker
 from search.analytics import SearchAnalytics, get_search_analytics
@@ -387,11 +388,14 @@ class HybridSearchService:
             # + WHERE clauses) replacing the old vision reranker approach.
             timing["plan_detail_terms"] = search_plan.detail_terms
         else:
-            # --- Fallback: basic search (no regex, no filter extraction) ---
-            logger.info("Planner unavailable, using basic search", query=request.query)
-
-            intent = QueryIntent.SPECIFIC
-            algolia_weight, semantic_weight = get_rrf_weights("specific")
+            # --- Fallback: regex-based classification (no LLM planner) ---
+            intent = QueryClassifier.classify(request.query)
+            algolia_weight, semantic_weight = get_rrf_weights(intent.value)
+            logger.info(
+                "Planner unavailable, using regex classifier fallback",
+                query=request.query,
+                intent=intent.value,
+            )
 
             # Use raw query for Algolia (clean meta-terms only, no extracted terms)
             algolia_query = self._clean_query_for_algolia(request.query)

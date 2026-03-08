@@ -721,10 +721,15 @@ class TestSearchPipeline:
     """Test the full search() method with mocked Algolia + semantic."""
 
     def _setup_service(self, hybrid_service):
-        """Set up the hybrid service with a mocked semantic engine."""
+        """Set up the hybrid service with mocked semantic engine + disabled planner."""
         mock_semantic = MagicMock()
         mock_semantic.search_with_filters.return_value = {"results": []}
         hybrid_service._semantic_engine = mock_semantic
+        # Disable the LLM planner so tests use the regex classifier fallback
+        # and don't make real OpenAI API calls.
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = None
+        hybrid_service._planner = mock_planner
         return hybrid_service
 
     def test_search_returns_response(self, hybrid_service):
@@ -2160,6 +2165,10 @@ class TestAlgoliaFallbackToSemantic:
         mock_semantic = MagicMock()
         mock_semantic.search_with_filters.return_value = {"results": []}
         hybrid_service._semantic_engine = mock_semantic
+        # Disable the LLM planner so the regex classifier determines intent
+        mock_planner = MagicMock()
+        mock_planner.plan.return_value = None
+        hybrid_service._planner = mock_planner
         hybrid_service._algolia.search = MagicMock(return_value={
             "hits": [{"objectID": "p1", "name": "Boohoo Dress", "brand": "Boohoo", "price": 30}],
             "nbHits": 1,
