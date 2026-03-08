@@ -1403,16 +1403,21 @@ class TestGracefulDegradation:
         assert result.query == "dress"
 
     def test_semantic_failure_returns_algolia_only(self):
-        """If semantic fails, Algolia results should still return."""
+        """If semantic fails, Algolia results should still return.
+
+        Uses a specific query ("black dress") that produces a non-empty
+        algolia_query.  Vague mood queries like "quiet luxury" produce
+        an empty algolia_query and correctly skip Algolia entirely.
+        """
         from search.models import HybridSearchRequest
         service, mock_algolia, mock_semantic, _ = self._setup()
         mock_algolia.search.return_value = {
-            "hits": [{"objectID": "p1", "name": "Dress", "brand": "B", "price": 50}],
+            "hits": [{"objectID": "p1", "name": "Black Dress", "brand": "B", "price": 50}],
             "nbHits": 1,
         }
         mock_semantic.search_with_filters.side_effect = Exception("CLIP error")
 
-        result = service.search(HybridSearchRequest(query="quiet luxury"))
+        result = service.search(HybridSearchRequest(query="black dress"))
         assert len(result.results) == 1
         assert result.results[0].product_id == "p1"
 

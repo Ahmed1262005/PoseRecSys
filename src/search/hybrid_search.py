@@ -626,21 +626,52 @@ class HybridSearchService:
                 qcount = 1
             return results, qcount, int((time.time() - t0) * 1000)
 
+        # Skip Algolia entirely when the query is empty/whitespace AND
+        # no brand hard-filter is active.  Empty queries with no brand
+        # constraint return arbitrary results (all trending/popularity
+        # scores are 0.0, so tiebreaker is document insertion order)
+        # which poison RRF merge.  When a brand filter IS set, the
+        # results are scoped to that brand and remain useful even
+        # without text matching.  Applies to ALL intents.
+        _empty_query = not algolia_query or not algolia_query.strip()
+        _has_brand_filter = bool(request.brands)
+        _skip_algolia = _empty_query and not _has_brand_filter
+        if _skip_algolia:
+            logger.info(
+                "Skipping Algolia — empty query with no brand filter would return arbitrary results",
+                intent=intent.value,
+                original_query=request.query,
+            )
+        elif _empty_query and _has_brand_filter:
+            logger.info(
+                "Empty query but brand filter active — keeping Algolia for filtered results",
+                intent=intent.value,
+                brands=(request.brands or [])[:5],
+            )
+
         if intent == QueryIntent.EXACT:
             # EXACT: run Algolia first; only run semantic if Algolia returns 0
-            algolia_results, facets, algolia_ms = _run_algolia()
-            timing["algolia_ms"] = algolia_ms
-
-            if len(algolia_results) == 0:
+            if _skip_algolia:
+                algolia_results, facets = [], {}
+                timing["algolia_ms"] = 0
+                # Always run semantic when Algolia is skipped
                 semantic_results, sq_count, semantic_ms = _run_semantic()
                 timing["semantic_ms"] = semantic_ms
                 timing["semantic_query_count"] = sq_count
-                if semantic_results:
-                    logger.info(
-                        "Algolia returned 0 results for EXACT query, fell back to semantic",
-                        query=request.query,
-                        semantic_count=len(semantic_results),
-                    )
+            else:
+                algolia_results, facets, algolia_ms = _run_algolia()
+                timing["algolia_ms"] = algolia_ms
+
+                if len(algolia_results) == 0:
+                    semantic_results, sq_count, semantic_ms = _run_semantic()
+                    timing["semantic_ms"] = semantic_ms
+                    timing["semantic_query_count"] = sq_count
+                    if semantic_results:
+                        logger.info(
+                            "Algolia returned 0 results for EXACT query, fell back to semantic",
+                            query=request.query,
+                            semantic_count=len(semantic_results),
+                        )
         else:
             # SPECIFIC / VAGUE: run Algolia + Semantic in parallel
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -650,19 +681,25 @@ class HybridSearchService:
             semantic_ms = 0
             sq_count = 1
 
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_algolia = executor.submit(_run_algolia)
-                future_semantic = executor.submit(_run_semantic)
+            if _skip_algolia:
+                # Algolia skipped — run semantic only
+                semantic_results, sq_count, semantic_ms = _run_semantic()
+                timing["semantic_ms"] = semantic_ms
+                timing["semantic_query_count"] = sq_count
+            else:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    future_algolia = executor.submit(_run_algolia)
+                    future_semantic = executor.submit(_run_semantic)
 
-                try:
-                    algolia_results, facets, algolia_ms = future_algolia.result()
-                except Exception as e:
-                    logger.warning("Algolia search failed in parallel", error=str(e))
+                    try:
+                        algolia_results, facets, algolia_ms = future_algolia.result()
+                    except Exception as e:
+                        logger.warning("Algolia search failed in parallel", error=str(e))
 
-                try:
-                    semantic_results, sq_count, semantic_ms = future_semantic.result()
-                except Exception as e:
-                    logger.warning("Semantic search failed in parallel", error=str(e))
+                    try:
+                        semantic_results, sq_count, semantic_ms = future_semantic.result()
+                    except Exception as e:
+                        logger.warning("Semantic search failed in parallel", error=str(e))
 
             timing["algolia_ms"] = algolia_ms
             timing["semantic_ms"] = semantic_ms
