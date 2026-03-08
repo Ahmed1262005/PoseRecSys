@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Pre-download FashionCLIP weights into HuggingFace cache
 # This avoids a ~600MB download on first request at runtime
-RUN pip install --no-cache-dir transformers torch && \
+RUN pip install --no-cache-dir transformers torch pillow && \
     python -c "\
 from transformers import CLIPModel, CLIPProcessor; \
 CLIPModel.from_pretrained('patrickjohncyh/fashion-clip'); \
