@@ -621,6 +621,8 @@ class FeedOrchestrator:
         Merges onboarding profile constraints with request-level hard filters.
         Request hard_filters (query params) take precedence: if both profile
         and request specify exclude_brands, the lists are merged (union).
+
+        Also forwards soft_preferences (extended PA filters) directly to eligibility.
         """
         kwargs: Dict[str, Any] = {
             "hidden_ids": session.hidden_ids,
@@ -655,7 +657,7 @@ class FeedOrchestrator:
         # Request hard filters (take precedence / merge)
         hf = getattr(request, "hard_filters", None)
         if hf:
-            # Merge exclude_brands
+            # Merge exclude_brands (union of profile + request)
             req_exclude = getattr(hf, "exclude_brands", None)
             if req_exclude:
                 existing = kwargs.get("exclude_brands") or []
@@ -666,6 +668,38 @@ class FeedOrchestrator:
             req_include = getattr(hf, "include_brands", None)
             if req_include:
                 kwargs["include_brands"] = req_include
+
+            # Merge exclude_colors (union of profile + request)
+            req_exc_colors = getattr(hf, "exclude_colors", None)
+            if req_exc_colors:
+                existing = kwargs.get("exclude_colors") or []
+                merged = list(set(existing) | set(req_exc_colors))
+                kwargs["exclude_colors"] = merged
+
+            # Forward core HardFilters fields to eligibility
+            _hf_direct = {
+                "exclude_styles": getattr(hf, "exclude_styles", None),
+                "include_patterns": getattr(hf, "include_patterns", None),
+                "exclude_patterns": getattr(hf, "exclude_patterns", None),
+            }
+            for k, v in _hf_direct.items():
+                if v:
+                    kwargs[k] = v
+
+            # Forward include_occasions from HF (merge with profile occasions)
+            req_occasions = getattr(hf, "include_occasions", None)
+            if req_occasions:
+                existing = kwargs.get("occasions") or []
+                merged = list(set(existing) | set(req_occasions))
+                kwargs["occasions"] = merged
+
+        # Forward soft_preferences (extended PA filters) directly to eligibility
+        # These are include_/exclude_ pairs parsed from query params by the API layer.
+        soft_prefs = getattr(request, "soft_preferences", None)
+        if soft_prefs and isinstance(soft_prefs, dict):
+            for key, val in soft_prefs.items():
+                if val:
+                    kwargs[key] = val
 
         return kwargs
 

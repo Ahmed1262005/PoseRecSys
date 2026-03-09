@@ -74,6 +74,32 @@ class EligibilityFilter:
         hidden_ids: Optional[Set[str]] = None,
         negative_brands: Optional[Set[str]] = None,
         shown_set: Optional[Set[str]] = None,
+        # Extended PA attribute filters
+        include_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        exclude_styles: Optional[List[str]] = None,
+        include_fit: Optional[List[str]] = None,
+        exclude_fit: Optional[List[str]] = None,
+        include_length: Optional[List[str]] = None,
+        exclude_length: Optional[List[str]] = None,
+        include_sleeves: Optional[List[str]] = None,
+        exclude_sleeves: Optional[List[str]] = None,
+        include_neckline: Optional[List[str]] = None,
+        exclude_neckline: Optional[List[str]] = None,
+        include_formality: Optional[List[str]] = None,
+        exclude_formality: Optional[List[str]] = None,
+        include_seasons: Optional[List[str]] = None,
+        exclude_seasons: Optional[List[str]] = None,
+        include_silhouette: Optional[List[str]] = None,
+        exclude_silhouette: Optional[List[str]] = None,
+        include_color_family: Optional[List[str]] = None,
+        exclude_color_family: Optional[List[str]] = None,
+        include_style_tags: Optional[List[str]] = None,
+        exclude_style_tags: Optional[List[str]] = None,
+        include_coverage: Optional[List[str]] = None,
+        exclude_coverage: Optional[List[str]] = None,
+        include_materials: Optional[List[str]] = None,
+        exclude_materials: Optional[List[str]] = None,
     ) -> EligibilityResult:
         """
         Check if a candidate passes all eligibility constraints.
@@ -219,15 +245,21 @@ class EligibilityFilter:
                     )
 
                 # Check 6: Occasion allowed list
-                allowed = OCCASION_ALLOWED.get(occ_lower)
-                if allowed is not None and canonical_type not in allowed:
-                    # Check by name too
-                    if not any(a in name_lower for a in allowed if a):
-                        return EligibilityResult(
-                            passes=False,
-                            reason=f"not_allowed:{occ_lower}:{canonical_type}",
-                            failed_rules=["occasion_allowed_list"],
-                        )
+                # OCCASION_ALLOWED is Dict[occasion, Dict[broad_category, Set[types]]]
+                # Flatten to a single set of all allowed types for this occasion
+                allowed_nested = OCCASION_ALLOWED.get(occ_lower)
+                if allowed_nested is not None:
+                    all_allowed: set = set()
+                    for type_set in allowed_nested.values():
+                        all_allowed.update(type_set)
+                    if canonical_type not in all_allowed:
+                        # Check by name too
+                        if not any(a in name_lower for a in all_allowed if a):
+                            return EligibilityResult(
+                                passes=False,
+                                reason=f"not_allowed:{occ_lower}:{canonical_type}",
+                                failed_rules=["occasion_allowed_list"],
+                            )
 
                 # Check name-based blocking
                 blocks_names = UNIVERSAL_BLOCKS.get(occ_lower, [])
@@ -324,7 +356,255 @@ class EligibilityFilter:
                     failed_rules=["rise_exclusion"],
                 )
 
+        # ---------------------------------------------------------------
+        # Check 10: Pattern filters (include/exclude)
+        # ---------------------------------------------------------------
+        item_pattern = (getattr(candidate, "pattern", None) or "").lower()
+
+        if include_patterns and item_pattern:
+            ip_lower = {p.lower() for p in include_patterns}
+            if item_pattern not in ip_lower:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"pattern_not_included:{item_pattern}",
+                    failed_rules=["pattern_inclusion"],
+                )
+
+        if exclude_patterns and item_pattern:
+            ep_lower = {p.lower() for p in exclude_patterns}
+            if item_pattern in ep_lower:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_pattern:{item_pattern}",
+                    failed_rules=["pattern_exclusion"],
+                )
+
+        # ---------------------------------------------------------------
+        # Check 11: Coverage/style exclusion (sheer, cutouts, backless, etc.)
+        # ---------------------------------------------------------------
+        if exclude_styles:
+            es_lower = {s.lower().replace("-", "_").replace(" ", "_") for s in exclude_styles}
+            # Check coverage_details array
+            coverage_details = getattr(candidate, "coverage_details", None) or []
+            for cd in coverage_details:
+                cd_norm = cd.lower().replace("-", "_").replace(" ", "_")
+                if cd_norm in es_lower:
+                    return EligibilityResult(
+                        passes=False,
+                        reason=f"excluded_style:{cd}",
+                        failed_rules=["style_exclusion"],
+                    )
+            # Also check neckline for deep-necklines
+            neckline = (getattr(candidate, "neckline", None) or "").lower()
+            if "deep_necklines" in es_lower or "deep-necklines" in es_lower:
+                if neckline and any(d in neckline for d in ("plunging", "deep v", "deep-v")):
+                    return EligibilityResult(
+                        passes=False,
+                        reason=f"excluded_style:deep_neckline:{neckline}",
+                        failed_rules=["style_exclusion"],
+                    )
+
+        # ---------------------------------------------------------------
+        # Check 12+: Extended PA attribute filters (soft_preferences)
+        # Each is an include/exclude pair matching a Candidate field.
+        # ---------------------------------------------------------------
+
+        # Fit
+        item_fit = (getattr(candidate, "fit", None) or "").lower()
+        if include_fit and item_fit:
+            if item_fit not in {f.lower() for f in include_fit}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"fit_not_included:{item_fit}",
+                    failed_rules=["fit_inclusion"],
+                )
+        if exclude_fit and item_fit:
+            if item_fit in {f.lower() for f in exclude_fit}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_fit:{item_fit}",
+                    failed_rules=["fit_exclusion"],
+                )
+
+        # Length
+        item_length = (getattr(candidate, "length", None) or "").lower()
+        if include_length and item_length:
+            if item_length not in {l.lower() for l in include_length}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"length_not_included:{item_length}",
+                    failed_rules=["length_inclusion"],
+                )
+        if exclude_length and item_length:
+            if item_length in {l.lower() for l in exclude_length}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_length:{item_length}",
+                    failed_rules=["length_exclusion"],
+                )
+
+        # Sleeves
+        item_sleeve = (getattr(candidate, "sleeve", None) or "").lower()
+        if include_sleeves and item_sleeve:
+            if item_sleeve not in {s.lower() for s in include_sleeves}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"sleeve_not_included:{item_sleeve}",
+                    failed_rules=["sleeve_inclusion"],
+                )
+        if exclude_sleeves and item_sleeve:
+            if item_sleeve in {s.lower() for s in exclude_sleeves}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_sleeve:{item_sleeve}",
+                    failed_rules=["sleeve_exclusion"],
+                )
+
+        # Neckline
+        item_neckline = (getattr(candidate, "neckline", None) or "").lower()
+        if include_neckline and item_neckline:
+            if item_neckline not in {n.lower() for n in include_neckline}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"neckline_not_included:{item_neckline}",
+                    failed_rules=["neckline_inclusion"],
+                )
+        if exclude_neckline and item_neckline:
+            if item_neckline in {n.lower() for n in exclude_neckline}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_neckline:{item_neckline}",
+                    failed_rules=["neckline_exclusion"],
+                )
+
+        # Formality
+        item_formality = (getattr(candidate, "formality", None) or "").lower()
+        if include_formality and item_formality:
+            if item_formality not in {f.lower() for f in include_formality}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"formality_not_included:{item_formality}",
+                    failed_rules=["formality_inclusion"],
+                )
+        if exclude_formality and item_formality:
+            if item_formality in {f.lower() for f in exclude_formality}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_formality:{item_formality}",
+                    failed_rules=["formality_exclusion"],
+                )
+
+        # Seasons (list field)
+        item_seasons = [s.lower() for s in (getattr(candidate, "seasons", None) or [])]
+        if include_seasons and item_seasons:
+            is_lower = {s.lower() for s in include_seasons}
+            if not any(s in is_lower for s in item_seasons):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"season_not_included:{item_seasons}",
+                    failed_rules=["season_inclusion"],
+                )
+        if exclude_seasons and item_seasons:
+            es_lower = {s.lower() for s in exclude_seasons}
+            if any(s in es_lower for s in item_seasons):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_season:{item_seasons}",
+                    failed_rules=["season_exclusion"],
+                )
+
+        # Silhouette
+        item_silhouette = (getattr(candidate, "silhouette", None) or "").lower()
+        if include_silhouette and item_silhouette:
+            if item_silhouette not in {s.lower() for s in include_silhouette}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"silhouette_not_included:{item_silhouette}",
+                    failed_rules=["silhouette_inclusion"],
+                )
+        if exclude_silhouette and item_silhouette:
+            if item_silhouette in {s.lower() for s in exclude_silhouette}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_silhouette:{item_silhouette}",
+                    failed_rules=["silhouette_exclusion"],
+                )
+
+        # Color family
+        item_cf = (getattr(candidate, "color_family", None) or "").lower()
+        if include_color_family and item_cf:
+            if item_cf not in {c.lower() for c in include_color_family}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"color_family_not_included:{item_cf}",
+                    failed_rules=["color_family_inclusion"],
+                )
+        if exclude_color_family and item_cf:
+            if item_cf in {c.lower() for c in exclude_color_family}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_color_family:{item_cf}",
+                    failed_rules=["color_family_exclusion"],
+                )
+
+        # Style tags (list field)
+        item_tags = [t.lower() for t in (getattr(candidate, "style_tags", None) or [])]
+        if include_style_tags and item_tags:
+            ist_lower = {t.lower() for t in include_style_tags}
+            if not any(t in ist_lower for t in item_tags):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"style_tag_not_included:{item_tags}",
+                    failed_rules=["style_tag_inclusion"],
+                )
+        if exclude_style_tags and item_tags:
+            est_lower = {t.lower() for t in exclude_style_tags}
+            if any(t in est_lower for t in item_tags):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_style_tag:{item_tags}",
+                    failed_rules=["style_tag_exclusion"],
+                )
+
+        # Coverage level
+        item_coverage = (getattr(candidate, "coverage_level", None) or "").lower()
+        if include_coverage and item_coverage:
+            if item_coverage not in {c.lower() for c in include_coverage}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"coverage_not_included:{item_coverage}",
+                    failed_rules=["coverage_inclusion"],
+                )
+        if exclude_coverage and item_coverage:
+            if item_coverage in {c.lower() for c in exclude_coverage}:
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_coverage:{item_coverage}",
+                    failed_rules=["coverage_exclusion"],
+                )
+
+        # Materials (list field)
+        item_materials = [m.lower() for m in (getattr(candidate, "materials", None) or [])]
+        if include_materials and item_materials:
+            im_lower = {m.lower() for m in include_materials}
+            if not any(m in im_lower for m in item_materials):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"material_not_included:{item_materials}",
+                    failed_rules=["material_inclusion"],
+                )
+        if exclude_materials and item_materials:
+            em_lower = {m.lower() for m in exclude_materials}
+            if any(m in em_lower for m in item_materials):
+                return EligibilityResult(
+                    passes=False,
+                    reason=f"excluded_material:{item_materials}",
+                    failed_rules=["material_exclusion"],
+                )
+
+        # ---------------------------------------------------------------
         # Check 9: Unknown article type penalty (soft — passes but penalized)
+        # ---------------------------------------------------------------
         if canonical_type not in ARTICLE_TYPE_CANON.values():
             # Unknown type gets a penalty but still passes
             penalty = 0.2
@@ -339,44 +619,21 @@ class EligibilityFilter:
     def filter(
         self,
         candidates: List[Candidate],
-        occasions: Optional[List[str]] = None,
-        user_exclusions: Optional[List[str]] = None,
-        excluded_article_types: Optional[List[str]] = None,
-        exclude_colors: Optional[List[str]] = None,
-        exclude_brands: Optional[List[str]] = None,
-        include_brands: Optional[List[str]] = None,
-        include_rise: Optional[List[str]] = None,
-        exclude_rise: Optional[List[str]] = None,
-        hidden_ids: Optional[Set[str]] = None,
-        negative_brands: Optional[Set[str]] = None,
-        shown_set: Optional[Set[str]] = None,
+        **kwargs,
     ) -> Tuple[List[Candidate], Dict[str, Any]]:
         """
         Filter a batch of candidates. Returns (passed, stats).
 
-        Passed candidates have their penalty stored on the result but
-        the candidate itself is not modified. The ranker reads the
-        penalty from the filter result if needed.
+        All keyword arguments are forwarded to ``check()``.
+        Accepts all core filters (occasions, exclude_brands, include_brands, etc.)
+        plus all extended PA attribute filters (include_patterns, exclude_fit, etc.).
         """
         passed = []
         penalties: Dict[str, float] = {}
         block_reasons: Dict[str, int] = {}
 
         for c in candidates:
-            result = self.check(
-                c,
-                occasions=occasions,
-                user_exclusions=user_exclusions,
-                excluded_article_types=excluded_article_types,
-                exclude_colors=exclude_colors,
-                exclude_brands=exclude_brands,
-                include_brands=include_brands,
-                include_rise=include_rise,
-                exclude_rise=exclude_rise,
-                hidden_ids=hidden_ids,
-                negative_brands=negative_brands,
-                shown_set=shown_set,
-            )
+            result = self.check(c, **kwargs)
             if result.passes:
                 passed.append(c)
                 if result.penalty > 0:
