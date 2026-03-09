@@ -90,7 +90,7 @@ CANDIDATES_PER_POOL = int(os.environ.get("CANDIDATES_PER_POOL", 60))
 K_RETRIEVE = int(os.environ.get("K_RETRIEVE", 150))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 5000))
 EXPORT_BATCH = int(os.environ.get("EXPORT_BATCH", 1000))
-CATALOG_BATCH = int(os.environ.get("CATALOG_BATCH", 5000))
+CATALOG_BATCH = int(os.environ.get("CATALOG_BATCH", 1000))
 SKIP_EXPORT = os.environ.get("SKIP_EXPORT", "0") == "1"
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
