@@ -512,13 +512,25 @@ class AttributeSearchEngine:
             exclude_product_ids=exclude_product_ids,
         )
 
-        # 4. Call RPC
-        try:
-            resp = self._sb.rpc("search_semantic_with_attributes", rpc_params).execute()
-            rows = resp.data or []
-        except Exception as e:
-            logger.warning("RPC search_semantic_with_attributes failed: %s — falling back to search_multimodal", e)
-            rows = self._fallback_search(vector_str, filters)
+        # 4. Call RPC (retry once on pgvector statement_timeout)
+        rows = None
+        for _attempt in range(2):
+            try:
+                resp = self._sb.rpc("search_semantic_with_attributes", rpc_params).execute()
+                rows = resp.data or []
+                break
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "57014" in err_str or "statement timeout" in err_str
+                if is_timeout and _attempt == 0:
+                    logger.warning("RPC search_semantic_with_attributes timed out, retrying", query=query)
+                    time.sleep(1.5)
+                    continue
+                logger.warning("RPC search_semantic_with_attributes failed: %s — falling back to search_multimodal", e)
+                rows = self._fallback_search(vector_str, filters, exclude_product_ids=exclude_product_ids)
+                break
+        if rows is None:
+            rows = self._fallback_search(vector_str, filters, exclude_product_ids=exclude_product_ids)
 
         # 5. Map to SearchResult objects
         results = [self._map_rpc_result(r) for r in rows]
@@ -683,7 +695,12 @@ class AttributeSearchEngine:
     # Fallback: use existing search_multimodal when new RPC not deployed
     # -----------------------------------------------------------------------
 
-    def _fallback_search(self, vector_str: str, f: AttributeFilters) -> list[dict]:
+    def _fallback_search(
+        self,
+        vector_str: str,
+        f: AttributeFilters,
+        exclude_product_ids: list[str] | None = None,
+    ) -> list[dict]:
         """
         Fallback when search_semantic_with_attributes RPC is not yet deployed.
         Uses existing search_multimodal + PostgREST attribute post-filter.
@@ -705,9 +722,25 @@ class AttributeSearchEngine:
             rpc_params["min_price"] = f.min_price
         if f.max_price is not None:
             rpc_params["max_price"] = f.max_price
+        if exclude_product_ids:
+            rpc_params["exclude_product_ids"] = exclude_product_ids
 
-        resp = self._sb.rpc("search_multimodal", rpc_params).execute()
-        rows = resp.data or []
+        # Retry once on statement_timeout
+        rows = []
+        for _attempt in range(2):
+            try:
+                resp = self._sb.rpc("search_multimodal", rpc_params).execute()
+                rows = resp.data or []
+                break
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "57014" in err_str or "statement timeout" in err_str
+                if is_timeout and _attempt == 0:
+                    logger.warning("Fallback search_multimodal timed out, retrying")
+                    time.sleep(1.5)
+                    continue
+                logger.warning("Fallback search_multimodal failed: %s", e)
+                break
 
         if not f.has_attribute_filters():
             return rows[:f.limit]

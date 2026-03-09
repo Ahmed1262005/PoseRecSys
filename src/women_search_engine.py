@@ -931,52 +931,76 @@ class WomenSearchEngine:
         if exclude_product_ids:
             rpc_params['exclude_product_ids'] = exclude_product_ids
 
-        try:
-            result = self.supabase.rpc('search_multimodal', rpc_params).execute()
+        # Retry on pgvector statement_timeout (code 57014).  Under
+        # concurrent load Supabase can kill slow vector scans; a single
+        # retry after a short pause usually succeeds.
+        _MAX_RPC_RETRIES = 1
+        _RETRY_DELAY = 1.5  # seconds
 
-            if not result.data:
-                return {"query": query, "results": [], "count": 0}
+        last_err = None
+        for attempt in range(_MAX_RPC_RETRIES + 1):
+            try:
+                result = self.supabase.rpc('search_multimodal', rpc_params).execute()
 
-            results = []
-            for row in result.data:
-                results.append({
-                    "product_id": row.get('product_id'),
-                    "similarity": float(row.get('similarity') or 0),
-                    "name": row.get('name', ''),
-                    "brand": row.get('brand', ''),
-                    "category": row.get('category', ''),
-                    "broad_category": row.get('broad_category', ''),
-                    "article_type": row.get('article_type', ''),
-                    "price": float(row.get('price', 0) or 0),
-                    "original_price": float(row.get('original_price', 0) or 0) or None,
-                    "is_on_sale": bool(
-                        row.get('original_price')
-                        and float(row.get('original_price') or 0) > float(row.get('price') or 0)
-                    ),
-                    "image_url": row.get('primary_image_url', ''),
-                    "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
-                    "colors": row.get('colors', []) or [],
-                    "materials": row.get('materials', []) or [],
-                    "fit": row.get('fit'),
-                    "length": row.get('length'),
-                    "sleeve": row.get('sleeve'),
-                })
+                if not result.data:
+                    return {"query": query, "results": [], "count": 0}
 
-            return {
-                "query": query,
-                "results": results,
-                "count": len(results),
-                "embedding_version": embedding_version,
-            }
+                results = []
+                for row in result.data:
+                    results.append({
+                        "product_id": row.get('product_id'),
+                        "similarity": float(row.get('similarity') or 0),
+                        "name": row.get('name', ''),
+                        "brand": row.get('brand', ''),
+                        "category": row.get('category', ''),
+                        "broad_category": row.get('broad_category', ''),
+                        "article_type": row.get('article_type', ''),
+                        "price": float(row.get('price', 0) or 0),
+                        "original_price": float(row.get('original_price', 0) or 0) or None,
+                        "is_on_sale": bool(
+                            row.get('original_price')
+                            and float(row.get('original_price') or 0) > float(row.get('price') or 0)
+                        ),
+                        "image_url": row.get('primary_image_url', ''),
+                        "gallery_images": filter_gallery_images(row.get('gallery_images', []) or []),
+                        "colors": row.get('colors', []) or [],
+                        "materials": row.get('materials', []) or [],
+                        "fit": row.get('fit'),
+                        "length": row.get('length'),
+                        "sleeve": row.get('sleeve'),
+                    })
 
-        except Exception as e:
-            logger.error(
-                "Multimodal search failed, falling back to image-only",
-                error=str(e),
-                query=query,
-            )
-            # Return empty -- caller can fall back to image-only search
-            return {"query": query, "results": [], "count": 0, "error": str(e)}
+                return {
+                    "query": query,
+                    "results": results,
+                    "count": len(results),
+                    "embedding_version": embedding_version,
+                }
+
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                is_timeout = "57014" in err_str or "statement timeout" in err_str
+                if is_timeout and attempt < _MAX_RPC_RETRIES:
+                    logger.warning(
+                        "Multimodal search timed out, retrying",
+                        attempt=attempt + 1,
+                        query=query,
+                        delay=_RETRY_DELAY,
+                    )
+                    import time as _time
+                    _time.sleep(_RETRY_DELAY)
+                    continue
+                # Non-timeout error or exhausted retries
+                break
+
+        logger.error(
+            "Multimodal search failed, falling back to image-only",
+            error=str(last_err),
+            query=query,
+        )
+        # Return empty -- caller can fall back to image-only search
+        return {"query": query, "results": [], "count": 0, "error": str(last_err)}
 
     def get_similar(
         self,
