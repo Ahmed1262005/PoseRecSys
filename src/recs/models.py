@@ -589,6 +589,48 @@ class Candidate(BaseModel):
         description="Estimated model clothing size range: XS-S, S-M, M-L, L-XL, XL-2XL, 2XL+"
     )
 
+    # V3 fields (set by feature hydrator from product_serving MV)
+    hero_image_url: Optional[str] = Field(
+        default=None,
+        description="Hero/primary image URL from product_serving MV"
+    )
+    construction: Optional[Any] = Field(
+        default=None,
+        description="Construction details (jsonb from closure_details)"
+    )
+    created_at: Optional[str] = Field(
+        default=None,
+        description="Product creation timestamp"
+    )
+    gender: Optional[List[str]] = Field(
+        default=None,
+        description="Gender targeting: ['female'], ['male'], ['unisex']"
+    )
+    computed_occasion_scores: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Precomputed occasion relevance scores (jsonb)"
+    )
+    computed_style_scores: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Precomputed style relevance scores (jsonb)"
+    )
+    computed_pattern_scores: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Precomputed pattern relevance scores (jsonb)"
+    )
+    image_dedup_key: Optional[str] = Field(
+        default=None,
+        description="Image dedup key for near-duplicate detection"
+    )
+    in_stock: Optional[bool] = Field(
+        default=None,
+        description="Whether product is currently in stock"
+    )
+    cluster_id: Optional[str] = Field(
+        default=None,
+        description="Brand cluster ID from brand_clusters"
+    )
+
     # Source tracking
     source: str = Field(
         default="taste_vector",
@@ -661,6 +703,7 @@ class HardFilters(BaseModel):
     include_colors: Optional[List[str]] = None  # Colors to include (item must have at least one)
     exclude_materials: Optional[List[str]] = None
     exclude_brands: Optional[List[str]] = None
+    include_brands: Optional[List[str]] = None  # Brands to include (hard filter — ONLY show these brands)
     min_price: Optional[float] = None
     max_price: Optional[float] = None
     exclude_product_ids: Optional[List[str]] = None

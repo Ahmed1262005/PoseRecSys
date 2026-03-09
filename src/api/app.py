@@ -124,6 +124,14 @@ def create_app() -> FastAPI:
     except ImportError as e:
         logger.warning(f"Could not load recs router: {e}")
 
+    # V3 feed pipeline (pool-based)
+    try:
+        from recs.v3.api import router as v3_router
+        app.include_router(v3_router)
+        logger.info("Mounted V3 feed routes: /api/recs/v3/*")
+    except ImportError as e:
+        logger.warning(f"Could not load V3 feed router: {e}")
+
     # Hybrid search (Algolia + FashionCLIP)
     try:
         from api.routes.search import router as search_router
