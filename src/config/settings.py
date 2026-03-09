@@ -256,16 +256,21 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
-    # OpenAI (LLM Query Planner)
+    # LLM Query Planner
     # ==========================================================================
+    query_planner_provider: str = Field(
+        default="openai",
+        description="LLM provider for query planner: 'openai' or 'gemini'"
+    )
     openai_api_key: str = Field(default="", description="OpenAI API key for LLM query planner")
+    google_api_key: str = Field(default="", description="Google API key for Gemini models")
     query_planner_model: str = Field(
         default="gpt-4.1-mini",
-        description="OpenAI model for query planning"
+        description="Model name for query planning (e.g. gpt-4.1-mini, gemini-2.0-flash)"
     )
     query_planner_enabled: bool = Field(
         default=True,
-        description="Enable LLM query planner (falls back to regex if disabled or fails)"
+        description="Enable LLM query planner (falls back to basic search if disabled or fails)"
     )
     query_planner_timeout_seconds: float = Field(
         default=90.0,

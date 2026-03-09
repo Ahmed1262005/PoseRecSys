@@ -1118,28 +1118,48 @@ _SYSTEM_PROMPT = _build_system_prompt()
 # =============================================================================
 
 class QueryPlanner:
-    """LLM-based query planner using OpenAI (gpt-4o by default)."""
+    """LLM-based query planner — supports OpenAI and Gemini (via OpenAI-compat endpoint)."""
+
+    # Gemini OpenAI-compatible endpoint
+    _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     def __init__(self):
         self._client = None
         self._client_lock = threading.Lock()
         settings = get_settings()
-        self._api_key = settings.openai_api_key
+        self._provider = getattr(settings, "query_planner_provider", "openai").lower()
         self._model = settings.query_planner_model
         self._timeout = settings.query_planner_timeout_seconds
+
+        # Pick API key based on provider
+        if self._provider == "gemini":
+            self._api_key = getattr(settings, "google_api_key", "")
+            # Default model for gemini if user didn't override
+            if self._model == "gpt-4.1-mini":
+                self._model = "gemini-2.0-flash"
+        else:
+            self._api_key = settings.openai_api_key
+
         self._enabled = settings.query_planner_enabled and bool(self._api_key)
 
     @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
     def client(self):
-        """Lazy-load OpenAI client."""
+        """Lazy-load OpenAI client (works for both OpenAI and Gemini endpoints)."""
         if self._client is None:
             with self._client_lock:
                 if self._client is None:
                     from openai import OpenAI
-                    self._client = OpenAI(
-                        api_key=self._api_key,
-                        timeout=self._timeout,
-                    )
+                    client_kwargs = {
+                        "api_key": self._api_key,
+                        "timeout": self._timeout,
+                    }
+                    if self._provider == "gemini":
+                        client_kwargs["base_url"] = self._GEMINI_BASE_URL
+                    self._client = OpenAI(**client_kwargs)
         return self._client
 
     @property
@@ -1338,7 +1358,8 @@ class QueryPlanner:
         The caller should fall back to basic search (raw query, no filters).
         """
         if not self._enabled:
-            logger.debug("Query planner disabled (no API key or feature flag off)")
+            logger.debug("Query planner disabled (no API key or feature flag off)",
+                         provider=self._provider, model=self._model)
             return None
 
         t_start = time.time()
@@ -1455,6 +1476,8 @@ class QueryPlanner:
                 is_refinement = bool(selected_filters)
                 logger.info(
                     "Query planner generated search plan",
+                    provider=self._provider,
+                    model=self._model,
                     query=query,
                     refinement=is_refinement,
                     intent=plan.intent,
@@ -1496,6 +1519,8 @@ class QueryPlanner:
         latency_ms = int((time.time() - t_start) * 1000)
         logger.warning(
             "Query planner failed, falling back to basic search",
+            provider=self._provider,
+            model=self._model,
             error=str(last_error),
             latency_ms=latency_ms,
         )
@@ -1721,6 +1746,8 @@ class QueryPlanner:
                 latency_ms = int((time.time() - t_start) * 1000)
                 logger.info(
                     "Refine planner generated updated plan",
+                    provider=self._provider,
+                    model=self._model,
                     original_query=original_query,
                     intent=plan.intent,
                     algolia_query=plan.algolia_query,
@@ -1754,6 +1781,8 @@ class QueryPlanner:
         latency_ms = int((time.time() - t_start) * 1000)
         logger.warning(
             "Refine planner failed, will fall back to skip_planner",
+            provider=self._provider,
+            model=self._model,
             error=str(last_error),
             latency_ms=latency_ms,
         )
