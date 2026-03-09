@@ -166,7 +166,7 @@ class V3Reranker:
                     continue
 
                 brand = (getattr(c, "brand", None) or "").lower()
-                cluster = get_cluster_for_item(c)
+                cluster = get_cluster_for_item(brand)
                 group = _resolve_category_group(c)
                 combo_key = _get_combo_key(c, cluster)
 
@@ -238,7 +238,7 @@ class V3Reranker:
         if brand:
             brand_counts[brand] = brand_counts.get(brand, 0) + 1
 
-        cluster = get_cluster_for_item(candidate)
+        cluster = get_cluster_for_item(brand) or "unknown"
         cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
 
         group = _resolve_category_group(candidate)

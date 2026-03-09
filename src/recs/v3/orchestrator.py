@@ -264,7 +264,7 @@ class FeedOrchestrator:
             broad = c.broad_category or c.category or ""
             session.category_exposure[broad] += 1
             from recs.brand_clusters import get_cluster_for_item
-            cluster = get_cluster_for_item(c)
+            cluster = get_cluster_for_item(c.brand or "") or "unknown"
             session.cluster_exposure[cluster] += 1
 
         self.session_store.add_shown(session_id, served_ids)

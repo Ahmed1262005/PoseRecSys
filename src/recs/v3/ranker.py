@@ -150,7 +150,7 @@ class FeedRanker:
                     penalty_mult *= self.penalties.repeated_brand ** min(brand_count, 5)
 
             # Cluster fatigue
-            cluster_id = get_cluster_for_item(candidate)
+            cluster_id = get_cluster_for_item(candidate.brand or "")
             if session and cluster_id != DEFAULT_CLUSTER:
                 cluster_count = session.cluster_exposure.get(cluster_id, 0)
                 if cluster_count > 0:

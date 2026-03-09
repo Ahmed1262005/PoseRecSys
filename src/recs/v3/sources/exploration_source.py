@@ -100,8 +100,8 @@ class ExplorationSource:
         # Get adjacent brands from user's top clusters
         adjacent_brands = []
         for cluster_id, count in session.cluster_exposure.most_common(3):
-            adj = get_cluster_adjacent_brands(cluster_id)
-            adjacent_brands.extend(adj[:5])
+            adj = get_cluster_adjacent_brands([cluster_id])
+            adjacent_brands.extend(list(adj)[:5])
 
         if adjacent_brands:
             params["p_include_brands"] = list(set(adjacent_brands))[:10]
@@ -131,7 +131,7 @@ class ExplorationSource:
         low_exposure_brands = []
         for cluster_id, brands in CLUSTER_TO_BRANDS.items():
             if session.cluster_exposure.get(cluster_id, 0) < 2:
-                low_exposure_brands.extend(brands[:3])
+                low_exposure_brands.extend(list(brands)[:3])
 
         if low_exposure_brands:
             params["p_include_brands"] = list(set(low_exposure_brands))[:10]
