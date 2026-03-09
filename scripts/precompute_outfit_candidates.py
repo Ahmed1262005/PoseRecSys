@@ -385,25 +385,41 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     log.info("  %d products in %d batches", prod_total, len(prod_offsets))
 
     def _fetch_products(offset: int) -> List[dict]:
-        _sb = _new_supabase()
-        r = _sb.table("products").select(
-            _PRODUCT_COLUMNS
-        ).range(offset, offset + CATALOG_BATCH - 1).execute()
-        return r.data or []
+        """Fetch a batch of products with retry on failure."""
+        for attempt in range(3):
+            try:
+                _sb = _new_supabase()
+                r = _sb.table("products").select(
+                    _PRODUCT_COLUMNS
+                ).range(offset, offset + CATALOG_BATCH - 1).execute()
+                return r.data or []
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s
+                else:
+                    log.warning("  products batch offset=%d FAILED after 3 attempts: %s", offset, e)
+                    return []
 
     t0 = time.time()
     done = 0
+    failed_batches = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = {pool.submit(_fetch_products, off): off for off in prod_offsets}
         for future in as_completed(futures):
-            rows = future.result()
+            try:
+                rows = future.result()
+            except Exception as e:
+                failed_batches += 1
+                log.warning("  products batch FAILED: %s", e)
+                rows = []
             for row in rows:
                 pid = str(row.get("id", ""))
                 if pid:
                     product_data[pid] = row
             done += 1
             if done % 10 == 0:
-                log.info("  products: %d/%d batches, %d rows", done, len(prod_offsets), len(product_data))
+                log.info("  products: %d/%d batches, %d rows, %d failed",
+                         done, len(prod_offsets), len(product_data), failed_batches)
 
     log.info("  Products exported: %d rows in %.0fs", len(product_data), time.time() - t0)
 
@@ -417,27 +433,44 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     log.info("  %d attrs in %d batches", attrs_total, len(attrs_offsets))
 
     def _fetch_attrs(offset: int) -> List[dict]:
-        _sb = _new_supabase()
-        r = _sb.table("product_attributes").select(
-            _ATTRS_COLUMNS
-        ).range(offset, offset + CATALOG_BATCH - 1).execute()
-        return r.data or []
+        """Fetch a batch of product attributes with retry on failure."""
+        for attempt in range(3):
+            try:
+                _sb = _new_supabase()
+                r = _sb.table("product_attributes").select(
+                    _ATTRS_COLUMNS
+                ).range(offset, offset + CATALOG_BATCH - 1).execute()
+                return r.data or []
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+                else:
+                    log.warning("  attrs batch offset=%d FAILED after 3 attempts: %s", offset, e)
+                    return []
 
     t0 = time.time()
     done = 0
+    failed_batches = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = {pool.submit(_fetch_attrs, off): off for off in attrs_offsets}
         for future in as_completed(futures):
-            rows = future.result()
+            try:
+                rows = future.result()
+            except Exception as e:
+                failed_batches += 1
+                log.warning("  attrs batch FAILED: %s", e)
+                rows = []
             for row in rows:
                 pid = str(row.get("sku_id", ""))
                 if pid:
                     attrs_data[pid] = row
             done += 1
             if done % 10 == 0:
-                log.info("  attrs: %d/%d batches, %d rows", done, len(attrs_offsets), len(attrs_data))
+                log.info("  attrs: %d/%d batches, %d rows, %d failed",
+                         done, len(attrs_offsets), len(attrs_data), failed_batches)
 
-    log.info("  Attrs exported: %d rows in %.0fs", len(attrs_data), time.time() - t0)
+    log.info("  Attrs exported: %d rows in %.0fs (%d failed batches)",
+             len(attrs_data), time.time() - t0, failed_batches)
 
     # Save cache
     with open(PRODUCTS_FILE, "wb") as f:
