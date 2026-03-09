@@ -199,6 +199,26 @@ def _new_supabase():
     return create_client(s.supabase_url, s.supabase_service_key)
 
 
+def _retry_query(fn, max_retries=5, label="query"):
+    """Execute a Supabase query with retry + exponential backoff.
+
+    Handles 503 (connection pool exhausted), PGRST002, and transient errors.
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            err_str = str(e)
+            if attempt < max_retries - 1:
+                wait = min(2 ** attempt, 30)  # 1s, 2s, 4s, 8s, 16s (capped at 30s)
+                log.warning("  %s attempt %d/%d failed: %s — retrying in %ds",
+                            label, attempt + 1, max_retries, err_str[:120], wait)
+                time.sleep(wait)
+            else:
+                log.error("  %s FAILED after %d attempts: %s", label, max_retries, err_str[:200])
+                raise
+
+
 # ===========================================================================
 # Phase 1a: Export embeddings
 # ===========================================================================
@@ -222,7 +242,10 @@ def export_embeddings():
     sb = _get_supabase()
 
     # Step 1: Get total count
-    r = sb.table("image_embeddings").select("id", count="exact").limit(1).execute()
+    r = _retry_query(
+        lambda: sb.table("image_embeddings").select("id", count="exact").limit(1).execute(),
+        label="embeddings count"
+    )
     total = r.count
     log.info("Total image_embeddings rows: %d", total)
 
@@ -281,7 +304,10 @@ def export_embeddings():
         ).range(offset, offset + CATALOG_BATCH - 1).execute()
         return r.data or []
 
-    r = sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute()
+    r = _retry_query(
+        lambda: sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute(),
+        label="category mapping count"
+    )
     cat_total = r.count
     cat_offsets = list(range(0, cat_total, CATALOG_BATCH))
 
@@ -379,7 +405,10 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     log.info("Exporting products table...")
     product_data: Dict[str, dict] = {}
 
-    r = sb.table("products").select("id", count="exact").limit(1).execute()
+    r = _retry_query(
+        lambda: sb.table("products").select("id", count="exact").limit(1).execute(),
+        label="products count"
+    )
     prod_total = r.count
     prod_offsets = list(range(0, prod_total, CATALOG_BATCH))
     log.info("  %d products in %d batches", prod_total, len(prod_offsets))
@@ -421,13 +450,20 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
                 log.info("  products: %d/%d batches, %d rows, %d failed",
                          done, len(prod_offsets), len(product_data), failed_batches)
 
-    log.info("  Products exported: %d rows in %.0fs", len(product_data), time.time() - t0)
+    prod_coverage = 100 * len(product_data) / prod_total if prod_total else 0
+    log.info("  Products exported: %d/%d rows (%.0f%%) in %.0fs, %d batches failed",
+             len(product_data), prod_total, prod_coverage, time.time() - t0, failed_batches)
+    if prod_coverage < 90:
+        log.warning("  LOW COVERAGE on products: only %.0f%%. Consider WORKERS=4 to reduce throttling.", prod_coverage)
 
     # --- Export product_attributes table ---
     log.info("Exporting product_attributes table...")
     attrs_data: Dict[str, dict] = {}
 
-    r = sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute()
+    r = _retry_query(
+        lambda: sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute(),
+        label="attrs count"
+    )
     attrs_total = r.count
     attrs_offsets = list(range(0, attrs_total, CATALOG_BATCH))
     log.info("  %d attrs in %d batches", attrs_total, len(attrs_offsets))
@@ -469,8 +505,11 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
                 log.info("  attrs: %d/%d batches, %d rows, %d failed",
                          done, len(attrs_offsets), len(attrs_data), failed_batches)
 
-    log.info("  Attrs exported: %d rows in %.0fs (%d failed batches)",
-             len(attrs_data), time.time() - t0, failed_batches)
+    attrs_coverage = 100 * len(attrs_data) / attrs_total if attrs_total else 0
+    log.info("  Attrs exported: %d/%d rows (%.0f%%) in %.0fs, %d batches failed",
+             len(attrs_data), attrs_total, attrs_coverage, time.time() - t0, failed_batches)
+    if attrs_coverage < 90:
+        log.warning("  LOW COVERAGE on attrs: only %.0f%%. Consider WORKERS=4 to reduce throttling.", attrs_coverage)
 
     # Save cache
     with open(PRODUCTS_FILE, "wb") as f:
