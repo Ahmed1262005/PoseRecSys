@@ -785,6 +785,44 @@ class RecommendationPipeline:
                 return vals
             return [v.title() for v in vals]
 
+        # Style tag alias map: common shorthand -> exact DB value.
+        # DB values: Trendy, Chic, Classic, Relaxed, Modern, Minimalist,
+        # Glamorous, Casual, Romantic, Tailored, Streetwear, Sporty, Edgy,
+        # Bohemian, Preppy, Athleisure, Vintage, Utility, Party, Cottagecore
+        _STYLE_TAG_ALIASES = {
+            "boho": "Bohemian", "bohemian": "Bohemian",
+            "street": "Streetwear", "streetwear": "Streetwear",
+            "minimal": "Minimalist", "minimalist": "Minimalist",
+            "glam": "Glamorous", "glamorous": "Glamorous",
+            "sporty": "Sporty", "athletic": "Sporty",
+            "athleisure": "Athleisure", "activewear": "Athleisure",
+            "preppy": "Preppy", "prep": "Preppy",
+            "edgy": "Edgy", "punk": "Edgy",
+            "romantic": "Romantic", "feminine": "Romantic",
+            "vintage": "Vintage", "retro": "Vintage",
+            "classic": "Classic", "timeless": "Classic",
+            "trendy": "Trendy", "modern": "Modern",
+            "chic": "Chic", "elegant": "Chic",
+            "casual": "Casual", "relaxed": "Relaxed",
+            "tailored": "Tailored", "structured": "Tailored",
+            "utility": "Utility", "utilitarian": "Utility",
+            "party": "Party", "going-out": "Party",
+            "cottagecore": "Cottagecore",
+        }
+
+        def _normalize_style_tags(vals):
+            """Resolve style tag aliases to exact DB values."""
+            if not vals:
+                return vals
+            result = []
+            for v in vals:
+                canonical = _STYLE_TAG_ALIASES.get(v.lower().strip())
+                if canonical:
+                    result.append(canonical)
+                else:
+                    result.append(v.title())  # Fallback to title-case
+            return list(dict.fromkeys(result)) if result else None  # dedupe
+
         # Handle cross-dimension routing FIRST (before occasion expansion)
         # e.g., "smart-casual" should add formality filter, not occasion filter.
         # Values that are purely cross-dimensional are removed from the occasion list.
@@ -840,8 +878,8 @@ class RecommendationPipeline:
             attr_exclude_formality=_tc(exclude_formality),
             attr_include_seasons=_tc(include_seasons),
             attr_exclude_seasons=_tc(exclude_seasons),
-            attr_include_style_tags=_tc(include_style_tags),
-            attr_exclude_style_tags=_tc(exclude_style_tags),
+            attr_include_style_tags=_normalize_style_tags(include_style_tags),
+            attr_exclude_style_tags=_normalize_style_tags(exclude_style_tags),
             attr_include_color_family=_tc(include_color_family),
             attr_exclude_color_family=_tc(exclude_color_family),
             attr_include_silhouette=_tc(include_silhouette),
@@ -1414,6 +1452,37 @@ class RecommendationPipeline:
                 return vals
             return [v.title() for v in vals]
 
+        # Style tag alias map (same as relevance path)
+        _STYLE_TAG_ALIASES = {
+            "boho": "Bohemian", "bohemian": "Bohemian",
+            "street": "Streetwear", "streetwear": "Streetwear",
+            "minimal": "Minimalist", "minimalist": "Minimalist",
+            "glam": "Glamorous", "glamorous": "Glamorous",
+            "sporty": "Sporty", "athletic": "Sporty",
+            "athleisure": "Athleisure", "activewear": "Athleisure",
+            "preppy": "Preppy", "prep": "Preppy",
+            "edgy": "Edgy", "punk": "Edgy",
+            "romantic": "Romantic", "feminine": "Romantic",
+            "vintage": "Vintage", "retro": "Vintage",
+            "classic": "Classic", "timeless": "Classic",
+            "trendy": "Trendy", "modern": "Modern",
+            "chic": "Chic", "elegant": "Chic",
+            "casual": "Casual", "relaxed": "Relaxed",
+            "tailored": "Tailored", "structured": "Tailored",
+            "utility": "Utility", "utilitarian": "Utility",
+            "party": "Party", "going-out": "Party",
+            "cottagecore": "Cottagecore",
+        }
+
+        def _normalize_style_tags(vals):
+            if not vals:
+                return vals
+            result = []
+            for v in vals:
+                canonical = _STYLE_TAG_ALIASES.get(v.lower().strip())
+                result.append(canonical if canonical else v.title())
+            return list(dict.fromkeys(result)) if result else None
+
         _OCCASION_EXPANSION = {
             'casual': ['Everyday', 'Weekend', 'Brunch', 'Casual Outings'],
             'active': ['Workout'], 'activewear': ['Workout'],
@@ -1472,8 +1541,8 @@ class RecommendationPipeline:
             attr_exclude_formality=_tc(exclude_formality),
             attr_include_seasons=_tc(include_seasons),
             attr_exclude_seasons=_tc(exclude_seasons),
-            attr_include_style_tags=_tc(include_style_tags),
-            attr_exclude_style_tags=_tc(exclude_style_tags),
+            attr_include_style_tags=_normalize_style_tags(include_style_tags),
+            attr_exclude_style_tags=_normalize_style_tags(exclude_style_tags),
             attr_include_color_family=_tc(include_color_family),
             attr_exclude_color_family=_tc(exclude_color_family),
             attr_include_silhouette=_tc(include_silhouette),
