@@ -282,10 +282,17 @@ class FeedRanker:
         session_scores: Optional[Any] = None,
     ) -> None:
         """
-        Re-score remaining pool items using ScoringMeta only.
+        Re-score remaining pool items using ScoringMeta + session fatigue.
 
         Called when should_rerank() is true. Updates scores and
         reorders remaining items. No database queries.
+
+        Drift signals used (all from ScoringMeta + SessionProfile):
+          - retrieval_score: base relevance from source RPC
+          - brand fatigue: repeated_brand penalty from session.brand_exposure
+          - cluster fatigue: repeated_cluster penalty from session.cluster_exposure
+          - category fatigue: repeated_category penalty from session.category_exposure
+          - session_scores: optional blended scores from scoring_engine
         """
         # Only re-rank remaining (unserved) items
         start = pool.served_count
@@ -294,7 +301,7 @@ class FeedRanker:
         if not remaining_ids:
             return
 
-        # Compute blended session scores
+        # Compute blended session scores (from external scoring engine, if any)
         blended = None
         if self.scoring_engine and session_scores:
             try:
@@ -309,13 +316,42 @@ class FeedRanker:
                 new_scores[item_id] = 0.0
                 continue
 
-            # Blend retrieval score + session-aligned score
+            # Base score from retrieval
             retrieval = meta.retrieval_score
+
+            # Session-aligned score from blended signals (0.0 if no scoring engine)
             session_score = self._score_from_meta(
                 blended, meta.brand, meta.cluster_id,
                 meta.broad_category, meta.article_type,
             )
-            new_scores[item_id] = 0.6 * retrieval + 0.4 * session_score
+
+            score = 0.6 * retrieval + 0.4 * session_score
+
+            # Apply session fatigue penalties (mirrors rank() penalties)
+            penalty_mult = 1.0
+
+            # Brand fatigue
+            brand_lower = meta.brand.lower() if meta.brand else ""
+            if brand_lower:
+                brand_count = session.brand_exposure.get(brand_lower, 0)
+                if brand_count > 0:
+                    penalty_mult *= self.penalties.repeated_brand ** min(brand_count, 5)
+
+            # Cluster fatigue
+            cluster_id = meta.cluster_id or ""
+            if cluster_id and cluster_id != DEFAULT_CLUSTER:
+                cluster_count = session.cluster_exposure.get(cluster_id, 0)
+                if cluster_count > 0:
+                    penalty_mult *= self.penalties.repeated_cluster ** min(cluster_count, 5)
+
+            # Category fatigue
+            article_type = meta.article_type or ""
+            if article_type:
+                cat_count = session.category_exposure.get(article_type, 0)
+                if cat_count > 0:
+                    penalty_mult *= self.penalties.repeated_category
+
+            new_scores[item_id] = max(0.0, score * penalty_mult)
 
         # Re-sort remaining IDs by new scores
         remaining_ids.sort(

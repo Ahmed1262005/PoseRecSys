@@ -529,6 +529,7 @@ class FeedOrchestrator:
         validated = []
         page_image_hashes: Set[str] = set()
         _pool_ids = pool_id_set or set()
+        neg_brands = session.explicit_negative_brands
 
         for c in candidates:
             # Check hidden
@@ -537,6 +538,11 @@ class FeedOrchestrator:
             # Check shown — but exempt items from the current pool
             if c.item_id in shown_set and c.item_id not in _pool_ids:
                 continue
+            # Check negative brands (formed mid-session from repeated hides)
+            if neg_brands and c.brand:
+                brand_lower = c.brand.lower()
+                if any(nb.lower() in brand_lower or brand_lower in nb.lower() for nb in neg_brands):
+                    continue
             # Image dedup within page
             img_hash = extract_image_hash(c.image_url)
             if img_hash and img_hash in page_image_hashes:
