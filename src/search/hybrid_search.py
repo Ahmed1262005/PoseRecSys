@@ -326,6 +326,11 @@ class HybridSearchService:
             # ---------------------------------------------------------
             # Filter application strategy per intent:
             #
+            # EXACT: Only keep brand + price filters. The LLM often
+            #   guesses category/style for the brand (e.g. "Outdoor
+            #   Voices" → Activewear) which becomes a hard Algolia
+            #   filter and over-restricts results.
+            #
             # VAGUE: Keep structural filters (category, formality,
             #   occasions) and mode exclusions.  Strip subjective
             #   visual attributes (colors, patterns, materials, etc.)
@@ -334,8 +339,6 @@ class HybridSearchService:
             # SPECIFIC: Apply ALL filters including mode exclusions.
             #   Mode exclusions (modest, work, etc.) are important
             #   safety/appropriateness constraints.
-            #
-            # EXACT: Apply filters normally.
             # ---------------------------------------------------------
 
             # Subjective visual attributes to strip for VAGUE queries.
@@ -349,7 +352,37 @@ class HybridSearchService:
                 "versatility_scores",
             }
 
-            if intent_str == "vague":
+            # Keys to KEEP for EXACT intent (pure brand search).
+            # Everything else is the LLM guessing what the brand
+            # sells — those guesses become hard Algolia filters
+            # that over-restrict results (e.g. "Outdoor Voices" →
+            # category_l1=Activewear → only 2 hits).
+            _EXACT_KEEP_KEYS = {
+                "brands", "exclude_brands",
+                "min_price", "max_price", "on_sale_only",
+            }
+
+            if intent_str == "exact":
+                # Pure brand search — only apply brand + price filters.
+                preserved = {}
+                skipped = {}
+                for k, v in plan_updates.items():
+                    if k in _EXACT_KEEP_KEYS:
+                        if not getattr(request, k, None):
+                            preserved[k] = v
+                    else:
+                        skipped[k] = v
+                updates = preserved
+                if updates:
+                    request = request.model_copy(update=updates)
+                if skipped:
+                    logger.info(
+                        "Exact brand query — stripped non-brand filters",
+                        query=request.query,
+                        preserved_filters=list(preserved.keys()),
+                        skipped_filters=list(skipped.keys()),
+                    )
+            elif intent_str == "vague":
                 # Keep structural + safety filters; strip subjective visuals
                 preserved = {}
                 skipped = {}
@@ -369,7 +402,7 @@ class HybridSearchService:
                     semantic_queries=semantic_queries,
                 )
             else:
-                # SPECIFIC / EXACT: apply ALL planner filters including
+                # SPECIFIC: apply ALL planner filters including
                 # mode-derived exclusions (no longer stripped).
                 updates = {}
                 for field, values in plan_updates.items():
