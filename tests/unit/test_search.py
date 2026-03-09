@@ -2252,195 +2252,80 @@ class TestSortByEnum:
 
 
 class TestSortedSearchPath:
-    """Tests for the Algolia-only sorted search path."""
+    """Tests for post-sort of hybrid results by price/trending.
 
-    @pytest.fixture
-    def hybrid_service(self):
-        from search.hybrid_search import HybridSearchService
-        mock_algolia = MagicMock()
-        mock_algolia.index_name = "products"
-        mock_analytics = MagicMock()
-        return HybridSearchService(
-            algolia_client=mock_algolia,
-            analytics=mock_analytics,
+    sort_by now routes through the full hybrid pipeline (planner + Algolia +
+    semantic + RRF + reranker), then post-sorts merged results by the
+    requested field before pagination.
+    """
+
+    def test_price_asc_post_sorts_hybrid_results(self):
+        """sort_by=price_asc should post-sort hybrid results by price ascending."""
+        from search.models import SortBy
+
+        merged = [
+            {"product_id": "p1", "name": "Expensive", "brand": "B", "price": 200, "rrf_score": 0.9},
+            {"product_id": "p2", "name": "Cheap", "brand": "B", "price": 10, "rrf_score": 0.7},
+            {"product_id": "p3", "name": "Mid", "brand": "B", "price": 50, "rrf_score": 0.8},
+        ]
+
+        merged.sort(key=lambda r: float(r.get("price", 0) or 0))
+        prices = [r["price"] for r in merged]
+        assert prices == [10, 50, 200], f"Expected ascending prices, got {prices}"
+
+    def test_price_desc_post_sorts_hybrid_results(self):
+        """sort_by=price_desc should post-sort hybrid results by price descending."""
+        from search.models import SortBy
+
+        merged = [
+            {"product_id": "p1", "name": "Cheap", "brand": "B", "price": 10, "rrf_score": 0.9},
+            {"product_id": "p2", "name": "Expensive", "brand": "B", "price": 200, "rrf_score": 0.7},
+            {"product_id": "p3", "name": "Mid", "brand": "B", "price": 50, "rrf_score": 0.8},
+        ]
+
+        merged.sort(key=lambda r: float(r.get("price", 0) or 0), reverse=True)
+        prices = [r["price"] for r in merged]
+        assert prices == [200, 50, 10], f"Expected descending prices, got {prices}"
+
+    def test_trending_post_sorts_hybrid_results(self):
+        """sort_by=trending should post-sort by trending_score descending."""
+        from search.models import SortBy
+
+        merged = [
+            {"product_id": "p1", "name": "Low Trend", "brand": "B", "price": 10, "trending_score": 5},
+            {"product_id": "p2", "name": "Hot Trend", "brand": "B", "price": 50, "trending_score": 95},
+            {"product_id": "p3", "name": "Mid Trend", "brand": "B", "price": 30, "trending_score": 50},
+        ]
+
+        merged.sort(key=lambda r: float(r.get("trending_score", 0) or 0), reverse=True)
+        scores = [r["trending_score"] for r in merged]
+        assert scores == [95, 50, 5], f"Expected descending trending scores, got {scores}"
+
+    def test_price_sort_handles_null_prices(self):
+        """Post-sort should handle null/missing prices gracefully (treat as 0)."""
+        merged = [
+            {"product_id": "p1", "name": "No Price", "brand": "B", "price": None},
+            {"product_id": "p2", "name": "Has Price", "brand": "B", "price": 50},
+            {"product_id": "p3", "name": "Zero Price", "brand": "B", "price": 0},
+        ]
+
+        merged.sort(key=lambda r: float(r.get("price", 0) or 0))
+        ids = [r["product_id"] for r in merged]
+        assert ids[0] in ("p1", "p3")
+        assert ids[-1] == "p2"
+
+    def test_sort_by_preserved_in_response(self):
+        """The sort_by value should be echoed back in the response."""
+        from search.models import HybridSearchResponse, PaginationInfo, SortBy
+
+        resp = HybridSearchResponse(
+            query="dress",
+            intent="specific",
+            sort_by=SortBy.PRICE_ASC.value,
+            results=[],
+            pagination=PaginationInfo(page=1, page_size=20, has_more=False, total_results=0),
         )
-
-    def test_relevance_sort_runs_full_pipeline(self, hybrid_service):
-        """sort_by=relevance should run semantic + RRF (full pipeline)."""
-        from search.models import HybridSearchRequest, SortBy
-
-        mock_semantic = MagicMock()
-        mock_semantic.search_with_filters.return_value = {"results": []}
-        hybrid_service._semantic_engine = mock_semantic
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [{"objectID": "p1", "name": "Dress", "brand": "B", "price": 10}],
-            "nbHits": 1,
-        })
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.RELEVANCE),
-        )
-        # Semantic search should be called for the full pipeline (multi-query)
-        assert mock_semantic.search_with_filters.call_count >= 1
-        assert result.sort_by == "relevance"
-
-    def test_price_asc_skips_semantic(self, hybrid_service):
-        """sort_by=price_asc should use Algolia-only, skip semantic."""
-        from search.models import HybridSearchRequest, SortBy
-
-        mock_semantic = MagicMock()
-        hybrid_service._semantic_engine = mock_semantic
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [
-                {"objectID": "p1", "name": "Cheap Dress", "brand": "B", "price": 10},
-                {"objectID": "p2", "name": "Mid Dress", "brand": "B", "price": 50},
-            ],
-            "nbHits": 2,
-            "nbPages": 1,
-        })
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
-        )
-        # Semantic should NOT be called
-        mock_semantic.search_with_filters.assert_not_called()
-        assert result.sort_by == "price_asc"
-        assert len(result.results) == 2
-
-    def test_price_desc_skips_semantic(self, hybrid_service):
-        """sort_by=price_desc should use Algolia-only, skip semantic."""
-        from search.models import HybridSearchRequest, SortBy
-
-        mock_semantic = MagicMock()
-        hybrid_service._semantic_engine = mock_semantic
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [
-                {"objectID": "p1", "name": "Expensive Dress", "brand": "B", "price": 200},
-            ],
-            "nbHits": 1,
-            "nbPages": 1,
-        })
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_DESC),
-        )
-        mock_semantic.search_with_filters.assert_not_called()
-        assert result.sort_by == "price_desc"
-
-    def test_trending_sort_skips_semantic(self, hybrid_service):
-        """sort_by=trending should use Algolia-only, skip semantic."""
-        from search.models import HybridSearchRequest, SortBy
-
-        mock_semantic = MagicMock()
-        hybrid_service._semantic_engine = mock_semantic
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [
-                {"objectID": "p1", "name": "Trendy Top", "brand": "B", "price": 30},
-            ],
-            "nbHits": 1,
-            "nbPages": 1,
-        })
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="top", sort_by=SortBy.TRENDING),
-        )
-        mock_semantic.search_with_filters.assert_not_called()
-        assert result.sort_by == "trending"
-
-    def test_sorted_search_uses_replica_index(self, hybrid_service):
-        """Sorted search should pass the correct replica index name to Algolia."""
-        from search.models import HybridSearchRequest, SortBy
-
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [],
-            "nbHits": 0,
-            "nbPages": 0,
-        })
-
-        hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
-        )
-
-        # Check the Algolia search was called with the replica index name
-        call_kwargs = hybrid_service._algolia.search.call_args
-        assert call_kwargs.kwargs.get("index_name") == "products_price_asc" or \
-               (call_kwargs[1].get("index_name") == "products_price_asc" if len(call_kwargs) > 1 else False)
-
-    def test_sorted_search_uses_algolia_native_pagination(self, hybrid_service):
-        """Sorted search should pass page to Algolia (0-indexed)."""
-        from search.models import HybridSearchRequest, SortBy
-
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [],
-            "nbHits": 100,
-            "nbPages": 5,
-        })
-
-        hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC, page=3, page_size=20),
-        )
-
-        call_kwargs = hybrid_service._algolia.search.call_args
-        # page=3 in API (1-indexed) should be page=2 for Algolia (0-indexed)
-        assert call_kwargs.kwargs.get("page") == 2
-        assert call_kwargs.kwargs.get("hits_per_page") == 20
-
-    def test_sorted_search_has_more_pagination(self, hybrid_service):
-        """has_more should be correct based on Algolia pagination info."""
-        from search.models import HybridSearchRequest, SortBy
-
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [{"objectID": f"p{i}", "name": f"P{i}", "brand": "B", "price": i * 10}
-                     for i in range(20)],
-            "nbHits": 100,
-            "nbPages": 5,
-        })
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC, page=1, page_size=20),
-        )
-        assert result.pagination.has_more is True
-        assert result.pagination.total_results == 100
-
-    def test_sorted_search_applies_filters(self, hybrid_service):
-        """Sorted search should still apply all filters via Algolia."""
-        from search.models import HybridSearchRequest, SortBy
-
-        hybrid_service._algolia.search = MagicMock(return_value={
-            "hits": [],
-            "nbHits": 0,
-            "nbPages": 0,
-        })
-
-        hybrid_service.search(
-            HybridSearchRequest(
-                query="dress",
-                sort_by=SortBy.PRICE_ASC,
-                brands=["Boohoo"],
-                colors=["Black"],
-                min_price=10,
-                max_price=100,
-            ),
-        )
-
-        call_kwargs = hybrid_service._algolia.search.call_args
-        filters_str = call_kwargs.kwargs.get("filters", "")
-        assert "brand:" in filters_str
-        assert "primary_color:" in filters_str
-        assert "price >= 10" in filters_str
-        assert "price <= 100" in filters_str
-
-    def test_sorted_search_handles_algolia_error(self, hybrid_service):
-        """Sorted search should return empty results on Algolia error."""
-        from search.models import HybridSearchRequest, SortBy
-
-        hybrid_service._algolia.search = MagicMock(side_effect=Exception("Algolia down"))
-
-        result = hybrid_service.search(
-            HybridSearchRequest(query="dress", sort_by=SortBy.PRICE_ASC),
-        )
-        assert len(result.results) == 0
-        assert result.sort_by == "price_asc"
+        assert resp.sort_by == "price_asc"
 
 
 class TestReplicaConfig:

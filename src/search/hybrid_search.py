@@ -161,13 +161,13 @@ class HybridSearchService:
             request = request.model_copy(update={"query": clean_query})
 
         # -----------------------------------------------------------------
-        # SORT-MODE FAST PATH
-        # When sort_by is not "relevance", use Algolia-only via a virtual
-        # replica index. Skip semantic search, RRF merge, and reranker —
-        # they would break the deterministic sort order.
+        # SORT-MODE: handled via post-sort after hybrid merge+rerank.
+        # The full pipeline runs normally (planner + Algolia + semantic +
+        # RRF + reranker), then results are sorted by price/trending
+        # before pagination. This gives rich hybrid candidates instead
+        # of the Algolia-only path which over-filters on vague queries.
+        # _search_sorted() is kept as a legacy fallback but not routed to.
         # -----------------------------------------------------------------
-        if request.sort_by != SortBy.RELEVANCE:
-            return self._search_sorted(request, user_id)
 
         # -----------------------------------------------------------------
         # CACHED PAGINATION FAST PATH
@@ -1040,7 +1040,15 @@ class HybridSearchService:
                 )
                 merged = interleaved
 
-        # Step 7: Paginate
+        # Step 7a: Post-sort by price/trending if requested
+        if request.sort_by == SortBy.PRICE_ASC:
+            merged.sort(key=lambda r: float(r.get("price", 0) or 0))
+        elif request.sort_by == SortBy.PRICE_DESC:
+            merged.sort(key=lambda r: float(r.get("price", 0) or 0), reverse=True)
+        elif request.sort_by == SortBy.TRENDING:
+            merged.sort(key=lambda r: float(r.get("trending_score", 0) or 0), reverse=True)
+
+        # Step 7b: Paginate
         start_idx = (request.page - 1) * request.page_size
         page_results = merged[start_idx : start_idx + request.page_size]
         has_more = len(merged) > start_idx + request.page_size
@@ -1417,6 +1425,16 @@ class HybridSearchService:
             # Use cumulative seen_ids for session dedup
             rerank_args["seen_ids"] = entry.seen_product_ids
             merged = self._reranker.rerank(**rerank_args)
+
+        # -----------------------------------------------------------------
+        # Post-sort by price/trending if requested
+        # -----------------------------------------------------------------
+        if entry.sort_by == SortBy.PRICE_ASC.value:
+            merged.sort(key=lambda r: float(r.get("price", 0) or 0))
+        elif entry.sort_by == SortBy.PRICE_DESC.value:
+            merged.sort(key=lambda r: float(r.get("price", 0) or 0), reverse=True)
+        elif entry.sort_by == SortBy.TRENDING.value:
+            merged.sort(key=lambda r: float(r.get("trending_score", 0) or 0), reverse=True)
 
         # -----------------------------------------------------------------
         # Paginate + format
