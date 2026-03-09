@@ -37,8 +37,38 @@ OUTPUT_FILE = ROOT / "scripts" / "outfit_quality_report.html"
 
 
 def fetch_random_product_ids(sb, n: int = 50) -> list:
-    """Get random in-stock tops product IDs (no dresses)."""
-    # Get a larger pool and sample from it
+    """Get random product IDs that have precomputed outfit pools (no dresses).
+
+    Prefers products with precomputed pools so the fast Strategy P path
+    fires. Falls back to random in-stock tops if the outfit_candidates
+    table is empty or doesn't exist.
+    """
+    try:
+        # Pick source_ids that have precomputed pools (exclude dresses)
+        r = sb.rpc("get_precomputed_source_ids", {"p_limit": n * 5}).execute()
+        if r.data:
+            ids = [row["source_id"] for row in r.data]
+            random.shuffle(ids)
+            logger.info("Using %d products with precomputed pools", min(len(ids), n))
+            return ids[:n]
+    except Exception:
+        pass
+
+    # Fallback: query outfit_candidates directly for distinct source_ids
+    try:
+        r = sb.table("outfit_candidates").select(
+            "source_id"
+        ).neq("target_category", "dresses").limit(n * 10).execute()
+        if r.data:
+            ids = list({row["source_id"] for row in r.data})
+            random.shuffle(ids)
+            logger.info("Using %d products from outfit_candidates table", min(len(ids), n))
+            return ids[:n]
+    except Exception:
+        pass
+
+    # Final fallback: random in-stock tops
+    logger.info("No precomputed pools found, falling back to random tops")
     r = sb.table("products").select("id").eq("in_stock", True).eq(
         "category", "tops"
     ).limit(500).execute()
@@ -123,6 +153,7 @@ def build_html(results: list, total_time: float) -> str:
         elapsed = r.get("elapsed", 0)
 
         styling_on = info.get("styling_scorer", False)
+        retrieval = info.get("retrieval_strategies", {})
         badges = f"<b>{engine_ver}</b>"
         if styling_on:
             badges += " | styling scorer ON"
@@ -130,6 +161,10 @@ def build_html(results: list, total_time: float) -> str:
             badges += " | stylist judge ON"
         if outfit_ranked:
             badges += " | outfit ranked"
+        # Show retrieval strategy per category
+        for cat, strat in retrieval.items():
+            color = "#238636" if strat == "precomputed" else "#d29922"
+            badges += f' | <span style="color:{color}">{cat}={strat}</span>'
 
         html += f"""
 <div class="outfit">
