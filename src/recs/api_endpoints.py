@@ -1648,6 +1648,32 @@ async def get_sale_items(
     include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    # Attribute filters (parity with /feed/keyset)
+    include_formality: Optional[str] = Query(None, description="Comma-separated formality levels to include"),
+    exclude_formality: Optional[str] = Query(None, description="Comma-separated formality levels to exclude"),
+    include_seasons: Optional[str] = Query(None, description="Comma-separated seasons to include"),
+    exclude_seasons: Optional[str] = Query(None, description="Comma-separated seasons to exclude"),
+    include_style_tags: Optional[str] = Query(None, description="Comma-separated styles to include (Classic, Trendy, Bohemian, Romantic, etc.)"),
+    exclude_style_tags: Optional[str] = Query(None, description="Comma-separated styles to exclude"),
+    include_color_family: Optional[str] = Query(None, description="Comma-separated color families to include"),
+    exclude_color_family: Optional[str] = Query(None, description="Comma-separated color families to exclude"),
+    include_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to include"),
+    exclude_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to exclude"),
+    include_fit: Optional[str] = Query(None, description="Comma-separated fits to include"),
+    exclude_fit: Optional[str] = Query(None, description="Comma-separated fits to exclude"),
+    include_length: Optional[str] = Query(None, description="Comma-separated lengths to include"),
+    exclude_length: Optional[str] = Query(None, description="Comma-separated lengths to exclude"),
+    include_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to include"),
+    exclude_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to exclude"),
+    include_neckline: Optional[str] = Query(None, description="Comma-separated necklines to include"),
+    exclude_neckline: Optional[str] = Query(None, description="Comma-separated necklines to exclude"),
+    include_rise: Optional[str] = Query(None, description="Comma-separated rises to include"),
+    exclude_rise: Optional[str] = Query(None, description="Comma-separated rises to exclude"),
+    include_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to include"),
+    exclude_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to exclude"),
+    include_materials: Optional[str] = Query(None, description="Comma-separated materials to include"),
+    exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
+    exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
@@ -1666,16 +1692,19 @@ async def get_sale_items(
     pipeline = get_pipeline()
 
     # Parse comma-separated filters
-    cat_list = [c.strip() for c in categories.split(",")] if categories else None
-    article_type_list = [a.strip() for a in article_types.split(",")] if article_types else None
-    exclude_styles_list = [s.strip() for s in exclude_styles.split(",")] if exclude_styles else None
-    include_occasions_list = [o.strip() for o in include_occasions.split(",")] if include_occasions else None
-    exclude_brands_list = [b.strip() for b in exclude_brands.split(",")] if exclude_brands else None
-    include_brands_list = [b.strip() for b in include_brands.split(",")] if include_brands else None
-    exclude_colors_list = [c.strip() for c in exclude_colors.split(",")] if exclude_colors else None
-    include_colors_list = [c.strip() for c in include_colors.split(",")] if include_colors else None
-    include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
-    exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
+    def _parse_csv(val: Optional[str]) -> Optional[list]:
+        return [v.strip() for v in val.split(",")] if val else None
+
+    cat_list = _parse_csv(categories)
+    article_type_list = _parse_csv(article_types)
+    exclude_styles_list = _parse_csv(exclude_styles)
+    include_occasions_list = _parse_csv(include_occasions)
+    exclude_brands_list = _parse_csv(exclude_brands)
+    include_brands_list = _parse_csv(include_brands)
+    exclude_colors_list = _parse_csv(exclude_colors)
+    include_colors_list = _parse_csv(include_colors)
+    include_patterns_list = _parse_csv(include_patterns)
+    exclude_patterns_list = _parse_csv(exclude_patterns)
 
     response = pipeline.get_feed_keyset(
         user_id=user_id,
@@ -1700,6 +1729,32 @@ async def get_sale_items(
         user_metadata=user.user_metadata,
         debug=debug,
         sort_by=feed_sort_by,
+        # Attribute filters
+        include_formality=_parse_csv(include_formality),
+        exclude_formality=_parse_csv(exclude_formality),
+        include_seasons=_parse_csv(include_seasons),
+        exclude_seasons=_parse_csv(exclude_seasons),
+        include_style_tags=_parse_csv(include_style_tags),
+        exclude_style_tags=_parse_csv(exclude_style_tags),
+        include_color_family=_parse_csv(include_color_family),
+        exclude_color_family=_parse_csv(exclude_color_family),
+        include_silhouette=_parse_csv(include_silhouette),
+        exclude_silhouette=_parse_csv(exclude_silhouette),
+        include_fit=_parse_csv(include_fit),
+        exclude_fit=_parse_csv(exclude_fit),
+        include_length=_parse_csv(include_length),
+        exclude_length=_parse_csv(exclude_length),
+        include_sleeves=_parse_csv(include_sleeves),
+        exclude_sleeves=_parse_csv(exclude_sleeves),
+        include_neckline=_parse_csv(include_neckline),
+        exclude_neckline=_parse_csv(exclude_neckline),
+        include_rise=_parse_csv(include_rise),
+        exclude_rise=_parse_csv(exclude_rise),
+        include_coverage=_parse_csv(include_coverage),
+        exclude_coverage=_parse_csv(exclude_coverage),
+        include_materials=_parse_csv(include_materials),
+        exclude_materials=_parse_csv(exclude_materials_filter),
+        exclude_occasions=_parse_csv(exclude_occasions),
     )
 
     # Auto-persist seen_ids in background
@@ -1749,6 +1804,32 @@ async def get_new_arrivals(
     include_colors: Optional[str] = Query(None, description="Comma-separated colors to include"),
     include_patterns: Optional[str] = Query(None, description="Comma-separated patterns to prefer"),
     exclude_patterns: Optional[str] = Query(None, description="Comma-separated patterns to avoid"),
+    # Attribute filters (parity with /feed/keyset)
+    include_formality: Optional[str] = Query(None, description="Comma-separated formality levels to include"),
+    exclude_formality: Optional[str] = Query(None, description="Comma-separated formality levels to exclude"),
+    include_seasons: Optional[str] = Query(None, description="Comma-separated seasons to include"),
+    exclude_seasons: Optional[str] = Query(None, description="Comma-separated seasons to exclude"),
+    include_style_tags: Optional[str] = Query(None, description="Comma-separated styles to include (Classic, Trendy, Bohemian, Romantic, etc.)"),
+    exclude_style_tags: Optional[str] = Query(None, description="Comma-separated styles to exclude"),
+    include_color_family: Optional[str] = Query(None, description="Comma-separated color families to include"),
+    exclude_color_family: Optional[str] = Query(None, description="Comma-separated color families to exclude"),
+    include_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to include"),
+    exclude_silhouette: Optional[str] = Query(None, description="Comma-separated silhouettes to exclude"),
+    include_fit: Optional[str] = Query(None, description="Comma-separated fits to include"),
+    exclude_fit: Optional[str] = Query(None, description="Comma-separated fits to exclude"),
+    include_length: Optional[str] = Query(None, description="Comma-separated lengths to include"),
+    exclude_length: Optional[str] = Query(None, description="Comma-separated lengths to exclude"),
+    include_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to include"),
+    exclude_sleeves: Optional[str] = Query(None, description="Comma-separated sleeves to exclude"),
+    include_neckline: Optional[str] = Query(None, description="Comma-separated necklines to include"),
+    exclude_neckline: Optional[str] = Query(None, description="Comma-separated necklines to exclude"),
+    include_rise: Optional[str] = Query(None, description="Comma-separated rises to include"),
+    exclude_rise: Optional[str] = Query(None, description="Comma-separated rises to exclude"),
+    include_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to include"),
+    exclude_coverage: Optional[str] = Query(None, description="Comma-separated coverage levels to exclude"),
+    include_materials: Optional[str] = Query(None, description="Comma-separated materials to include"),
+    exclude_materials_filter: Optional[str] = Query(None, alias="exclude_materials", description="Comma-separated materials to exclude"),
+    exclude_occasions: Optional[str] = Query(None, description="Comma-separated occasions to exclude"),
     sort_by: str = Query("relevance", description="Sort mode: relevance (default), price_asc, price_desc"),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (for pagination)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page"),
@@ -1767,16 +1848,19 @@ async def get_new_arrivals(
     pipeline = get_pipeline()
 
     # Parse comma-separated filters
-    cat_list = [c.strip() for c in categories.split(",")] if categories else None
-    article_type_list = [a.strip() for a in article_types.split(",")] if article_types else None
-    exclude_styles_list = [s.strip() for s in exclude_styles.split(",")] if exclude_styles else None
-    include_occasions_list = [o.strip() for o in include_occasions.split(",")] if include_occasions else None
-    exclude_brands_list = [b.strip() for b in exclude_brands.split(",")] if exclude_brands else None
-    include_brands_list = [b.strip() for b in include_brands.split(",")] if include_brands else None
-    exclude_colors_list = [c.strip() for c in exclude_colors.split(",")] if exclude_colors else None
-    include_colors_list = [c.strip() for c in include_colors.split(",")] if include_colors else None
-    include_patterns_list = [p.strip() for p in include_patterns.split(",")] if include_patterns else None
-    exclude_patterns_list = [p.strip() for p in exclude_patterns.split(",")] if exclude_patterns else None
+    def _parse_csv(val: Optional[str]) -> Optional[list]:
+        return [v.strip() for v in val.split(",")] if val else None
+
+    cat_list = _parse_csv(categories)
+    article_type_list = _parse_csv(article_types)
+    exclude_styles_list = _parse_csv(exclude_styles)
+    include_occasions_list = _parse_csv(include_occasions)
+    exclude_brands_list = _parse_csv(exclude_brands)
+    include_brands_list = _parse_csv(include_brands)
+    exclude_colors_list = _parse_csv(exclude_colors)
+    include_colors_list = _parse_csv(include_colors)
+    include_patterns_list = _parse_csv(include_patterns)
+    exclude_patterns_list = _parse_csv(exclude_patterns)
 
     response = pipeline.get_feed_keyset(
         user_id=user_id,
@@ -1801,6 +1885,32 @@ async def get_new_arrivals(
         user_metadata=user.user_metadata,
         debug=debug,
         sort_by=feed_sort_by,
+        # Attribute filters
+        include_formality=_parse_csv(include_formality),
+        exclude_formality=_parse_csv(exclude_formality),
+        include_seasons=_parse_csv(include_seasons),
+        exclude_seasons=_parse_csv(exclude_seasons),
+        include_style_tags=_parse_csv(include_style_tags),
+        exclude_style_tags=_parse_csv(exclude_style_tags),
+        include_color_family=_parse_csv(include_color_family),
+        exclude_color_family=_parse_csv(exclude_color_family),
+        include_silhouette=_parse_csv(include_silhouette),
+        exclude_silhouette=_parse_csv(exclude_silhouette),
+        include_fit=_parse_csv(include_fit),
+        exclude_fit=_parse_csv(exclude_fit),
+        include_length=_parse_csv(include_length),
+        exclude_length=_parse_csv(exclude_length),
+        include_sleeves=_parse_csv(include_sleeves),
+        exclude_sleeves=_parse_csv(exclude_sleeves),
+        include_neckline=_parse_csv(include_neckline),
+        exclude_neckline=_parse_csv(exclude_neckline),
+        include_rise=_parse_csv(include_rise),
+        exclude_rise=_parse_csv(exclude_rise),
+        include_coverage=_parse_csv(include_coverage),
+        exclude_coverage=_parse_csv(exclude_coverage),
+        include_materials=_parse_csv(include_materials),
+        exclude_materials=_parse_csv(exclude_materials_filter),
+        exclude_occasions=_parse_csv(exclude_occasions),
     )
 
     # Auto-persist seen_ids in background
