@@ -273,6 +273,14 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
+    # Precomputed Outfit Pools (Complete the Fit v3.4 — fast serve-time lookup)
+    # ==========================================================================
+    use_precomputed_pools: bool = Field(
+        default=True,
+        description="Use precomputed outfit candidate pools for <1s retrieval (falls back to live pgvector if unavailable)"
+    )
+
+    # ==========================================================================
     # Styling Scorer (Complete the Fit v3.4 — deterministic metadata scorer)
     # ==========================================================================
     use_styling_scorer: bool = Field(
