@@ -3,16 +3,23 @@ V3 Feature Hydrator — batch-fetches full Candidate features from
 the product_serving materialized view via v3_hydrate_candidates RPC.
 
 Two usage patterns:
-  - Page hydration: 24 items, < 20ms
-  - Pool rebuild hydration: 500 items, < 100ms
+  - Pool rebuild hydration: 500 items via RPC
+  - Page hydration: 24 items, instant from in-memory cache (0ms)
+
+After rebuild, all hydrated candidates are cached in-process.
+Subsequent page serves read from cache — zero DB calls on reuse.
 """
 
 import logging
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from recs.models import Candidate
 
 logger = logging.getLogger(__name__)
+
+# Default LRU cache size: ~3000 items covers 6 concurrent sessions × 500 pool items
+_DEFAULT_CACHE_SIZE = 3000
 
 
 def _row_to_candidate(row: Dict[str, Any]) -> Candidate:
@@ -90,19 +97,109 @@ class FeatureHydrator:
     Batch fetches full product features from the product_serving
     materialized view.
 
-    Two usage patterns:
-    - Page hydration: 24 items, < 20ms
-    - Pool rebuild hydration: 500 items, < 100ms
+    Maintains an in-process LRU cache so that:
+    - Pool rebuild hydration: fetches from DB, populates cache
+    - Page hydration on reuse: instant cache hits (0ms, no DB call)
+
+    Cache is bounded by max_cache_size (default 3000 items).
     """
 
-    def __init__(self, supabase_client: Any) -> None:
+    def __init__(
+        self,
+        supabase_client: Any,
+        max_cache_size: int = _DEFAULT_CACHE_SIZE,
+    ) -> None:
         self._supabase = supabase_client
+        self._max_cache_size = max_cache_size
+        # OrderedDict for LRU eviction: most recently accessed at end
+        self._cache: OrderedDict[str, Candidate] = OrderedDict()
+        self._stats = {"hits": 0, "misses": 0, "rpc_calls": 0}
+
+    # -- public API ---------------------------------------------------------
 
     def hydrate(self, item_ids: List[str]) -> List[Candidate]:
-        """Fetch full Candidate objects for a list of item IDs."""
+        """Fetch full Candidate objects for a list of item IDs.
+
+        Uses cache for items already hydrated. Only fetches missing
+        items from the DB.
+        """
         if not item_ids:
             return []
 
+        cached: Dict[str, Candidate] = {}
+        uncached_ids: List[str] = []
+
+        for iid in item_ids:
+            if iid in self._cache:
+                self._cache.move_to_end(iid)
+                cached[iid] = self._cache[iid]
+                self._stats["hits"] += 1
+            else:
+                uncached_ids.append(iid)
+                self._stats["misses"] += 1
+
+        # Fetch only uncached items from DB
+        fetched: Dict[str, Candidate] = {}
+        if uncached_ids:
+            fetched = self._fetch_from_db(uncached_ids)
+            # Populate cache
+            for iid, candidate in fetched.items():
+                self._put_cache(iid, candidate)
+
+        # Combine cached + fetched, preserving input order is done by caller
+        all_candidates = []
+        merged = {**cached, **fetched}
+        for iid in item_ids:
+            if iid in merged:
+                all_candidates.append(merged[iid])
+
+        return all_candidates
+
+    def hydrate_ordered(self, item_ids: List[str]) -> List[Candidate]:
+        """
+        Hydrate and return in the same order as item_ids.
+
+        Items missing from the MV are skipped (no gap, just shorter list).
+        This is the primary method for page serving where order matters.
+
+        On reuse pages, this is near-instant (all items cached from rebuild).
+        """
+        if not item_ids:
+            return []
+
+        # Fast path: all items in cache
+        if all(iid in self._cache for iid in item_ids):
+            self._stats["hits"] += len(item_ids)
+            result = []
+            for iid in item_ids:
+                self._cache.move_to_end(iid)
+                result.append(self._cache[iid])
+            return result
+
+        # Slow path: mixed cache + DB
+        return self.hydrate(item_ids)
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Return cache statistics for debugging."""
+        return {
+            "cache_size": len(self._cache),
+            "max_cache_size": self._max_cache_size,
+            **self._stats,
+        }
+
+    def invalidate(self, item_ids: Optional[List[str]] = None) -> None:
+        """Remove items from cache. If item_ids is None, clear all."""
+        if item_ids is None:
+            self._cache.clear()
+        else:
+            for iid in item_ids:
+                self._cache.pop(iid, None)
+
+    # -- internal -----------------------------------------------------------
+
+    def _fetch_from_db(self, item_ids: List[str]) -> Dict[str, Candidate]:
+        """Fetch candidates from Supabase RPC. Returns dict keyed by item_id."""
+        self._stats["rpc_calls"] += 1
         try:
             result = self._supabase.rpc(
                 "v3_hydrate_candidates",
@@ -110,17 +207,16 @@ class FeatureHydrator:
             ).execute()
         except Exception as e:
             logger.error("Hydration failed for %d items: %s", len(item_ids), e)
-            return []
+            return {}
 
         rows = result.data or []
-        candidates = []
-        row_map: Dict[str, Dict] = {}
+        candidates: Dict[str, Candidate] = {}
 
         for row in rows:
             rid = str(row.get("id", "?"))
-            row_map[rid] = row
             try:
-                candidates.append(_row_to_candidate(row))
+                c = _row_to_candidate(row)
+                candidates[c.item_id] = c
             except Exception as e:
                 logger.warning("Failed to hydrate row %s: %s", rid, e)
 
@@ -133,13 +229,12 @@ class FeatureHydrator:
 
         return candidates
 
-    def hydrate_ordered(self, item_ids: List[str]) -> List[Candidate]:
-        """
-        Hydrate and return in the same order as item_ids.
-
-        Items missing from the MV are skipped (no gap, just shorter list).
-        This is the primary method for page serving where order matters.
-        """
-        candidates = self.hydrate(item_ids)
-        by_id = {c.item_id: c for c in candidates}
-        return [by_id[iid] for iid in item_ids if iid in by_id]
+    def _put_cache(self, item_id: str, candidate: Candidate) -> None:
+        """Add item to LRU cache, evicting oldest if at capacity."""
+        if item_id in self._cache:
+            self._cache.move_to_end(item_id)
+            self._cache[item_id] = candidate
+        else:
+            if len(self._cache) >= self._max_cache_size:
+                self._cache.popitem(last=False)  # evict oldest
+            self._cache[item_id] = candidate

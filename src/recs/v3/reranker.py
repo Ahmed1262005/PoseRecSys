@@ -117,7 +117,13 @@ class V3Reranker:
         seen_ids: Optional[Set[str]] = None,
         exploration_pool: Optional[List[Any]] = None,
     ) -> List[Any]:
-        """Greedy constrained reranking."""
+        """Greedy constrained reranking.
+
+        Optimizations over naive O(target_size * pool_size):
+        - Pre-compute brand/cluster/group/combo for all candidates once
+        - Pre-compute unique_brands once for strict diversity relaxation
+        - Remove chosen items via swap-to-end instead of list.pop(middle)
+        """
         seen = seen_ids or set()
         exp_pool = list(exploration_pool or [])
 
@@ -126,6 +132,30 @@ class V3Reranker:
 
         # Sort by final_score descending
         pool.sort(key=lambda c: getattr(c, "final_score", 0.0), reverse=True)
+
+        if not pool:
+            return []
+
+        # Pre-compute per-candidate metadata once (avoids repeated getattr + lower() + lookups)
+        _pre_ids: List[str] = []
+        _pre_brands: List[str] = []
+        _pre_clusters: List[str] = []
+        _pre_groups: List[str] = []
+        _pre_combos: List[str] = []
+        _pre_scores: List[float] = []
+
+        for c in pool:
+            _pre_ids.append(_get_item_id(c))
+            brand = (getattr(c, "brand", None) or "").lower()
+            _pre_brands.append(brand)
+            cluster = get_cluster_for_item(brand)
+            _pre_clusters.append(cluster)
+            _pre_groups.append(_resolve_category_group(c))
+            _pre_combos.append(_get_combo_key(c, cluster))
+            _pre_scores.append(getattr(c, "final_score", 0.0))
+
+        # Pre-compute unique brand count for strict diversity relaxation
+        unique_brand_count = len(set(b for b in _pre_brands if b))
 
         result: List[Any] = []
         brand_counts: Dict[str, int] = defaultdict(int)
@@ -139,7 +169,10 @@ class V3Reranker:
             target_size, self.config.category_proportions,
         )
 
-        while len(result) < target_size and pool:
+        # Active pool tracking: indices into pool that are still available
+        active: List[int] = list(range(len(pool)))
+
+        while len(result) < target_size and active:
             # Exploration injection
             if (
                 exp_pool
@@ -157,47 +190,46 @@ class V3Reranker:
                     )
                     continue
 
-            best_idx = -1
+            best_active_pos = -1
             best_score = float("-inf")
 
-            for i, c in enumerate(pool):
-                cid = _get_item_id(c)
+            pos = len(result)
+            is_strict_pos = pos < self.config.strict_diversity_positions
+
+            for ai, idx in enumerate(active):
+                cid = _pre_ids[idx]
                 if cid in used_ids:
                     continue
 
-                brand = (getattr(c, "brand", None) or "").lower()
-                cluster = get_cluster_for_item(brand)
-                group = _resolve_category_group(c)
-                combo_key = _get_combo_key(c, cluster)
-
-                score = getattr(c, "final_score", 0.0)
+                brand = _pre_brands[idx]
+                score = _pre_scores[idx]
 
                 # Strict diversity: first N positions must have unique brands
-                pos = len(result)
-                if pos < self.config.strict_diversity_positions:
-                    if brand and brand_counts.get(brand, 0) > 0:
-                        # Single-brand pool relaxation: if only 1-2 brands, allow
-                        unique_brands = len(set(
-                            (getattr(x, "brand", None) or "").lower()
-                            for x in pool if _get_item_id(x) not in used_ids
-                        ))
-                        if unique_brands > 2:
-                            continue
+                if is_strict_pos and brand and brand_counts.get(brand, 0) > 0:
+                    if unique_brand_count > 2:
+                        continue
+
+                cluster = _pre_clusters[idx]
+                group = _pre_groups[idx]
+                combo_key = _pre_combos[idx]
 
                 # Brand cap
                 if brand and brand_counts.get(brand, 0) >= max_brand_count:
                     score *= 0.8
 
                 # Brand decay
-                if brand and brand_counts.get(brand, 0) > 0:
-                    score *= self.config.brand_decay ** brand_counts[brand]
+                bc = brand_counts.get(brand, 0)
+                if brand and bc > 0:
+                    score *= self.config.brand_decay ** bc
 
                 # Cluster decay
-                if cluster != DEFAULT_CLUSTER and cluster_counts.get(cluster, 0) > 0:
-                    score *= self.config.cluster_decay ** cluster_counts[cluster]
+                if cluster != DEFAULT_CLUSTER:
+                    cc = cluster_counts.get(cluster, 0)
+                    if cc > 0:
+                        score *= self.config.cluster_decay ** cc
 
                 # Combo penalty
-                if combo_key in used_combos:
+                if combo_key and combo_key in used_combos:
                     score *= self.config.combo_penalty
 
                 # Category overshoot
@@ -207,17 +239,33 @@ class V3Reranker:
 
                 if score > best_score:
                     best_score = score
-                    best_idx = i
+                    best_active_pos = ai
 
-            if best_idx < 0:
+            if best_active_pos < 0:
                 break
 
-            chosen = pool.pop(best_idx)
+            chosen_idx = active[best_active_pos]
+            chosen = pool[chosen_idx]
+
+            # Remove from active list: swap with last, then pop
+            active[best_active_pos] = active[-1]
+            active.pop()
+
             result.append(chosen)
-            self._update_counters(
-                chosen, brand_counts, cluster_counts,
-                used_combos, used_ids, group_counts,
-            )
+            # Update counters using pre-computed values
+            brand = _pre_brands[chosen_idx]
+            cluster = _pre_clusters[chosen_idx]
+            group = _pre_groups[chosen_idx]
+            combo_key = _pre_combos[chosen_idx]
+            cid = _pre_ids[chosen_idx]
+
+            used_ids.add(cid)
+            if brand:
+                brand_counts[brand] = brand_counts.get(brand, 0) + 1
+            cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
+            group_counts[group] = group_counts.get(group, 0) + 1
+            if combo_key:
+                used_combos.add(combo_key)
 
         return result
 

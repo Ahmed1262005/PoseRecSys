@@ -249,11 +249,18 @@ class FeedOrchestrator:
         page_candidates = self.hydrator.hydrate_ordered(page_ids)
 
         # 10. Serve-time validation
-        validated = self._serve_time_validate(page_candidates, shown_set, session, pool)
+        # Pool items are exempt from shown_set: they were deduped at build time.
+        # shown_set should only block items from *previous* pools, not same-pool pages.
+        pool_id_set = set(pool.ordered_ids)
+        validated = self._serve_time_validate(page_candidates, shown_set, session, pool, pool_id_set)
 
         # 11. Backfill if needed
         if len(validated) < request.page_size and pool.remaining > 0:
-            validated = self._backfill_page(validated, pool, shown_set, session, request.page_size)
+            validated = self._backfill_page(validated, pool, shown_set, session, request.page_size, pool_id_set)
+
+        # 11b. Advance pool served_count so next page gets different items
+        pool.served_count += len(page_ids)
+        self.session_store.save_pool(session_id, pool)
 
         # 12. Update session
         served_ids = set()
@@ -504,6 +511,7 @@ class FeedOrchestrator:
         shown_set: Set[str],
         session: SessionProfile,
         pool: CandidatePool,
+        pool_id_set: Optional[Set[str]] = None,
     ) -> List[Candidate]:
         """
         Revalidate page items before serving.
@@ -511,20 +519,23 @@ class FeedOrchestrator:
         Checks:
         1. Still in stock (item present in hydration result — missing = out of stock)
         2. Not hidden since pool build (check session.hidden_ids)
-        3. Not shown since pool build (check shown_set)
+        3. Not shown in a *previous* pool (check shown_set, but exempt current pool items)
         4. No duplicate images in this page (image hash dedup)
 
-        Items failing any check are dropped. The caller handles backfill.
+        Items in pool_id_set bypass the shown_set check — they were already
+        deduplicated during pool build. This prevents pages 2-N from being
+        empty due to shown_set growing as pages are served.
         """
         validated = []
         page_image_hashes: Set[str] = set()
+        _pool_ids = pool_id_set or set()
 
         for c in candidates:
             # Check hidden
             if c.item_id in session.hidden_ids:
                 continue
-            # Check shown
-            if c.item_id in shown_set:
+            # Check shown — but exempt items from the current pool
+            if c.item_id in shown_set and c.item_id not in _pool_ids:
                 continue
             # Image dedup within page
             img_hash = extract_image_hash(c.image_url)
@@ -543,6 +554,7 @@ class FeedOrchestrator:
         shown_set: Set[str],
         session: SessionProfile,
         target_size: int,
+        pool_id_set: Optional[Set[str]] = None,
     ) -> List[Candidate]:
         """
         When serve-time validation removes items, fill from next pool items.
@@ -560,9 +572,13 @@ class FeedOrchestrator:
         if max_lookahead <= 0:
             return current
 
+        _pool_ids = pool_id_set or set()
         extra_ids = []
         for iid in pool.ordered_ids[start : start + max_lookahead]:
-            if iid not in current_ids and iid not in shown_set:
+            if iid not in current_ids:
+                # Only skip if shown in a previous pool (not this pool)
+                if iid in shown_set and iid not in _pool_ids:
+                    continue
                 extra_ids.append(iid)
             if len(extra_ids) >= needed * 3:
                 break
@@ -572,7 +588,7 @@ class FeedOrchestrator:
 
         candidate_ids = extra_ids
         extra_candidates = self.hydrator.hydrate_ordered(candidate_ids)
-        extra_validated = self._serve_time_validate(extra_candidates, shown_set, session, pool)
+        extra_validated = self._serve_time_validate(extra_candidates, shown_set, session, pool, _pool_ids)
 
         # Merge with existing page image hashes
         page_image_hashes: Set[str] = set()
