@@ -30,8 +30,9 @@ Environment:
     K_RETRIEVE=150         Over-retrieve from faiss before filtering (default 150)
     BATCH_SIZE=5000        Upload batch size (default 5000)
     EXPORT_BATCH=1000      Embedding export batch size (default 1000)
-    CATALOG_BATCH=5000     Product/attrs export batch size (default 5000)
-    SKIP_EXPORT=1          Skip export if cache files exist (default 0)
+    CATALOG_BATCH=1000     Product/attrs export batch size (must be ≤1000, Supabase row limit)
+    SKIP_EMBEDDINGS=1      Skip embedding export if cache exists (default 0)
+    SKIP_CATALOG=1         Skip catalog export if cache exists (default 0)
     DRY_RUN=1              Compute but don't upload (default 0)
 """
 
@@ -91,7 +92,12 @@ K_RETRIEVE = int(os.environ.get("K_RETRIEVE", 150))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 5000))
 EXPORT_BATCH = int(os.environ.get("EXPORT_BATCH", 1000))
 CATALOG_BATCH = int(os.environ.get("CATALOG_BATCH", 1000))
-SKIP_EXPORT = os.environ.get("SKIP_EXPORT", "0") == "1"
+SKIP_EMBEDDINGS = os.environ.get("SKIP_EMBEDDINGS", "0") == "1"
+SKIP_CATALOG = os.environ.get("SKIP_CATALOG", "0") == "1"
+# Legacy: SKIP_EXPORT=1 sets both SKIP_EMBEDDINGS and SKIP_CATALOG
+if os.environ.get("SKIP_EXPORT", "0") == "1":
+    SKIP_EMBEDDINGS = True
+    SKIP_CATALOG = True
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
 CACHE_DIR = ROOT / "data" / "precompute_cache"
@@ -202,8 +208,8 @@ def export_embeddings():
 
     Returns (embeddings, product_ids, categories, category_l2) numpy arrays.
     """
-    if SKIP_EXPORT and EMB_FILE.exists() and IDS_FILE.exists() and CATS_FILE.exists():
-        log.info("SKIP_EXPORT=1 and cache files exist, loading from disk")
+    if SKIP_EMBEDDINGS and EMB_FILE.exists() and IDS_FILE.exists() and CATS_FILE.exists():
+        log.info("SKIP_EMBEDDINGS=1 and cache files exist, loading from disk")
         embeddings = np.load(str(EMB_FILE))
         product_ids = np.load(str(IDS_FILE), allow_pickle=True)
         categories = np.load(str(CATS_FILE), allow_pickle=True)
@@ -288,7 +294,42 @@ def export_embeddings():
                 cat_map[pid] = _broad(row.get("category_l1")) or ""
                 l2_map[pid] = (row.get("category_l2") or "").lower().strip()
 
-    log.info("Category mapping: %d products (L1+L2)", len(cat_map))
+    log.info("Category mapping from product_attributes: %d products (L1+L2)", len(cat_map))
+
+    # Step 3b: Fallback categories from products.category for products
+    # that have embeddings but no product_attributes row.
+    missing_cats = [pid for pid in all_ids if pid not in cat_map or not cat_map[pid]]
+    if missing_cats:
+        log.info("Fetching fallback categories from products.category for %d products...", len(missing_cats))
+
+        # Broad-category mapping for products.category values
+        _PRODUCTS_CAT_TO_BROAD = {
+            "tops": "tops", "bottoms": "bottoms", "dresses": "dresses",
+            "outerwear": "outerwear", "activewear": "tops", "swimwear": "tops",
+        }
+
+        # Batch fetch products.category (must stay ≤1000 per request)
+        fallback_count = 0
+        for i in range(0, len(missing_cats), 500):
+            batch_ids = missing_cats[i:i + 500]
+            try:
+                _sb = _new_supabase()
+                r = _sb.table("products").select(
+                    "id, category"
+                ).in_("id", batch_ids).execute()
+                for row in (r.data or []):
+                    pid = str(row["id"])
+                    raw_cat = (row.get("category") or "").lower().strip()
+                    broad = _PRODUCTS_CAT_TO_BROAD.get(raw_cat)
+                    if broad and (pid not in cat_map or not cat_map[pid]):
+                        cat_map[pid] = broad
+                        fallback_count += 1
+            except Exception as e:
+                log.warning("Fallback category batch failed at offset %d: %s", i, e)
+
+        log.info("  Fallback categories applied: %d products now have categories", fallback_count)
+
+    log.info("Total category mapping: %d products", len([v for v in cat_map.values() if v]))
 
     # Step 4: Build aligned arrays
     embeddings = np.array(all_embeddings, dtype=np.float32)
@@ -322,8 +363,8 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
         product_data: Dict[product_id → products row dict]
         attrs_data:   Dict[product_id → product_attributes row dict]
     """
-    if SKIP_EXPORT and PRODUCTS_FILE.exists() and ATTRS_FILE.exists():
-        log.info("SKIP_EXPORT=1 and catalog cache exists, loading from disk")
+    if SKIP_CATALOG and PRODUCTS_FILE.exists() and ATTRS_FILE.exists():
+        log.info("SKIP_CATALOG=1 and catalog cache exists, loading from disk")
         with open(PRODUCTS_FILE, "rb") as f:
             product_data = pickle.load(f)
         with open(ATTRS_FILE, "rb") as f:
@@ -466,13 +507,19 @@ def build_profiles_cache(
     attrs_data: Dict[str, dict],
     product_ids: np.ndarray,
 ) -> Dict[str, AestheticProfile]:
-    """Pre-build AestheticProfile for every product that has both product + attrs data.
+    """Pre-build AestheticProfile for every product that has product data.
+
+    Products with product_attributes get full profiles (all Gemini fields).
+    Products without attrs get "lite" profiles (basic fields only — category,
+    brand, price, color). TATTOO scoring degrades gracefully: cosine + basic
+    compat dimensions, no styling scorer, no hard avoids.
 
     Returns Dict[product_id → AestheticProfile].
     """
     cache: Dict[str, AestheticProfile] = {}
     missing_product = 0
-    missing_attrs = 0
+    full_profiles = 0
+    lite_profiles = 0
     build_errors = 0
     total = len(product_ids)
 
@@ -482,13 +529,14 @@ def build_profiles_cache(
         if not prod:
             missing_product += 1
             continue
-        attrs = attrs_data.get(pid_str)
-        if not attrs:
-            missing_attrs += 1
-            continue
+        attrs = attrs_data.get(pid_str, {})
         try:
             profile = AestheticProfile.from_product_and_attrs(prod, attrs)
             cache[pid_str] = profile
+            if attrs:
+                full_profiles += 1
+            else:
+                lite_profiles += 1
         except Exception as e:
             build_errors += 1
             if build_errors <= 5:
@@ -496,14 +544,14 @@ def build_profiles_cache(
 
     log.info("Profile cache: %d/%d profiles built (%.0f%%)",
              len(cache), total, 100 * len(cache) / total if total else 0)
-    log.info("  %d missing from products table, %d missing from product_attributes, %d build errors",
-             missing_product, missing_attrs, build_errors)
+    log.info("  %d full (with attrs), %d lite (no attrs), %d missing from products, %d errors",
+             full_profiles, lite_profiles, missing_product, build_errors)
     log.info("  product_data has %d entries, attrs_data has %d entries",
              len(product_data), len(attrs_data))
 
     if len(cache) < total * 0.5:
         log.warning("  LOW COVERAGE: only %.0f%% of embedding products have profiles. "
-                     "Run with SKIP_EXPORT=0 to re-export catalog.",
+                     "Check CATALOG_BATCH and run without SKIP_CATALOG.",
                      100 * len(cache) / total if total else 0)
 
     return cache
@@ -899,6 +947,8 @@ def main():
     log.info("Precompute Outfit Candidates (Full TATTOO Pipeline)")
     log.info("  WORKERS=%d  K_RETRIEVE=%d  FINAL_K=%d  BATCH=%d  DRY_RUN=%s",
              WORKERS, K_RETRIEVE, CANDIDATES_PER_POOL, BATCH_SIZE, DRY_RUN)
+    log.info("  SKIP_EMBEDDINGS=%s  SKIP_CATALOG=%s  CATALOG_BATCH=%d",
+             SKIP_EMBEDDINGS, SKIP_CATALOG, CATALOG_BATCH)
     log.info("=" * 60)
 
     t_total = time.time()

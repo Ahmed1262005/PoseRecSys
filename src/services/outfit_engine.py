@@ -2562,9 +2562,14 @@ class OutfitEngine:
         """
         # Reset per-request state
         self._retrieval_strategies = {}
+        import time as _time
+        _t_start = _time.monotonic()
+        _timings: Dict[str, float] = {}
 
         # 1. Fetch source
+        _t0 = _time.monotonic()
         source = self._fetch_product_with_attrs(product_id)
+        _timings["fetch_source"] = _time.monotonic() - _t0
         if not source:
             return {
                 "error": f"Product {product_id} not found",
@@ -2585,7 +2590,9 @@ class OutfitEngine:
         source.broad_category = source_broad
 
         # 2b. Load user profile and resolve clusters (v2.2)
+        _t0 = _time.monotonic()
         user_profile = self._load_user_profile(user_id)
+        _timings["load_profile"] = _time.monotonic() - _t0
         user_clusters: List[str] = []
         profile_scorer = None
         if user_profile:
@@ -2628,6 +2635,7 @@ class OutfitEngine:
         effective_limit = limit if (target_category and limit) else items_per_category
 
         # 4. Retrieve, enrich, filter, score per category (PARALLEL)
+        _t0 = _time.monotonic()
         recommendations: Dict[str, Any] = {}
         all_top_picks = []
 
@@ -2657,6 +2665,8 @@ class OutfitEngine:
                     user_clusters, user_profile, profile_scorer,
                     user_styles,
                 )
+
+        _timings["score_categories"] = _time.monotonic() - _t0
 
         # --- Outfit ranking (v3.1, gated by use_llm_judge) ---
         # After per-category scoring + veto, rank complete outfit combos
@@ -2729,6 +2739,15 @@ class OutfitEngine:
             float(p.get("price", 0) or 0) for p in all_top_picks
         )
 
+        _timings["total"] = _time.monotonic() - _t_start
+        logger.info(
+            "build_outfit %s: %.2fs total (source=%.2fs, profile=%.2fs, scoring=%.2fs) strategies=%s",
+            product_id[:12] if product_id else "?",
+            _timings["total"], _timings.get("fetch_source", 0),
+            _timings.get("load_profile", 0), _timings.get("score_categories", 0),
+            dict(self._retrieval_strategies),
+        )
+
         return {
             "source_product": source_fmt,
             "recommendations": recommendations,
@@ -2748,6 +2767,7 @@ class OutfitEngine:
                 "outfit_ranking": outfit_ranked,
                 "judge_notes": self._collect_judge_notes(),
                 "retrieval_strategies": dict(self._retrieval_strategies),
+                "timings": {k: round(v, 3) for k, v in _timings.items()},
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
