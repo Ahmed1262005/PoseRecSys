@@ -203,17 +203,24 @@ class FeedOrchestrator:
         existing_pool = self.session_store.get_pool(session_id, request.mode)
         key_family = _assign_key_family(request.user_id)
 
-        # Build retrieval signature
+        # Build retrieval signature (includes soft_preferences so filter
+        # changes like adding include_style_tags=boho trigger a rebuild)
         hf_hashable = (
             dict(request.hard_filters.model_dump())
             if request.hard_filters and hasattr(request.hard_filters, "model_dump")
             else str(request.hard_filters)
+        )
+        sp_hashable = (
+            dict(sorted(request.soft_preferences.items()))
+            if request.soft_preferences
+            else None
         )
 
         retrieval_sig = compute_retrieval_signature(
             mode=request.mode,
             hard_filters_hashable=hf_hashable,
             key_family=key_family,
+            soft_preferences_hashable=sp_hashable,
         )
 
         decision = self.pool_manager.decide(
@@ -405,6 +412,7 @@ class FeedOrchestrator:
             session=session,
             is_warm=is_warm,
             eligibility_penalties=elig_stats.get("penalties"),
+            soft_preferences=request.soft_preferences,
         )
         t_rank = time.time()
 

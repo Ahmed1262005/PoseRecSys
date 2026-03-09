@@ -114,6 +114,7 @@ class FeedRanker:
         context: Optional[Dict[str, Any]] = None,
         is_warm: bool = False,
         eligibility_penalties: Optional[Dict[str, float]] = None,
+        soft_preferences: Optional[Dict[str, Any]] = None,
     ) -> List[Candidate]:
         """Score and sort candidates descending by final_score."""
         weights = WARM_WEIGHTS if is_warm else COLD_WEIGHTS
@@ -133,6 +134,17 @@ class FeedRanker:
                 candidate, weights, user_profile, session,
                 session_scores, blended, context,
             )
+
+            # Soft preference affinity boost: items matching active filters
+            # (e.g. include_style_tags=boho) get a scoring uplift on the
+            # preference component.  This makes the filter a ranking signal,
+            # not just a binary pass/fail gate.
+            if soft_preferences:
+                affinity = self._compute_preference_affinity(candidate, soft_preferences)
+                if affinity > 0:
+                    # Blend: 70% original preference + 30% affinity match
+                    orig = components.get("preference", 0.0)
+                    components["preference"] = _clamp01(0.7 * orig + 0.3 * affinity)
 
             # Weighted sum
             score = 0.0
@@ -274,6 +286,90 @@ class FeedRanker:
         if max_p is not None and price > max_p:
             return False
         return True
+
+    @staticmethod
+    def _compute_preference_affinity(
+        candidate: Candidate,
+        soft_prefs: Dict[str, Any],
+    ) -> float:
+        """Compute 0.0–1.0 affinity score for how well a candidate matches
+        the user's active soft preference filters.
+
+        Each matched include_* dimension adds to the score; each matched
+        exclude_* dimension subtracts.  The result is the fraction of
+        dimensions that matched positively.
+
+        Mapping of soft_pref keys → candidate attributes:
+          include_style_tags / exclude_style_tags   → candidate.style_tags (list)
+          include_formality  / exclude_formality     → candidate.formality (str)
+          include_color_family / exclude_color_family → candidate.color_family (str)
+          include_silhouette / exclude_silhouette     → candidate.silhouette (str)
+          include_coverage   / exclude_coverage       → candidate.coverage_level (str)
+          include_fit        / exclude_fit            → candidate.fit (str)
+          include_sleeves    / exclude_sleeves        → candidate.sleeve_length (str)
+          include_seasons    / exclude_seasons        → candidate.seasons (list)
+          include_length     / exclude_length         → candidate.length (str)
+          include_neckline   / exclude_neckline       → candidate.neckline (str)
+          include_patterns   / exclude_patterns       → candidate.pattern (str)
+          include_materials  / exclude_materials      → candidate.material (str)
+        """
+        # Attribute map: (include_key, exclude_key, attr_name, is_list)
+        _DIMS = [
+            ("include_style_tags",   "exclude_style_tags",   "style_tags",      True),
+            ("include_formality",    "exclude_formality",    "formality",        False),
+            ("include_color_family", "exclude_color_family", "color_family",     False),
+            ("include_silhouette",   "exclude_silhouette",   "silhouette",       False),
+            ("include_coverage",     "exclude_coverage",     "coverage_level",   False),
+            ("include_fit",          "exclude_fit",          "fit",              False),
+            ("include_sleeves",      "exclude_sleeves",      "sleeve_length",    False),
+            ("include_seasons",      "exclude_seasons",      "seasons",          True),
+            ("include_length",       "exclude_length",       "length",           False),
+            ("include_neckline",     "exclude_neckline",     "neckline",         False),
+            ("include_patterns",     "exclude_patterns",     "pattern",          False),
+            ("include_materials",    "exclude_materials",    "material",         False),
+        ]
+
+        hits = 0
+        checks = 0
+
+        for inc_key, exc_key, attr, is_list in _DIMS:
+            inc_vals = soft_prefs.get(inc_key)
+            exc_vals = soft_prefs.get(exc_key)
+            if not inc_vals and not exc_vals:
+                continue
+
+            # Resolve candidate value(s)
+            raw = getattr(candidate, attr, None)
+            if is_list:
+                item_vals = {v.lower() for v in (raw or [])}
+            else:
+                item_vals = {raw.lower()} if raw else set()
+
+            if not item_vals:
+                continue  # no data on candidate — skip dimension
+
+            checks += 1
+
+            # Include match: any overlap = hit
+            if inc_vals:
+                inc_set = {v.lower() for v in inc_vals}
+                if item_vals & inc_set:
+                    hits += 1
+                    continue  # counted, don't double-count exclude
+
+            # Exclude match: overlap = anti-hit (0 for this dimension)
+            if exc_vals:
+                exc_set = {v.lower() for v in exc_vals}
+                if item_vals & exc_set:
+                    # Matched an exclude — no hit
+                    continue
+                else:
+                    # Doesn't match any exclude — mild positive
+                    hits += 1
+
+        if checks == 0:
+            return 0.0
+        return hits / checks
 
     def rerank_pool_from_meta(
         self,

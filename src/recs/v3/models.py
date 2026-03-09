@@ -362,9 +362,18 @@ def compute_retrieval_signature(
     hard_filters_hashable,
     key_family: str,
     source_config_version: str = "v1",
+    soft_preferences_hashable=None,
 ) -> str:
-    """Content-addressable retrieval signature (first 16 hex chars of MD5)."""
-    payload = _stable_json([mode, hard_filters_hashable, key_family, source_config_version])
+    """Content-addressable retrieval signature (first 16 hex chars of MD5).
+
+    Includes soft_preferences so that changing style/aesthetic filters
+    mid-session triggers a pool rebuild rather than silently reusing
+    the old unfiltered pool.
+    """
+    payload = _stable_json([
+        mode, hard_filters_hashable, key_family,
+        source_config_version, soft_preferences_hashable,
+    ])
     return hashlib.md5(payload.encode()).hexdigest()[:16]
 
 
