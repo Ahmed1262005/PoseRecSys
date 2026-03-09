@@ -473,6 +473,8 @@ def build_profiles_cache(
     cache: Dict[str, AestheticProfile] = {}
     missing_product = 0
     missing_attrs = 0
+    build_errors = 0
+    total = len(product_ids)
 
     for pid in product_ids:
         pid_str = str(pid)
@@ -488,10 +490,22 @@ def build_profiles_cache(
             profile = AestheticProfile.from_product_and_attrs(prod, attrs)
             cache[pid_str] = profile
         except Exception as e:
-            log.debug("Failed to build profile for %s: %s", pid_str[:12], e)
+            build_errors += 1
+            if build_errors <= 5:
+                log.warning("Failed to build profile for %s: %s", pid_str[:12], e)
 
-    log.info("Profile cache: %d profiles built (%d missing product, %d missing attrs)",
-             len(cache), missing_product, missing_attrs)
+    log.info("Profile cache: %d/%d profiles built (%.0f%%)",
+             len(cache), total, 100 * len(cache) / total if total else 0)
+    log.info("  %d missing from products table, %d missing from product_attributes, %d build errors",
+             missing_product, missing_attrs, build_errors)
+    log.info("  product_data has %d entries, attrs_data has %d entries",
+             len(product_data), len(attrs_data))
+
+    if len(cache) < total * 0.5:
+        log.warning("  LOW COVERAGE: only %.0f%% of embedding products have profiles. "
+                     "Run with SKIP_EXPORT=0 to re-export catalog.",
+                     100 * len(cache) / total if total else 0)
+
     return cache
 
 
@@ -676,11 +690,15 @@ def score_all_pools(
             # --- Per-source scoring ---
             t_score = time.time()
             pool_count = 0
+            src_skipped = 0
+            cand_cache_hits = 0
+            cand_cache_misses = 0
             for i in range(n_sources):
                 src_pid = str(src_ids[i])
                 src_profile = profiles_cache.get(src_pid)
                 if not src_profile:
                     skipped_no_profile += 1
+                    src_skipped += 1
                     continue
 
                 # Build candidate list with faiss similarities
@@ -694,7 +712,9 @@ def score_all_pools(
                         continue
                     cand_profile = profiles_cache.get(cand_pid)
                     if not cand_profile:
+                        cand_cache_misses += 1
                         continue
+                    cand_cache_hits += 1
                     # Create copy with faiss similarity set
                     cand_copy = dataclasses.replace(cand_profile, similarity=float(similarities[i, j]))
                     candidates.append(cand_copy)
@@ -748,10 +768,14 @@ def score_all_pools(
             score_time = time.time() - t_score
             elapsed = time.time() - t0
 
+            total_lookups = cand_cache_hits + cand_cache_misses
+            hit_rate = 100 * cand_cache_hits / total_lookups if total_lookups else 0
             log.info("  scored %d pools in %.1fs (%.0f pools/s) | "
-                     "%d total pools, %d rows, %.0fs elapsed",
+                     "src_skipped=%d | cand_hits=%d misses=%d (%.0f%% hit rate)",
                      pool_count, score_time,
                      pool_count / score_time if score_time > 0 else 0,
+                     src_skipped, cand_cache_hits, cand_cache_misses, hit_rate)
+            log.info("  running totals: %d pools, %d rows, %.0fs elapsed",
                      total_pools, len(results), elapsed)
 
     # Summary stats
@@ -797,15 +821,24 @@ def upload_results(results: List[Tuple[str, str, str, float, float, int]]):
 
     sb = _get_supabase()
 
-    # Truncate existing data
+    # Truncate existing data (batched to avoid Supabase statement timeout)
     log.info("Clearing existing outfit_candidates...")
+    for tgt in ["tops", "bottoms", "outerwear", "dresses"]:
+        try:
+            sb.table("outfit_candidates").delete().eq(
+                "target_category", tgt
+            ).execute()
+            log.info("  cleared target_category=%s", tgt)
+        except Exception as e:
+            log.warning("  clear target_category=%s failed: %s", tgt, str(e)[:120])
+    # Catch any rows with unexpected target_category values
     try:
         sb.table("outfit_candidates").delete().neq(
             "source_id", "00000000-0000-0000-0000-000000000000"
         ).execute()
-        log.info("  cleared.")
+        log.info("  cleared remaining rows")
     except Exception as e:
-        log.warning("  clear failed (table may not exist yet): %s", e)
+        log.warning("  final clear failed (may already be empty): %s", str(e)[:120])
 
     # Prepare batches
     total = len(results)
