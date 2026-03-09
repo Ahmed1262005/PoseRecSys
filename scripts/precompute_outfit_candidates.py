@@ -33,6 +33,8 @@ Environment:
     CATALOG_BATCH=1000     Product/attrs export batch size (must be ≤1000, Supabase row limit)
     SKIP_EMBEDDINGS=1      Skip embedding export if cache exists (default 0)
     SKIP_CATALOG=1         Skip catalog export if cache exists (default 0)
+    INCREMENTAL=1          Only process new products — skip sources that already
+                           have pools in outfit_candidates (default 0 = full rebuild)
     DRY_RUN=1              Compute but don't upload (default 0)
 """
 
@@ -98,6 +100,7 @@ SKIP_CATALOG = os.environ.get("SKIP_CATALOG", "0") == "1"
 if os.environ.get("SKIP_EXPORT", "0") == "1":
     SKIP_EMBEDDINGS = True
     SKIP_CATALOG = True
+INCREMENTAL = os.environ.get("INCREMENTAL", "0") == "1"
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
 CACHE_DIR = ROOT / "data" / "precompute_cache"
@@ -217,6 +220,48 @@ def _retry_query(fn, max_retries=5, label="query"):
             else:
                 log.error("  %s FAILED after %d attempts: %s", label, max_retries, err_str[:200])
                 raise
+
+
+# ===========================================================================
+# Incremental: fetch existing source_ids
+# ===========================================================================
+
+def fetch_existing_source_ids() -> Set[str]:
+    """Query outfit_candidates to get source_ids that already have pools.
+
+    Uses rank=1 rows for efficient dedup (one per source×target).
+    Batches with offset pagination since the table can be large.
+    """
+    if not INCREMENTAL:
+        return set()
+
+    log.info("INCREMENTAL mode: fetching existing source_ids from outfit_candidates...")
+    existing: Set[str] = set()
+    offset = 0
+    batch = 1000
+
+    while True:
+        try:
+            r = _retry_query(
+                lambda: _new_supabase().table("outfit_candidates").select(
+                    "source_id"
+                ).eq("rank", 1).range(offset, offset + batch - 1).execute(),
+                label=f"existing sources offset={offset}"
+            )
+            rows = r.data or []
+            if not rows:
+                break
+            for row in rows:
+                existing.add(str(row["source_id"]))
+            offset += batch
+            if len(rows) < batch:
+                break
+        except Exception as e:
+            log.warning("Failed to fetch existing source_ids at offset %d: %s", offset, e)
+            break
+
+    log.info("  Found %d existing source_ids (will be skipped)", len(existing))
+    return existing
 
 
 # ===========================================================================
@@ -735,6 +780,7 @@ def score_all_pools(
     category_l2: np.ndarray,
     indexes: Dict[str, Tuple[faiss.IndexFlatIP, np.ndarray]],
     profiles_cache: Dict[str, AestheticProfile],
+    existing_source_ids: Optional[Set[str]] = None,
 ) -> List[Tuple[str, str, str, float, float, int]]:
     """Retrieve, filter, score all source×target pools.
 
@@ -746,6 +792,9 @@ def score_all_pools(
       4. Full TATTOO scoring: compat + cosine + style_adj + avoid_adj + styling_adj
       5. Density caps (cardigan cap for outerwear)
       6. Keep top CANDIDATES_PER_POOL
+
+    When existing_source_ids is provided (INCREMENTAL mode), sources already
+    in that set are skipped entirely — their existing pools are kept as-is.
 
     Returns list of (source_id, target_category, candidate_id,
                      cosine_similarity, tattoo_score, rank).
@@ -774,7 +823,10 @@ def score_all_pools(
     total_pools = 0
     total_scored = 0
     skipped_no_profile = 0
+    skipped_existing = 0
     t0 = time.time()
+
+    _existing = existing_source_ids or set()
 
     # Stats accumulators
     filter_stats = {"pre_filter": 0, "post_filter": 0, "post_hard_avoid": 0}
@@ -815,6 +867,12 @@ def score_all_pools(
             cand_cache_misses = 0
             for i in range(n_sources):
                 src_pid = str(src_ids[i])
+
+                # INCREMENTAL: skip sources that already have pools
+                if src_pid in _existing:
+                    skipped_existing += 1
+                    continue
+
                 src_profile = profiles_cache.get(src_pid)
                 if not src_profile:
                     skipped_no_profile += 1
@@ -904,6 +962,8 @@ def score_all_pools(
     log.info("Scoring complete: %d pools, %d candidate rows in %.0fs (%.1f min)",
              total_pools, len(results), elapsed, elapsed / 60)
     log.info("  Skipped (no profile): %d sources", skipped_no_profile)
+    if skipped_existing:
+        log.info("  Skipped (INCREMENTAL, already precomputed): %d source×target pairs", skipped_existing)
 
     pre = filter_stats["pre_filter"]
     post = filter_stats["post_filter"]
@@ -941,24 +1001,27 @@ def upload_results(results: List[Tuple[str, str, str, float, float, int]]):
 
     sb = _get_supabase()
 
-    # Truncate existing data (batched to avoid Supabase statement timeout)
-    log.info("Clearing existing outfit_candidates...")
-    for tgt in ["tops", "bottoms", "outerwear", "dresses"]:
+    if not INCREMENTAL:
+        # Full rebuild: truncate existing data (batched to avoid Supabase statement timeout)
+        log.info("Clearing existing outfit_candidates...")
+        for tgt in ["tops", "bottoms", "outerwear", "dresses"]:
+            try:
+                sb.table("outfit_candidates").delete().eq(
+                    "target_category", tgt
+                ).execute()
+                log.info("  cleared target_category=%s", tgt)
+            except Exception as e:
+                log.warning("  clear target_category=%s failed: %s", tgt, str(e)[:120])
+        # Catch any rows with unexpected target_category values
         try:
-            sb.table("outfit_candidates").delete().eq(
-                "target_category", tgt
+            sb.table("outfit_candidates").delete().neq(
+                "source_id", "00000000-0000-0000-0000-000000000000"
             ).execute()
-            log.info("  cleared target_category=%s", tgt)
+            log.info("  cleared remaining rows")
         except Exception as e:
-            log.warning("  clear target_category=%s failed: %s", tgt, str(e)[:120])
-    # Catch any rows with unexpected target_category values
-    try:
-        sb.table("outfit_candidates").delete().neq(
-            "source_id", "00000000-0000-0000-0000-000000000000"
-        ).execute()
-        log.info("  cleared remaining rows")
-    except Exception as e:
-        log.warning("  final clear failed (may already be empty): %s", str(e)[:120])
+            log.warning("  final clear failed (may already be empty): %s", str(e)[:120])
+    else:
+        log.info("INCREMENTAL mode: keeping existing rows, upserting new ones only")
 
     # Prepare batches
     total = len(results)
@@ -1019,8 +1082,8 @@ def main():
     log.info("Precompute Outfit Candidates (Full TATTOO Pipeline)")
     log.info("  WORKERS=%d  K_RETRIEVE=%d  FINAL_K=%d  BATCH=%d  DRY_RUN=%s",
              WORKERS, K_RETRIEVE, CANDIDATES_PER_POOL, BATCH_SIZE, DRY_RUN)
-    log.info("  SKIP_EMBEDDINGS=%s  SKIP_CATALOG=%s  CATALOG_BATCH=%d",
-             SKIP_EMBEDDINGS, SKIP_CATALOG, CATALOG_BATCH)
+    log.info("  SKIP_EMBEDDINGS=%s  SKIP_CATALOG=%s  CATALOG_BATCH=%d  INCREMENTAL=%s",
+             SKIP_EMBEDDINGS, SKIP_CATALOG, CATALOG_BATCH, INCREMENTAL)
     log.info("=" * 60)
 
     t_total = time.time()
@@ -1047,11 +1110,15 @@ def main():
     # Free catalog data — profiles_cache holds everything we need
     del product_data, attrs_data
 
+    # Incremental: fetch existing source_ids to skip
+    existing_source_ids = fetch_existing_source_ids()
+
     # Phase 3b: Score all pools
     log.info("\n--- Phase 3b: Score all pools (full TATTOO pipeline) ---")
     results = score_all_pools(
         embeddings, product_ids, categories, category_l2,
         indexes, profiles_cache,
+        existing_source_ids=existing_source_ids,
     )
 
     # Phase 4: Upload
