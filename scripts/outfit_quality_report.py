@@ -39,33 +39,24 @@ OUTPUT_FILE = ROOT / "scripts" / "outfit_quality_report.html"
 def fetch_random_product_ids(sb, n: int = 50) -> list:
     """Get random product IDs that have precomputed outfit pools (no dresses).
 
-    Prefers products with precomputed pools so the fast Strategy P path
-    fires. Falls back to random in-stock tops if the outfit_candidates
-    table is empty or doesn't exist.
+    Queries distinct source_ids from outfit_candidates with rank=1
+    (one row per pool) to efficiently sample from products that have
+    precomputed pools. Falls back to random in-stock tops if table
+    is empty or doesn't exist.
     """
-    try:
-        # Pick source_ids that have precomputed pools (exclude dresses)
-        r = sb.rpc("get_precomputed_source_ids", {"p_limit": n * 5}).execute()
-        if r.data:
-            ids = [row["source_id"] for row in r.data]
-            random.shuffle(ids)
-            logger.info("Using %d products with precomputed pools", min(len(ids), n))
-            return ids[:n]
-    except Exception:
-        pass
-
-    # Fallback: query outfit_candidates directly for distinct source_ids
+    # Query rank=1 rows (one per source×category pool) for efficient dedup
     try:
         r = sb.table("outfit_candidates").select(
             "source_id"
-        ).neq("target_category", "dresses").limit(n * 10).execute()
+        ).eq("rank", 1).limit(n * 20).execute()
         if r.data:
             ids = list({row["source_id"] for row in r.data})
             random.shuffle(ids)
-            logger.info("Using %d products from outfit_candidates table", min(len(ids), n))
+            logger.info("Found %d products with precomputed pools, using %d",
+                        len(ids), min(len(ids), n))
             return ids[:n]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("outfit_candidates query failed: %s", e)
 
     # Final fallback: random in-stock tops
     logger.info("No precomputed pools found, falling back to random tops")

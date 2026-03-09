@@ -1802,6 +1802,10 @@ _OUTER_LAYER_TOP_L2 = {
 # Outerwear L2 types that are really waistcoats/vests — exclude from outerwear results
 _OUTERWEAR_WAISTCOAT_L2 = {"vest", "hoodie"}
 
+# Name suffixes that indicate a product is really a top, not outerwear.
+# Gemini sometimes misclassifies "Blazer Top", "Jacket Top", etc. as outerwear.
+_TOP_SUFFIXES_IN_OUTERWEAR = (" top", " blouse", " tee", " bodysuit", " camisole")
+
 _NON_OUTFIT_L1 = {"intimates", "swimwear", "accessories", "shoes", "other"}
 _NON_OUTFIT_L2 = {
     "pajama", "sleepwear", "nightgown", "robe", "underwear", "lingerie",
@@ -1957,6 +1961,10 @@ def _filter_by_gemini_category(
         if target_broad == "outerwear":
             cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
             if cand_l2 in _OUTERWEAR_WAISTCOAT_L2:
+                continue
+            # Exclude tops misclassified as outerwear (e.g. "Blazer Top")
+            cand_name_lower = (cand.name or "").lower()
+            if any(cand_name_lower.endswith(s) for s in _TOP_SUFFIXES_IN_OUTERWEAR):
                 continue
         filtered.append(cand)
     return filtered
@@ -3074,7 +3082,7 @@ class OutfitEngine:
         except Exception as e:
             # Any error (table doesn't exist, RPC not found, timeout)
             # → graceful fallback to live retrieval
-            logger.debug(
+            logger.warning(
                 "Precomputed pool unavailable for %s→%s, will fall back: %s",
                 source_id[:12] if source_id else "?", target_broad, e,
             )
