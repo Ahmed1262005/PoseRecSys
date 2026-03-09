@@ -92,8 +92,22 @@ def _broad(l1: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _get_supabase():
+    """Return the singleton Supabase client (for single-threaded use only)."""
     from config.database import get_supabase_client
     return get_supabase_client()
+
+
+def _new_supabase():
+    """Create a brand-new Supabase client (thread-safe, no shared connection pool).
+
+    Each call returns an independent client with its own HTTP transport.
+    Use this inside thread workers to avoid the HTTP/2 hpack race condition
+    that occurs when multiple threads share a singleton client.
+    """
+    from supabase import create_client
+    from config.settings import get_settings
+    s = get_settings()
+    return create_client(s.supabase_url, s.supabase_service_key)
 
 
 def export_embeddings():
@@ -122,7 +136,7 @@ def export_embeddings():
 
     def _fetch_batch(offset: int) -> List[dict]:
         """Fetch one batch of embeddings."""
-        _sb = _get_supabase()
+        _sb = _new_supabase()
         r = _sb.table("image_embeddings").select(
             "sku_id, embedding"
         ).range(offset, offset + EXPORT_BATCH - 1).execute()
@@ -165,7 +179,7 @@ def export_embeddings():
     cat_map: Dict[str, str] = {}
 
     def _fetch_cats(offset: int) -> List[dict]:
-        _sb = _get_supabase()
+        _sb = _new_supabase()
         r = _sb.table("product_attributes").select(
             "sku_id, category_l1"
         ).range(offset, offset + 5000 - 1).execute()
@@ -362,7 +376,7 @@ def upload_results(results: List[Tuple[str, str, str, float, int]]):
     t0 = time.time()
 
     def _upload_batch(batch: List[dict]) -> int:
-        _sb = _get_supabase()
+        _sb = _new_supabase()
         try:
             _sb.table("outfit_candidates").upsert(batch).execute()
             return len(batch)
