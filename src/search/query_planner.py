@@ -702,7 +702,15 @@ Example for "Boho maxi dress like Anthropologie":
 
 ## SECTION 7: PRICE, BRAND, INTENT
 
-- **intent**: "exact" (pure brand search), "specific" (concrete product + attributes), "vague" (mood/aesthetic only)
+- **intent**: "exact" | "specific" | "vague"
+  - **"exact"**: Algolia-only. Use for (a) pure brand searches OR (b) bare/simple category browsing.
+    A single category word or very short category query with no styling/mood qualifiers = "exact".
+    Examples: "tops", "dresses", "jeans", "skirts", "jackets", "maxi dresses", "crop tops", "boohoo".
+  - **"specific"**: Hybrid search (Algolia + semantic). Category + styling attributes, colors, occasion, or mood qualifiers.
+    Examples: "black midi dress", "office blouse", "floral summer dress", "casual linen pants".
+  - **"vague"**: Mood/aesthetic ONLY, no garment type at all.
+    Examples: "summer vibes", "date night look", "office outfit", "festival ready".
+  RULE: If the query is JUST a garment type (with no styling/mood words), intent MUST be "exact".
 - **brand**: Detected brand name or null. For EXACT brand purchase — hard filter.
   CRITICAL: Only set `brand` to a name that appears in the KNOWN BRANDS list (appended at
   the end of this prompt). If the user mentions a partial/abbreviated brand name, match it
