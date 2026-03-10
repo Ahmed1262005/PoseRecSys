@@ -369,6 +369,55 @@ def get_similar(
 
 
 @router.get(
+    "/complete-fit/{product_id}",
+    summary="Complete the Look",
+    description="""
+    Returns complementary items to complete an outfit with the given product.
+
+    **Carousel mode** (default): Omit `category`. Returns top N items from each
+    complementary category (tops -> bottoms + outerwear, etc.).
+
+    **Feed mode**: Set `category` to a specific category. Returns paginated items
+    for that category only (use `offset`/`limit` for infinite scroll).
+    """,
+)
+def get_complete_fit(
+    product_id: str,
+    items_per_category: int = Query(10, ge=1, le=50, description="Items per category (carousel mode)"),
+    category: Optional[str] = Query(None, description="Single category for feed mode"),
+    limit: int = Query(20, ge=1, le=100, description="Number of results (feed mode)"),
+    offset: int = Query(0, ge=0, description="Offset for pagination (feed mode)"),
+    user: SupabaseUser = Depends(require_auth),
+):
+    """Complete the fit using TATTOO 9-dimension scoring."""
+    from services.outfit_engine import get_outfit_engine
+
+    try:
+        engine = get_outfit_engine()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Outfit engine not available: {str(e)}",
+        )
+
+    result = engine.build_outfit(
+        product_id=product_id,
+        items_per_category=items_per_category if not category else limit,
+        target_category=category,
+        offset=offset,
+        limit=limit,
+        user_id=user.id,
+    )
+
+    if result.get("error") and result.get("source_product") is None:
+        if "not found" in result["error"].lower():
+            raise HTTPException(status_code=404, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return result
+
+
+@router.get(
     "/trending",
     summary="Get trending products",
     description="""
