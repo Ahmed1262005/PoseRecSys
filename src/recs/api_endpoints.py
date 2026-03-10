@@ -369,63 +369,6 @@ def get_similar(
 
 
 @router.get(
-    "/complete-fit/{product_id}",
-    summary="Complete the Fit - Complementary items",
-    description="""
-    Returns complementary items to complete an outfit with the given product.
-
-    **Carousel mode** (default): Returns top N items from each complementary
-    category (tops→bottoms+outerwear, bottoms→tops+outerwear, etc.).
-
-    **Feed mode**: Set `category` to a specific target category. Returns
-    paginated items for that category only (use `offset`/`limit` for infinite scroll).
-
-    Uses precomputed outfit candidate pools for <1s response time when available,
-    with automatic fallback to live pgvector search.
-    """
-)
-def complete_fit(
-    product_id: str,
-    items_per_category: int = Query(4, ge=1, le=20, description="Items per category (carousel mode)"),
-    category: Optional[str] = Query(None, description="Target category for feed mode (e.g. 'tops', 'outerwear')"),
-    offset: int = Query(0, ge=0, description="Pagination offset (feed mode)"),
-    limit: Optional[int] = Query(None, ge=1, le=100, description="Max items (feed mode)"),
-    user: SupabaseUser = Depends(require_auth),
-):
-    """Find complementary items using TATTOO scoring with precomputed pools."""
-    from services.outfit_engine import get_outfit_engine
-
-    try:
-        engine = get_outfit_engine()
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Outfit engine not available: {str(e)}"
-        )
-
-    result = engine.build_outfit(
-        product_id=product_id,
-        items_per_category=items_per_category,
-        target_category=category,
-        offset=offset,
-        limit=limit,
-        user_id=user.id,
-    )
-
-    if result.get("error") and result.get("source_product") is None:
-        if "not found" in result["error"].lower():
-            raise HTTPException(status_code=404, detail=result["error"])
-        raise HTTPException(status_code=500, detail=result["error"])
-
-    # Sanitize image URLs in results
-    for cat_data in result.get("recommendations", {}).values():
-        for item in cat_data.get("items", []):
-            sanitize_product_images(item)
-
-    return result
-
-
-@router.get(
     "/trending",
     summary="Get trending products",
     description="""
@@ -789,8 +732,8 @@ class FullOnboardingRequestV3(BaseModel):
     - brands has renamed fields
     - styleDiscovery simplified to completed + swipedItems
     """
-    # User identification (optional — JWT is the source of truth)
-    userId: Optional[str] = None
+    # User identification
+    userId: str
     gender: str = "female"
 
     # All modules with new structure
@@ -808,10 +751,7 @@ class FullOnboardingRequestV3(BaseModel):
     completedAt: Optional[str] = None
 
 
-def transform_frontend_to_profile_v3(
-    request: FullOnboardingRequestV3,
-    user_id: Optional[str] = None,
-) -> OnboardingProfile:
+def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> OnboardingProfile:
     """
     Transform V3 frontend request structure to internal OnboardingProfile.
 
@@ -821,13 +761,8 @@ def transform_frontend_to_profile_v3(
     - Simplified typePreferences -> top_types, bottom_types, dress_types, outerwear_types
     - Separate pattern arrays -> patterns_liked, patterns_avoided
     - stylePersona is now stored
-
-    ``user_id`` is the canonical identity from JWT.  Falls back to
-    ``request.userId`` for backward-compatible callers that still send it
-    in the body.
     """
-    resolved_user_id = user_id or request.userId or ""
-    profile = OnboardingProfile(user_id=resolved_user_id)
+    profile = OnboardingProfile(user_id=request.userId)
 
     # Core Setup
     profile.categories = request.coreSetup.categories
@@ -1321,11 +1256,11 @@ async def save_onboarding_v3(
 ):
     """Save V3 onboarding profile."""
 
-    # User ID comes from JWT token (source of truth, not the request body)
+    # User ID comes from JWT token
     user_id = user.id
 
     # Transform V3 frontend structure to internal profile
-    profile = transform_frontend_to_profile_v3(request, user_id=user_id)
+    profile = transform_frontend_to_profile_v3(request)
 
     # Check what we have
     has_taste_vector = profile.taste_vector is not None and len(profile.taste_vector) == 512

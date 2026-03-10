@@ -1662,7 +1662,7 @@ def _apply_judge_position_penalty(
 
 
 # ---------------------------------------------------------------------------
-# GREEDY DIVERSE SELECTION (MMR-style)
+# L2-STRATIFIED DIVERSE SELECTION (v3.5)
 # ---------------------------------------------------------------------------
 
 def _item_signature(entry: Dict) -> Dict[str, Optional[str]]:
@@ -1674,67 +1674,105 @@ def _item_signature(entry: Dict) -> Dict[str, Optional[str]]:
         "pattern": (p.pattern or "").lower() or None,
         "silhouette": (p.silhouette or "").lower() or None,
         "brand": (p.brand or "").lower() or None,
+        "category_l2": (p.gemini_category_l2 or "").lower() or None,
     }
 
 
 def _sig_overlap(a: Dict[str, Optional[str]], b: Dict[str, Optional[str]]) -> float:
     """Fraction of shared attributes between two signatures (0-1).
     Higher = more similar = less diverse.
+    category_l2 is weighted 2x because it drives the biggest visual
+    difference (jeans vs skirt vs trousers = fundamentally different looks).
     """
-    keys = ["color", "fabric", "pattern", "silhouette", "brand"]
-    matches = 0
-    compared = 0
-    for k in keys:
+    # (key, weight) — category_l2 counts double
+    _WEIGHTED_KEYS = [
+        ("color", 1), ("fabric", 1), ("pattern", 1),
+        ("silhouette", 1), ("brand", 1), ("category_l2", 2),
+    ]
+    weighted_matches = 0.0
+    total_weight = 0.0
+    for k, w in _WEIGHTED_KEYS:
         va, vb = a.get(k), b.get(k)
         if va and vb:
-            compared += 1
+            total_weight += w
             if va == vb:
-                matches += 1
-    if compared == 0:
+                weighted_matches += w
+    if total_weight == 0:
         return 0.0
-    return matches / compared
+    return weighted_matches / total_weight
+
+
+def _get_l2(entry: Dict) -> str:
+    """Get normalized L2 category from a scored entry."""
+    p: AestheticProfile = entry["profile"]
+    return (p.gemini_category_l2 or "unknown").lower().strip()
 
 
 def _diverse_select(
     scored: List[Dict],
-    diversity_lambda: float = 0.08,
-    quality_floor: float = 0.08,
+    diversity_lambda: float = 0.25,
+    quality_floor: float = 0.18,
 ) -> List[Dict]:
-    """Greedy MMR-style reranking for intra-result diversity with quality floor.
+    """L2-stratified round-robin + MMR reranking for multi-look diversity.
 
-    Picks items one-by-one.  For each slot after the first, the score is:
-        adjusted = (1 - λ) * tattoo  -  λ * max_overlap_with_selected
+    Phase 1 (round-robin): Pick the best item from each unique L2
+    subcategory (jeans, skirt, trousers, shorts, etc.).  This guarantees
+    that the top-N items span fundamentally different garment types —
+    the biggest driver of "different looks".
 
-    where max_overlap is the worst-case attribute overlap with any item
-    already in the result list.  This pushes each next pick to be
-    different in color, fabric, pattern, silhouette, and brand.
+    Phase 2 (MMR): Fill remaining slots using greedy MMR with 6-dim
+    signature (category_l2 weighted 2x).
 
-    Quality floor (v3): a candidate is only eligible if its raw tattoo
-    score is within ``quality_floor`` of the best score.  This prevents
-    MMR from drifting into low-quality "diverse" picks (generic neutrals).
+    Quality floor: a candidate must score within ``quality_floor`` of
+    the best TATTOO score to be eligible.  Prevents low-quality picks.
     """
     if len(scored) <= 1:
         return scored
 
+    best_score = scored[0]["tattoo"]
+
+    # --- Phase 1: L2 round-robin ---
+    # Group candidates by L2 subcategory, preserving TATTOO order within each
+    from collections import OrderedDict
+    l2_groups: OrderedDict = OrderedDict()
+    for entry in scored:
+        l2 = _get_l2(entry)
+        if l2 not in l2_groups:
+            l2_groups[l2] = []
+        l2_groups[l2].append(entry)
+
+    # Pick the best from each L2 group (if within quality floor)
     selected: List[Dict] = []
     selected_sigs: List[Dict[str, Optional[str]]] = []
-    remaining = list(scored)
+    used_ids: Set[str] = set()
 
-    # First pick: highest tattoo score (no diversity penalty)
-    best_score = remaining[0]["tattoo"]
-    selected.append(remaining.pop(0))
-    selected_sigs.append(_item_signature(selected[0]))
+    for l2, group in l2_groups.items():
+        for entry in group:
+            if entry["tattoo"] >= best_score - quality_floor:
+                pid = entry["profile"].product_id
+                if pid not in used_ids:
+                    selected.append(entry)
+                    selected_sigs.append(_item_signature(entry))
+                    used_ids.add(pid)
+                    break  # one per L2 in phase 1
+
+    # If round-robin yielded nothing (all below floor), seed with the best
+    if not selected:
+        selected.append(scored[0])
+        selected_sigs.append(_item_signature(scored[0]))
+        used_ids.add(scored[0]["profile"].product_id)
+
+    # --- Phase 2: MMR for remaining slots ---
+    remaining = [e for e in scored if e["profile"].product_id not in used_ids]
 
     while remaining:
         best_idx = 0
         best_adjusted = -999.0
 
         for i, cand in enumerate(remaining):
-            # Quality floor: skip candidates too far below the best
             if cand["tattoo"] < best_score - quality_floor:
                 continue
             cand_sig = _item_signature(cand)
-            # Max overlap with any already-selected item
             max_overlap = max(
                 _sig_overlap(cand_sig, sel_sig)
                 for sel_sig in selected_sigs
@@ -1744,9 +1782,8 @@ def _diverse_select(
                 best_adjusted = adjusted
                 best_idx = i
 
-        # If no candidate passed the quality floor, relax and take the best remaining
         if best_adjusted <= -999.0 and remaining:
-            best_idx = 0  # already sorted by tattoo desc
+            best_idx = 0
 
         picked = remaining.pop(best_idx)
         selected.append(picked)
@@ -1801,6 +1838,43 @@ _OUTER_LAYER_TOP_L2 = {
 
 # Outerwear L2 types that are really waistcoats/vests — exclude from outerwear results
 _OUTERWEAR_WAISTCOAT_L2 = {"vest", "hoodie"}
+
+# --- Outerwear appropriateness gates (v3.5) ---
+# Three groups of outerwear that need context-gating to avoid bad pairings.
+#
+# Group 1 — Formal outerwear (blazer, suit jacket):
+#   Hard-filter at formality 1 (unless formal occasion override).
+#   Penalize -0.10 at formality 2 (unless formal occasion override).
+#   Boost +0.03 at formality 3+.
+#
+# Group 2 — Volume/statement outerwear (poncho, cape, kimono, bolero, shrug):
+#   Overwhelms lightweight/delicate items regardless of fabric weight.
+#   Hard-filter at formality 1 (NO occasion override).
+#   Penalize -0.10 at formality 2 (NO occasion override).
+#   Neutral at formality 3+.
+#
+# Group 3 — Heavy outerwear (parka, coat):
+#   Too heavy for very lightweight sources (cami, tank).
+#   Penalize -0.10 at formality 1 (unless formal occasion override).
+#   Normal +0.03 structured bonus at formality 2+.
+
+_FORMAL_OUTER_L2 = frozenset({"blazer", "suit jacket"})
+_VOLUME_OUTER_L2 = frozenset({"poncho", "cape", "kimono", "bolero", "shrug"})
+_HEAVY_OUTER_L2 = frozenset({"parka", "coat"})
+
+_OUTERWEAR_GATE_OCCASIONS = frozenset({
+    "work", "office", "business", "formal", "semi-formal",
+    "interview", "meeting", "date night", "evening",
+    "cocktail", "dinner",
+})
+_OUTERWEAR_MIN_FORMALITY = 3       # source >= business-casual → formal outerwear welcome
+_OUTERWEAR_CASUAL_PENALTY = -0.10  # casual source + inappropriate outerwear → penalize
+
+# Backward-compat aliases (used by tests and report scripts)
+_BLAZER_GATE_L2 = _FORMAL_OUTER_L2
+_BLAZER_GATE_OCCASIONS = _OUTERWEAR_GATE_OCCASIONS
+_BLAZER_MIN_FORMALITY = _OUTERWEAR_MIN_FORMALITY
+_BLAZER_CASUAL_PENALTY = _OUTERWEAR_CASUAL_PENALTY
 
 # Name suffixes that indicate a product is really a top, not outerwear.
 # Gemini sometimes misclassifies "Blazer Top", "Jacket Top", etc. as outerwear.
@@ -1966,6 +2040,19 @@ def _filter_by_gemini_category(
             cand_name_lower = (cand.name or "").lower()
             if any(cand_name_lower.endswith(s) for s in _TOP_SUFFIXES_IN_OUTERWEAR):
                 continue
+            # Outerwear appropriateness gates (v3.5): hard-filter
+            # inappropriate outerwear for very casual sources.
+            src_form = getattr(source, "formality_level", 2)
+            if src_form <= 1:
+                src_occs = {o.lower().strip() for o in (source.occasions or [])}
+                has_formal_occ = bool(src_occs & _OUTERWEAR_GATE_OCCASIONS)
+                # Formal outerwear (blazer, suit jacket): filter unless formal occasion
+                if cand_l2 in _FORMAL_OUTER_L2 and not has_formal_occ:
+                    continue
+                # Volume/statement outerwear (poncho, cape, kimono, etc.):
+                # always filter at formality 1 — no occasion override
+                if cand_l2 in _VOLUME_OUTER_L2:
+                    continue
         filtered.append(cand)
     return filtered
 
@@ -2635,7 +2722,6 @@ class OutfitEngine:
         effective_limit = limit if (target_category and limit) else items_per_category
 
         # 4. Retrieve, enrich, filter, score per category (PARALLEL)
-        _t0 = _time.monotonic()
         recommendations: Dict[str, Any] = {}
         all_top_picks = []
 
@@ -2665,8 +2751,6 @@ class OutfitEngine:
                     user_clusters, user_profile, profile_scorer,
                     user_styles,
                 )
-
-        _timings["score_categories"] = _time.monotonic() - _t0
 
         # --- Outfit ranking (v3.1, gated by use_llm_judge) ---
         # After per-category scoring + veto, rank complete outfit combos
@@ -2739,15 +2823,6 @@ class OutfitEngine:
             float(p.get("price", 0) or 0) for p in all_top_picks
         )
 
-        _timings["total"] = _time.monotonic() - _t_start
-        logger.info(
-            "build_outfit %s: %.2fs total (source=%.2fs, profile=%.2fs, scoring=%.2fs) strategies=%s",
-            product_id[:12] if product_id else "?",
-            _timings["total"], _timings.get("fetch_source", 0),
-            _timings.get("load_profile", 0), _timings.get("score_categories", 0),
-            dict(self._retrieval_strategies),
-        )
-
         return {
             "source_product": source_fmt,
             "recommendations": recommendations,
@@ -2767,7 +2842,6 @@ class OutfitEngine:
                 "outfit_ranking": outfit_ranked,
                 "judge_notes": self._collect_judge_notes(),
                 "retrieval_strategies": dict(self._retrieval_strategies),
-                "timings": {k: round(v, 3) for k, v in _timings.items()},
             },
             "complete_outfit": {
                 "items": [product_id] + [p["product_id"] for p in all_top_picks],
@@ -3305,6 +3379,7 @@ class OutfitEngine:
         })
         _STRUCTURED_BONUS = 0.03
         _KNIT_CARDIGAN_PENALTY = -0.06
+
         # T-shirts, tank tops, henleys, etc. are jersey knit even when
         # apparent_fabric says "cotton" or "cotton blend".  Treat them
         # as knit for the cardigan-redundancy check.
@@ -3327,16 +3402,39 @@ class OutfitEngine:
             cosine = cand.similarity
             tattoo = W_COMPAT * compat + W_COSINE * cosine
 
-            # Outerwear styling adjustments (v3.2)
+            # Outerwear styling adjustments (v3.2 + outerwear gates v3.5)
             style_adj = 0.0
             if target_broad == "outerwear":
                 cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
                 # Knit-on-knit penalty: knit source + cardigan = redundant
                 if source_is_knit and cand_l2 == "cardigan":
                     style_adj += _KNIT_CARDIGAN_PENALTY
-                # Structured outerwear bonus: prefer jackets/blazers/coats
+                # --- Outerwear appropriateness gates (v3.5) ---
+                _src_occs = {o.lower().strip() for o in (source.occasions or [])}
+                _has_formal_occ = bool(_src_occs & _OUTERWEAR_GATE_OCCASIONS)
                 if cand_l2 in _STRUCTURED_OUTERWEAR:
-                    style_adj += _STRUCTURED_BONUS
+                    if cand_l2 in _FORMAL_OUTER_L2:
+                        # Formal outerwear gate (blazer, suit jacket)
+                        if source.formality_level >= _OUTERWEAR_MIN_FORMALITY:
+                            style_adj += _STRUCTURED_BONUS
+                        elif _has_formal_occ:
+                            pass  # formal occasion but casual formality: neutral
+                        else:
+                            style_adj += _OUTERWEAR_CASUAL_PENALTY
+                    elif cand_l2 in _HEAVY_OUTER_L2:
+                        # Heavy outerwear gate (parka, coat)
+                        if source.formality_level <= 1 and not _has_formal_occ:
+                            style_adj += _OUTERWEAR_CASUAL_PENALTY
+                        else:
+                            style_adj += _STRUCTURED_BONUS
+                    else:
+                        # Other structured (jacket, bomber, denim jacket, etc.)
+                        style_adj += _STRUCTURED_BONUS
+                # Volume/statement outerwear (poncho, cape, kimono, etc.)
+                # Not in _STRUCTURED_OUTERWEAR so no bonus; penalize for casual.
+                elif cand_l2 in _VOLUME_OUTER_L2:
+                    if source.formality_level <= 2:
+                        style_adj += _OUTERWEAR_CASUAL_PENALTY
             tattoo += style_adj
 
             # Profile-aware adjustment (v2.2)
@@ -3519,9 +3617,15 @@ class OutfitEngine:
             "name": p.name,
             "brand": p.brand,
             "category": p.gemini_category_l1 or p.category,
+            "category_l2": p.gemini_category_l2 or None,
             "price": p.price,
             "image_url": p.image_url,
+            "gallery_images": getattr(p, "gallery_images", None) or [],
             "base_color": p.color_family or p.primary_color,
+            "color_family": p.color_family or None,
+            "material_family": p.material_family or None,
+            "pattern": p.pattern or None,
+            "silhouette": p.silhouette or None,
             "rank": rank,
             "tattoo_score": round(entry["tattoo"], 4),
             "compatibility_score": round(entry["compat"], 4),

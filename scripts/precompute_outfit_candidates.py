@@ -30,11 +30,8 @@ Environment:
     K_RETRIEVE=150         Over-retrieve from faiss before filtering (default 150)
     BATCH_SIZE=5000        Upload batch size (default 5000)
     EXPORT_BATCH=1000      Embedding export batch size (default 1000)
-    CATALOG_BATCH=1000     Product/attrs export batch size (must be ≤1000, Supabase row limit)
-    SKIP_EMBEDDINGS=1      Skip embedding export if cache exists (default 0)
-    SKIP_CATALOG=1         Skip catalog export if cache exists (default 0)
-    INCREMENTAL=1          Only process new products — skip sources that already
-                           have pools in outfit_candidates (default 0 = full rebuild)
+    CATALOG_BATCH=5000     Product/attrs export batch size (default 5000)
+    SKIP_EXPORT=1          Skip export if cache files exist (default 0)
     DRY_RUN=1              Compute but don't upload (default 0)
 """
 
@@ -94,13 +91,7 @@ K_RETRIEVE = int(os.environ.get("K_RETRIEVE", 150))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 5000))
 EXPORT_BATCH = int(os.environ.get("EXPORT_BATCH", 1000))
 CATALOG_BATCH = int(os.environ.get("CATALOG_BATCH", 1000))
-SKIP_EMBEDDINGS = os.environ.get("SKIP_EMBEDDINGS", "0") == "1"
-SKIP_CATALOG = os.environ.get("SKIP_CATALOG", "0") == "1"
-# Legacy: SKIP_EXPORT=1 sets both SKIP_EMBEDDINGS and SKIP_CATALOG
-if os.environ.get("SKIP_EXPORT", "0") == "1":
-    SKIP_EMBEDDINGS = True
-    SKIP_CATALOG = True
-INCREMENTAL = os.environ.get("INCREMENTAL", "0") == "1"
+SKIP_EXPORT = os.environ.get("SKIP_EXPORT", "0") == "1"
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
 CACHE_DIR = ROOT / "data" / "precompute_cache"
@@ -153,6 +144,28 @@ _IMPLICIT_KNIT_L2 = frozenset({
     "turtleneck", "mock neck top",
 })
 
+# Outerwear appropriateness gates (v3.5): must stay in sync with outfit_engine
+# Group 1 — Formal outerwear (blazer, suit jacket)
+_FORMAL_OUTER_L2 = frozenset({"blazer", "suit jacket"})
+# Group 2 — Volume/statement outerwear (poncho, cape, kimono, bolero, shrug)
+_VOLUME_OUTER_L2 = frozenset({"poncho", "cape", "kimono", "bolero", "shrug"})
+# Group 3 — Heavy outerwear (parka, coat)
+_HEAVY_OUTER_L2 = frozenset({"parka", "coat"})
+
+_OUTERWEAR_GATE_OCCASIONS = frozenset({
+    "work", "office", "business", "formal", "semi-formal",
+    "interview", "meeting", "date night", "evening",
+    "cocktail", "dinner",
+})
+_OUTERWEAR_MIN_FORMALITY = 3
+_OUTERWEAR_CASUAL_PENALTY = -0.10
+
+# Backward-compat aliases (used by tests)
+_BLAZER_L2 = _FORMAL_OUTER_L2
+_BLAZER_OK_OCCASIONS = _OUTERWEAR_GATE_OCCASIONS
+_BLAZER_MIN_FORMALITY = _OUTERWEAR_MIN_FORMALITY
+_BLAZER_CASUAL_PENALTY = _OUTERWEAR_CASUAL_PENALTY
+
 # Cardigan density cap in outerwear results
 _MAX_CARDIGANS_OUTERWEAR = 1
 
@@ -202,68 +215,6 @@ def _new_supabase():
     return create_client(s.supabase_url, s.supabase_service_key)
 
 
-def _retry_query(fn, max_retries=5, label="query"):
-    """Execute a Supabase query with retry + exponential backoff.
-
-    Handles 503 (connection pool exhausted), PGRST002, and transient errors.
-    """
-    for attempt in range(max_retries):
-        try:
-            return fn()
-        except Exception as e:
-            err_str = str(e)
-            if attempt < max_retries - 1:
-                wait = min(2 ** attempt, 30)  # 1s, 2s, 4s, 8s, 16s (capped at 30s)
-                log.warning("  %s attempt %d/%d failed: %s — retrying in %ds",
-                            label, attempt + 1, max_retries, err_str[:120], wait)
-                time.sleep(wait)
-            else:
-                log.error("  %s FAILED after %d attempts: %s", label, max_retries, err_str[:200])
-                raise
-
-
-# ===========================================================================
-# Incremental: fetch existing source_ids
-# ===========================================================================
-
-def fetch_existing_source_ids() -> Set[str]:
-    """Query outfit_candidates to get source_ids that already have pools.
-
-    Uses rank=1 rows for efficient dedup (one per source×target).
-    Batches with offset pagination since the table can be large.
-    """
-    if not INCREMENTAL:
-        return set()
-
-    log.info("INCREMENTAL mode: fetching existing source_ids from outfit_candidates...")
-    existing: Set[str] = set()
-    offset = 0
-    batch = 1000
-
-    while True:
-        try:
-            r = _retry_query(
-                lambda: _new_supabase().table("outfit_candidates").select(
-                    "source_id"
-                ).eq("rank", 1).range(offset, offset + batch - 1).execute(),
-                label=f"existing sources offset={offset}"
-            )
-            rows = r.data or []
-            if not rows:
-                break
-            for row in rows:
-                existing.add(str(row["source_id"]))
-            offset += batch
-            if len(rows) < batch:
-                break
-        except Exception as e:
-            log.warning("Failed to fetch existing source_ids at offset %d: %s", offset, e)
-            break
-
-    log.info("  Found %d existing source_ids (will be skipped)", len(existing))
-    return existing
-
-
 # ===========================================================================
 # Phase 1a: Export embeddings
 # ===========================================================================
@@ -273,8 +224,8 @@ def export_embeddings():
 
     Returns (embeddings, product_ids, categories, category_l2) numpy arrays.
     """
-    if SKIP_EMBEDDINGS and EMB_FILE.exists() and IDS_FILE.exists() and CATS_FILE.exists():
-        log.info("SKIP_EMBEDDINGS=1 and cache files exist, loading from disk")
+    if SKIP_EXPORT and EMB_FILE.exists() and IDS_FILE.exists() and CATS_FILE.exists():
+        log.info("SKIP_EXPORT=1 and cache files exist, loading from disk")
         embeddings = np.load(str(EMB_FILE))
         product_ids = np.load(str(IDS_FILE), allow_pickle=True)
         categories = np.load(str(CATS_FILE), allow_pickle=True)
@@ -287,10 +238,7 @@ def export_embeddings():
     sb = _get_supabase()
 
     # Step 1: Get total count
-    r = _retry_query(
-        lambda: sb.table("image_embeddings").select("id", count="exact").limit(1).execute(),
-        label="embeddings count"
-    )
+    r = sb.table("image_embeddings").select("id", count="exact").limit(1).execute()
     total = r.count
     log.info("Total image_embeddings rows: %d", total)
 
@@ -349,10 +297,7 @@ def export_embeddings():
         ).range(offset, offset + CATALOG_BATCH - 1).execute()
         return r.data or []
 
-    r = _retry_query(
-        lambda: sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute(),
-        label="category mapping count"
-    )
+    r = sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute()
     cat_total = r.count
     cat_offsets = list(range(0, cat_total, CATALOG_BATCH))
 
@@ -365,42 +310,7 @@ def export_embeddings():
                 cat_map[pid] = _broad(row.get("category_l1")) or ""
                 l2_map[pid] = (row.get("category_l2") or "").lower().strip()
 
-    log.info("Category mapping from product_attributes: %d products (L1+L2)", len(cat_map))
-
-    # Step 3b: Fallback categories from products.category for products
-    # that have embeddings but no product_attributes row.
-    missing_cats = [pid for pid in all_ids if pid not in cat_map or not cat_map[pid]]
-    if missing_cats:
-        log.info("Fetching fallback categories from products.category for %d products...", len(missing_cats))
-
-        # Broad-category mapping for products.category values
-        _PRODUCTS_CAT_TO_BROAD = {
-            "tops": "tops", "bottoms": "bottoms", "dresses": "dresses",
-            "outerwear": "outerwear", "activewear": "tops", "swimwear": "tops",
-        }
-
-        # Batch fetch products.category (must stay ≤1000 per request)
-        fallback_count = 0
-        for i in range(0, len(missing_cats), 500):
-            batch_ids = missing_cats[i:i + 500]
-            try:
-                _sb = _new_supabase()
-                r = _sb.table("products").select(
-                    "id, category"
-                ).in_("id", batch_ids).execute()
-                for row in (r.data or []):
-                    pid = str(row["id"])
-                    raw_cat = (row.get("category") or "").lower().strip()
-                    broad = _PRODUCTS_CAT_TO_BROAD.get(raw_cat)
-                    if broad and (pid not in cat_map or not cat_map[pid]):
-                        cat_map[pid] = broad
-                        fallback_count += 1
-            except Exception as e:
-                log.warning("Fallback category batch failed at offset %d: %s", i, e)
-
-        log.info("  Fallback categories applied: %d products now have categories", fallback_count)
-
-    log.info("Total category mapping: %d products", len([v for v in cat_map.values() if v]))
+    log.info("Category mapping: %d products (L1+L2)", len(cat_map))
 
     # Step 4: Build aligned arrays
     embeddings = np.array(all_embeddings, dtype=np.float32)
@@ -434,8 +344,8 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
         product_data: Dict[product_id → products row dict]
         attrs_data:   Dict[product_id → product_attributes row dict]
     """
-    if SKIP_CATALOG and PRODUCTS_FILE.exists() and ATTRS_FILE.exists():
-        log.info("SKIP_CATALOG=1 and catalog cache exists, loading from disk")
+    if SKIP_EXPORT and PRODUCTS_FILE.exists() and ATTRS_FILE.exists():
+        log.info("SKIP_EXPORT=1 and catalog cache exists, loading from disk")
         with open(PRODUCTS_FILE, "rb") as f:
             product_data = pickle.load(f)
         with open(ATTRS_FILE, "rb") as f:
@@ -450,111 +360,65 @@ def export_product_catalog() -> Tuple[Dict[str, dict], Dict[str, dict]]:
     log.info("Exporting products table...")
     product_data: Dict[str, dict] = {}
 
-    r = _retry_query(
-        lambda: sb.table("products").select("id", count="exact").limit(1).execute(),
-        label="products count"
-    )
+    r = sb.table("products").select("id", count="exact").limit(1).execute()
     prod_total = r.count
     prod_offsets = list(range(0, prod_total, CATALOG_BATCH))
     log.info("  %d products in %d batches", prod_total, len(prod_offsets))
 
     def _fetch_products(offset: int) -> List[dict]:
-        """Fetch a batch of products with retry on failure."""
-        for attempt in range(3):
-            try:
-                _sb = _new_supabase()
-                r = _sb.table("products").select(
-                    _PRODUCT_COLUMNS
-                ).range(offset, offset + CATALOG_BATCH - 1).execute()
-                return r.data or []
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s
-                else:
-                    log.warning("  products batch offset=%d FAILED after 3 attempts: %s", offset, e)
-                    return []
+        _sb = _new_supabase()
+        r = _sb.table("products").select(
+            _PRODUCT_COLUMNS
+        ).range(offset, offset + CATALOG_BATCH - 1).execute()
+        return r.data or []
 
     t0 = time.time()
     done = 0
-    failed_batches = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = {pool.submit(_fetch_products, off): off for off in prod_offsets}
         for future in as_completed(futures):
-            try:
-                rows = future.result()
-            except Exception as e:
-                failed_batches += 1
-                log.warning("  products batch FAILED: %s", e)
-                rows = []
+            rows = future.result()
             for row in rows:
                 pid = str(row.get("id", ""))
                 if pid:
                     product_data[pid] = row
             done += 1
             if done % 10 == 0:
-                log.info("  products: %d/%d batches, %d rows, %d failed",
-                         done, len(prod_offsets), len(product_data), failed_batches)
+                log.info("  products: %d/%d batches, %d rows", done, len(prod_offsets), len(product_data))
 
-    prod_coverage = 100 * len(product_data) / prod_total if prod_total else 0
-    log.info("  Products exported: %d/%d rows (%.0f%%) in %.0fs, %d batches failed",
-             len(product_data), prod_total, prod_coverage, time.time() - t0, failed_batches)
-    if prod_coverage < 90:
-        log.warning("  LOW COVERAGE on products: only %.0f%%. Consider WORKERS=4 to reduce throttling.", prod_coverage)
+    log.info("  Products exported: %d rows in %.0fs", len(product_data), time.time() - t0)
 
     # --- Export product_attributes table ---
     log.info("Exporting product_attributes table...")
     attrs_data: Dict[str, dict] = {}
 
-    r = _retry_query(
-        lambda: sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute(),
-        label="attrs count"
-    )
+    r = sb.table("product_attributes").select("sku_id", count="exact").limit(1).execute()
     attrs_total = r.count
     attrs_offsets = list(range(0, attrs_total, CATALOG_BATCH))
     log.info("  %d attrs in %d batches", attrs_total, len(attrs_offsets))
 
     def _fetch_attrs(offset: int) -> List[dict]:
-        """Fetch a batch of product attributes with retry on failure."""
-        for attempt in range(3):
-            try:
-                _sb = _new_supabase()
-                r = _sb.table("product_attributes").select(
-                    _ATTRS_COLUMNS
-                ).range(offset, offset + CATALOG_BATCH - 1).execute()
-                return r.data or []
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(0.5 * (2 ** attempt))
-                else:
-                    log.warning("  attrs batch offset=%d FAILED after 3 attempts: %s", offset, e)
-                    return []
+        _sb = _new_supabase()
+        r = _sb.table("product_attributes").select(
+            _ATTRS_COLUMNS
+        ).range(offset, offset + CATALOG_BATCH - 1).execute()
+        return r.data or []
 
     t0 = time.time()
     done = 0
-    failed_batches = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = {pool.submit(_fetch_attrs, off): off for off in attrs_offsets}
         for future in as_completed(futures):
-            try:
-                rows = future.result()
-            except Exception as e:
-                failed_batches += 1
-                log.warning("  attrs batch FAILED: %s", e)
-                rows = []
+            rows = future.result()
             for row in rows:
                 pid = str(row.get("sku_id", ""))
                 if pid:
                     attrs_data[pid] = row
             done += 1
             if done % 10 == 0:
-                log.info("  attrs: %d/%d batches, %d rows, %d failed",
-                         done, len(attrs_offsets), len(attrs_data), failed_batches)
+                log.info("  attrs: %d/%d batches, %d rows", done, len(attrs_offsets), len(attrs_data))
 
-    attrs_coverage = 100 * len(attrs_data) / attrs_total if attrs_total else 0
-    log.info("  Attrs exported: %d/%d rows (%.0f%%) in %.0fs, %d batches failed",
-             len(attrs_data), attrs_total, attrs_coverage, time.time() - t0, failed_batches)
-    if attrs_coverage < 90:
-        log.warning("  LOW COVERAGE on attrs: only %.0f%%. Consider WORKERS=4 to reduce throttling.", attrs_coverage)
+    log.info("  Attrs exported: %d rows in %.0fs", len(attrs_data), time.time() - t0)
 
     # Save cache
     with open(PRODUCTS_FILE, "wb") as f:
@@ -624,19 +488,13 @@ def build_profiles_cache(
     attrs_data: Dict[str, dict],
     product_ids: np.ndarray,
 ) -> Dict[str, AestheticProfile]:
-    """Pre-build AestheticProfile for every product that has product data.
-
-    Products with product_attributes get full profiles (all Gemini fields).
-    Products without attrs get "lite" profiles (basic fields only — category,
-    brand, price, color). TATTOO scoring degrades gracefully: cosine + basic
-    compat dimensions, no styling scorer, no hard avoids.
+    """Pre-build AestheticProfile for every product that has both product + attrs data.
 
     Returns Dict[product_id → AestheticProfile].
     """
     cache: Dict[str, AestheticProfile] = {}
     missing_product = 0
-    full_profiles = 0
-    lite_profiles = 0
+    missing_attrs = 0
     build_errors = 0
     total = len(product_ids)
 
@@ -646,14 +504,13 @@ def build_profiles_cache(
         if not prod:
             missing_product += 1
             continue
-        attrs = attrs_data.get(pid_str, {})
+        attrs = attrs_data.get(pid_str)
+        if not attrs:
+            missing_attrs += 1
+            continue
         try:
             profile = AestheticProfile.from_product_and_attrs(prod, attrs)
             cache[pid_str] = profile
-            if attrs:
-                full_profiles += 1
-            else:
-                lite_profiles += 1
         except Exception as e:
             build_errors += 1
             if build_errors <= 5:
@@ -661,14 +518,14 @@ def build_profiles_cache(
 
     log.info("Profile cache: %d/%d profiles built (%.0f%%)",
              len(cache), total, 100 * len(cache) / total if total else 0)
-    log.info("  %d full (with attrs), %d lite (no attrs), %d missing from products, %d errors",
-             full_profiles, lite_profiles, missing_product, build_errors)
+    log.info("  %d missing from products table, %d missing from product_attributes, %d build errors",
+             missing_product, missing_attrs, build_errors)
     log.info("  product_data has %d entries, attrs_data has %d entries",
              len(product_data), len(attrs_data))
 
     if len(cache) < total * 0.5:
         log.warning("  LOW COVERAGE: only %.0f%% of embedding products have profiles. "
-                     "Check CATALOG_BATCH and run without SKIP_CATALOG.",
+                     "Run with SKIP_EXPORT=0 to re-export catalog.",
                      100 * len(cache) / total if total else 0)
 
     return cache
@@ -705,14 +562,38 @@ def _score_one_pool(
         cosine = cand.similarity
         tattoo = W_COMPAT * compat + W_COSINE * cosine
 
-        # Outerwear style adjustment
+        # Outerwear style adjustment (v3.2 + outerwear gates v3.5)
         style_adj = 0.0
         if target_broad == "outerwear":
             cand_l2 = (cand.gemini_category_l2 or "").lower().strip()
             if source_is_knit and cand_l2 == "cardigan":
                 style_adj += _KNIT_CARDIGAN_PENALTY
+            # --- Outerwear appropriateness gates (v3.5) ---
+            _src_occasions = {o.lower().strip() for o in (source.occasions or [])}
+            _has_formal_occ = bool(_src_occasions & _OUTERWEAR_GATE_OCCASIONS)
             if cand_l2 in _STRUCTURED_OUTERWEAR:
-                style_adj += _STRUCTURED_BONUS
+                if cand_l2 in _FORMAL_OUTER_L2:
+                    # Formal outerwear gate (blazer, suit jacket)
+                    if source.formality_level >= _OUTERWEAR_MIN_FORMALITY:
+                        style_adj += _STRUCTURED_BONUS
+                    elif _has_formal_occ:
+                        pass  # formal occasion but casual formality: neutral
+                    else:
+                        style_adj += _OUTERWEAR_CASUAL_PENALTY
+                elif cand_l2 in _HEAVY_OUTER_L2:
+                    # Heavy outerwear gate (parka, coat)
+                    if source.formality_level <= 1 and not _has_formal_occ:
+                        style_adj += _OUTERWEAR_CASUAL_PENALTY
+                    else:
+                        style_adj += _STRUCTURED_BONUS
+                else:
+                    # Other structured (jacket, bomber, denim jacket, etc.)
+                    style_adj += _STRUCTURED_BONUS
+            # Volume/statement outerwear (poncho, cape, kimono, etc.)
+            # Not in _STRUCTURED_OUTERWEAR so no bonus; penalize for casual.
+            elif cand_l2 in _VOLUME_OUTER_L2:
+                if source.formality_level <= 2:
+                    style_adj += _OUTERWEAR_CASUAL_PENALTY
         tattoo += style_adj
 
         # Outfit avoids (no user_styles at precompute time)
@@ -755,6 +636,27 @@ def _score_one_pool(
     # Sort by TATTOO descending
     scored.sort(key=lambda e: e["tattoo"], reverse=True)
 
+    # --- L2 subcategory diversity cap (v3.5) ---
+    # Limit each L2 type to max L2_CAP items in the pool.  This ensures
+    # that the precomputed pool contains multiple garment types (jeans,
+    # skirts, trousers, shorts, etc.) instead of being dominated by one.
+    _L2_CAP = 15
+    l2_counts: Dict[str, int] = {}
+    diversified: List[Dict[str, Any]] = []
+    l2_overflow: List[Dict[str, Any]] = []
+    for entry in scored:
+        l2 = (entry["profile"].gemini_category_l2 or "unknown").lower().strip()
+        l2_counts[l2] = l2_counts.get(l2, 0) + 1
+        if l2_counts[l2] <= _L2_CAP:
+            diversified.append(entry)
+        else:
+            l2_overflow.append(entry)
+    # Fill remaining slots from overflow (maintain quality ordering)
+    remaining_slots = max(0, CANDIDATES_PER_POOL - len(diversified))
+    if remaining_slots > 0:
+        diversified.extend(l2_overflow[:remaining_slots])
+    scored = diversified
+
     # --- Cardigan density cap (v3.2) ---
     if target_broad == "outerwear":
         kept, overflow, card_count = [], [], 0
@@ -780,7 +682,6 @@ def score_all_pools(
     category_l2: np.ndarray,
     indexes: Dict[str, Tuple[faiss.IndexFlatIP, np.ndarray]],
     profiles_cache: Dict[str, AestheticProfile],
-    existing_source_ids: Optional[Set[str]] = None,
 ) -> List[Tuple[str, str, str, float, float, int]]:
     """Retrieve, filter, score all source×target pools.
 
@@ -792,9 +693,6 @@ def score_all_pools(
       4. Full TATTOO scoring: compat + cosine + style_adj + avoid_adj + styling_adj
       5. Density caps (cardigan cap for outerwear)
       6. Keep top CANDIDATES_PER_POOL
-
-    When existing_source_ids is provided (INCREMENTAL mode), sources already
-    in that set are skipped entirely — their existing pools are kept as-is.
 
     Returns list of (source_id, target_category, candidate_id,
                      cosine_similarity, tattoo_score, rank).
@@ -823,10 +721,7 @@ def score_all_pools(
     total_pools = 0
     total_scored = 0
     skipped_no_profile = 0
-    skipped_existing = 0
     t0 = time.time()
-
-    _existing = existing_source_ids or set()
 
     # Stats accumulators
     filter_stats = {"pre_filter": 0, "post_filter": 0, "post_hard_avoid": 0}
@@ -867,12 +762,6 @@ def score_all_pools(
             cand_cache_misses = 0
             for i in range(n_sources):
                 src_pid = str(src_ids[i])
-
-                # INCREMENTAL: skip sources that already have pools
-                if src_pid in _existing:
-                    skipped_existing += 1
-                    continue
-
                 src_profile = profiles_cache.get(src_pid)
                 if not src_profile:
                     skipped_no_profile += 1
@@ -962,8 +851,6 @@ def score_all_pools(
     log.info("Scoring complete: %d pools, %d candidate rows in %.0fs (%.1f min)",
              total_pools, len(results), elapsed, elapsed / 60)
     log.info("  Skipped (no profile): %d sources", skipped_no_profile)
-    if skipped_existing:
-        log.info("  Skipped (INCREMENTAL, already precomputed): %d source×target pairs", skipped_existing)
 
     pre = filter_stats["pre_filter"]
     post = filter_stats["post_filter"]
@@ -1001,27 +888,24 @@ def upload_results(results: List[Tuple[str, str, str, float, float, int]]):
 
     sb = _get_supabase()
 
-    if not INCREMENTAL:
-        # Full rebuild: truncate existing data (batched to avoid Supabase statement timeout)
-        log.info("Clearing existing outfit_candidates...")
-        for tgt in ["tops", "bottoms", "outerwear", "dresses"]:
-            try:
-                sb.table("outfit_candidates").delete().eq(
-                    "target_category", tgt
-                ).execute()
-                log.info("  cleared target_category=%s", tgt)
-            except Exception as e:
-                log.warning("  clear target_category=%s failed: %s", tgt, str(e)[:120])
-        # Catch any rows with unexpected target_category values
+    # Truncate existing data (batched to avoid Supabase statement timeout)
+    log.info("Clearing existing outfit_candidates...")
+    for tgt in ["tops", "bottoms", "outerwear", "dresses"]:
         try:
-            sb.table("outfit_candidates").delete().neq(
-                "source_id", "00000000-0000-0000-0000-000000000000"
+            sb.table("outfit_candidates").delete().eq(
+                "target_category", tgt
             ).execute()
-            log.info("  cleared remaining rows")
+            log.info("  cleared target_category=%s", tgt)
         except Exception as e:
-            log.warning("  final clear failed (may already be empty): %s", str(e)[:120])
-    else:
-        log.info("INCREMENTAL mode: keeping existing rows, upserting new ones only")
+            log.warning("  clear target_category=%s failed: %s", tgt, str(e)[:120])
+    # Catch any rows with unexpected target_category values
+    try:
+        sb.table("outfit_candidates").delete().neq(
+            "source_id", "00000000-0000-0000-0000-000000000000"
+        ).execute()
+        log.info("  cleared remaining rows")
+    except Exception as e:
+        log.warning("  final clear failed (may already be empty): %s", str(e)[:120])
 
     # Prepare batches
     total = len(results)
@@ -1082,8 +966,6 @@ def main():
     log.info("Precompute Outfit Candidates (Full TATTOO Pipeline)")
     log.info("  WORKERS=%d  K_RETRIEVE=%d  FINAL_K=%d  BATCH=%d  DRY_RUN=%s",
              WORKERS, K_RETRIEVE, CANDIDATES_PER_POOL, BATCH_SIZE, DRY_RUN)
-    log.info("  SKIP_EMBEDDINGS=%s  SKIP_CATALOG=%s  CATALOG_BATCH=%d  INCREMENTAL=%s",
-             SKIP_EMBEDDINGS, SKIP_CATALOG, CATALOG_BATCH, INCREMENTAL)
     log.info("=" * 60)
 
     t_total = time.time()
@@ -1110,15 +992,11 @@ def main():
     # Free catalog data — profiles_cache holds everything we need
     del product_data, attrs_data
 
-    # Incremental: fetch existing source_ids to skip
-    existing_source_ids = fetch_existing_source_ids()
-
     # Phase 3b: Score all pools
     log.info("\n--- Phase 3b: Score all pools (full TATTOO pipeline) ---")
     results = score_all_pools(
         embeddings, product_ids, categories, category_l2,
         indexes, profiles_cache,
-        existing_source_ids=existing_source_ids,
     )
 
     # Phase 4: Upload

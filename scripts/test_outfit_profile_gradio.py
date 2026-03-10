@@ -922,35 +922,7 @@ def explore_clusters(
 
 
 def get_random_product(category_filter: str = "") -> str:
-    """Fetch a random product that has precomputed outfit pools.
-
-    Queries outfit_candidates (rank=1 for efficient dedup) to ensure
-    the product will hit the fast <1s precomputed path.
-    Falls back to v1.0.0.2 product_attributes if no precomputed pools.
-    """
-    import random
-
-    # Primary: pick from products with precomputed pools (fast path)
-    try:
-        r = SUPABASE.table("outfit_candidates").select(
-            "source_id"
-        ).eq("rank", 1).limit(500).execute()
-        if r.data:
-            ids = list({row["source_id"] for row in r.data})
-            # If category filter, narrow down via product_attributes
-            if category_filter and ids:
-                batch = ids[:200]  # check a subset
-                r2 = SUPABASE.table("product_attributes").select(
-                    "sku_id"
-                ).in_("sku_id", batch).eq("category_l1", category_filter).execute()
-                if r2.data:
-                    ids = [row["sku_id"] for row in r2.data]
-            if ids:
-                return str(random.choice(ids))
-    except Exception as e:
-        print(f"Precomputed pool query failed, trying fallback: {e}")
-
-    # Fallback: v1.0.0.2 products (may hit slow path)
+    """Fetch a random in-stock product that has v1.0.0.2 styling metadata."""
     try:
         q = SUPABASE.table("product_attributes").select(
             "sku_id, category_l1"
@@ -959,9 +931,11 @@ def get_random_product(category_filter: str = "") -> str:
             q = q.eq("category_l1", category_filter)
         else:
             q = q.in_("category_l1", ["Tops", "Bottoms", "Outerwear"])
+        # Grab a batch and pick randomly
         result = q.limit(200).execute()
         if not result.data:
             return ""
+        import random
         row = random.choice(result.data)
         return str(row["sku_id"])
     except Exception as e:
