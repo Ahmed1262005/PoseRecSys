@@ -10,6 +10,29 @@ from datetime import datetime
 
 
 # ============================================================================
+# Set Role Normalization (Gemini set_features.set_role → clean enum)
+# ============================================================================
+
+_NORMALIZE_SET_ROLE: Dict[str, str] = {
+    "top": "top", "shirt": "top", "matching top": "top",
+    "matching_top": "top", "matching top available": "top",
+    "matching bra": "top", "matching bralette": "top",
+    "bottom": "bottom", "skirt": "bottom", "matching skirt": "bottom",
+    "matching set": "full_set", "matching_set": "full_set",
+    "top and bottom": "full_set", "top_and_bottom": "full_set",
+    "full_set": "full_set", "complete": "full_set",
+    "complete_outfit": "full_set", "matching top and bottom": "full_set",
+    "matching bikini or one-piece": "full_set",
+    "matching blazer": "outerwear", "outer": "outerwear",
+    "outerwear": "outerwear", "matching lady jacket": "outerwear",
+    "matching waistcoat": "outerwear",
+    "dress": "dress",
+    "matching shirt": "top", "matching apparel": "unknown",
+    "matching accessory": "accessory", "matching scrunchie": "accessory",
+}
+
+
+# ============================================================================
 # Index Settings
 # ============================================================================
 
@@ -31,6 +54,8 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "unordered(apparent_fabric)",    # 6th - Material
         "unordered(primary_color)",      # 7th - Color
         "unordered(source_description)", # 8th - Product description from source site
+        "unordered(vibe_tags)",          # 9th - Mood/aesthetic descriptors (v1.0.0.2)
+        "unordered(detail_tags)",        # 10th - Visual detail descriptors (lace, ruffle, etc.)
     ],
 
     # ===========================================
@@ -79,6 +104,10 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "stretch",
         "rise",
         "leg_shape",
+
+        # Set / Co-ord
+        "filterOnly(is_set)",
+        "set_role",
 
         # Price (numeric)
         "price",
@@ -146,11 +175,13 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "brand",
         "category_l1",
         "category_l2",
+        "category_l3",
         "broad_category",
         "article_type",
         "primary_color",
         "color_family",
         "pattern",
+        "pattern_scale",
         "apparent_fabric",
         "style_tags",
         "occasions",
@@ -162,6 +193,32 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "neckline",
         "sleeve_type",
         "rise",
+        # Coverage (v1.0.0.2)
+        "arm_coverage",
+        "shoulder_coverage",
+        "neckline_depth",
+        "midriff_exposure",
+        "back_openness",
+        "sheerness_visual",
+        # Shape / Silhouette (v1.0.0.2)
+        "body_cling_visual",
+        "structure_level",
+        "drape_level",
+        "cropped_degree",
+        "waist_definition_visual",
+        "leg_volume_visual",
+        # Details (v1.0.0.2)
+        "has_pockets",
+        "slit_presence",
+        "slit_height",
+        "detail_tags",
+        "lining_status_likely",
+        "pocket_types",
+        # Metadata
+        "vibe_tags",
+        "coverage_level",
+        "styling_role",
+        # Pricing & stock
         "price",
         "original_price",
         "is_on_sale",
@@ -169,6 +226,8 @@ ALGOLIA_INDEX_SETTINGS: Dict[str, Any] = {
         "trending_score",
         "image_url",
         "gallery_images",
+        "is_set",
+        "set_role",
     ],
 }
 
@@ -319,7 +378,24 @@ ALGOLIA_SYNONYMS: List[Dict[str, Any]] = [
     {"objectID": "retro_vintage", "type": "synonym",
      "synonyms": ["retro", "vintage"]},
     {"objectID": "athleisure_sporty", "type": "synonym",
-     "synonyms": ["athleisure", "activewear"]},
+     "synonyms": ["athleisure", "activewear", "athletic", "sportswear"]},
+
+    # -------------------------------------------------------------------
+    # VOCABULARY GAPS — common user terms → product-name terms
+    # -------------------------------------------------------------------
+    {"objectID": "gym_activewear", "type": "oneWaySynonym",
+     "input": "gym", "synonyms": ["activewear"]},
+    {"objectID": "workout_activewear", "type": "oneWaySynonym",
+     "input": "workout", "synonyms": ["activewear"]},
+
+    # -------------------------------------------------------------------
+    # BRAND ABBREVIATIONS — partial names → full brand names
+    # (helps text search; brand facet filters are handled by the planner)
+    # -------------------------------------------------------------------
+    {"objectID": "alo_brand", "type": "oneWaySynonym",
+     "input": "alo", "synonyms": ["alo yoga"]},
+    {"objectID": "plt_brand", "type": "oneWaySynonym",
+     "input": "plt", "synonyms": ["prettylittlething"]},
 ]
 
 
@@ -474,6 +550,45 @@ def product_to_algolia_record(
         "leg_shape": attrs.get("leg_shape"),
 
         # ==========================================
+        # Coverage Attributes (v1.0.0.2)
+        # ==========================================
+        "arm_coverage": attrs.get("arm_coverage"),
+        "shoulder_coverage": attrs.get("shoulder_coverage"),
+        "neckline_depth": attrs.get("neckline_depth"),
+        "midriff_exposure": attrs.get("midriff_exposure"),
+        "back_openness": attrs.get("back_openness"),
+        "sheerness_visual": attrs.get("sheerness_visual"),
+
+        # ==========================================
+        # Shape / Silhouette Attributes (v1.0.0.2)
+        # ==========================================
+        "body_cling_visual": attrs.get("body_cling_visual"),
+        "structure_level": attrs.get("structure_level"),
+        "drape_level": attrs.get("drape_level"),
+        "bulk_visual": attrs.get("bulk_visual"),
+        "cropped_degree": attrs.get("cropped_degree"),
+        "waist_definition_visual": attrs.get("waist_definition_visual"),
+        "leg_volume_visual": attrs.get("leg_volume_visual"),
+
+        # ==========================================
+        # Detail Attributes (v1.0.0.2)
+        # ==========================================
+        "has_pockets": bool(attrs.get("has_pockets_visible")) if attrs.get("has_pockets_visible") is not None else None,
+        "slit_presence": bool(attrs.get("slit_presence")) if attrs.get("slit_presence") is not None else None,
+        "slit_height": attrs.get("slit_height"),
+        "detail_tags": attrs.get("detail_tags") or [],
+        "lining_status_likely": attrs.get("lining_status_likely"),
+
+        # ==========================================
+        # Additional Metadata
+        # ==========================================
+        "category_l3": attrs.get("category_l3"),
+        "pattern_scale": attrs.get("pattern_scale"),
+        "vibe_tags": attrs.get("vibe_tags") or [],
+        "coverage_level": attrs.get("coverage_level"),
+        "styling_role": attrs.get("styling_role"),
+
+        # ==========================================
         # Pricing
         # ==========================================
         "price": float(product.get("price", 0) or 0),
@@ -504,6 +619,26 @@ def product_to_algolia_record(
         "image_url": product.get("primary_image_url"),
         "gallery_images": product.get("gallery_images") or [],
     }
+
+    # ==========================================
+    # Set / Co-ord (from Gemini set_features)
+    # ==========================================
+    set_features = attrs.get("set_features") or {}
+    if isinstance(set_features, dict) and set_features.get("is_set"):
+        record["is_set"] = True
+        raw_role = (set_features.get("set_role") or "").lower().strip()
+        record["set_role"] = _NORMALIZE_SET_ROLE.get(raw_role, "unknown")
+    else:
+        record["is_set"] = False
+
+    # ==========================================
+    # Pocket Details (from Gemini pocket_details JSONB)
+    # ==========================================
+    pocket_details = attrs.get("pocket_details") or {}
+    if isinstance(pocket_details, dict):
+        pocket_types = pocket_details.get("types") or []
+        if pocket_types:
+            record["pocket_types"] = [t.lower().strip() for t in pocket_types if isinstance(t, str)]
 
     # Remove None values (Algolia doesn't like them)
     return {k: v for k, v in record.items() if v is not None}

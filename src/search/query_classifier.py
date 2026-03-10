@@ -28,7 +28,7 @@ _BRAND_ORIGINALS: Dict[str, str] = {}
 # Fallback set of common fashion brands (lowercase).
 # The full set is loaded from the DB via load_brands().
 _FALLBACK_BRANDS: Set[str] = {
-    "boohoo", "alo yoga", "alo", "missguided", "forever 21", "forever21",
+    "boohoo", "alo yoga", "missguided", "forever 21", "forever21",
     "free people", "reformation", "nasty gal", "prettylittlething",
     "asos", "zara", "h&m", "mango", "topshop", "urban outfitters",
     "anthropologie", "lululemon", "nike", "adidas", "gap", "uniqlo",
@@ -144,6 +144,16 @@ def _get_brands() -> Set[str]:
     if _BRAND_NAMES is not None:
         return _BRAND_NAMES
     return _FALLBACK_BRANDS
+
+
+def get_brand_originals() -> Dict[str, str]:
+    """Return the {lowercase: OriginalCasing} brand map.
+
+    Populated by ``load_brands()`` at server startup from Algolia facets.
+    If brands have not been loaded yet, returns an empty dict (the caller
+    should treat this as "brand list unavailable").
+    """
+    return dict(_BRAND_ORIGINALS)
 
 
 # ============================================================================

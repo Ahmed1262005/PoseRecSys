@@ -112,6 +112,352 @@ class HybridSearchService:
         return self._attribute_engine
 
     # =========================================================================
+    # User-filter / planner-filter separation
+    # =========================================================================
+
+    # Fields on HybridSearchRequest that are NOT user-selectable filters.
+    # These are control/pagination/metadata fields — never snapshot them.
+    _NON_FILTER_SNAPSHOT_FIELDS = frozenset({
+        "query", "page", "page_size", "session_id", "search_session_id",
+        "cursor", "sort_by", "semantic_boost", "planner_context",
+        "selected_filters", "selection_labels",
+    })
+
+    # Request field -> result dict key mapping for user post-filtering.
+    # Some request fields map to differently-named keys in result dicts.
+    _USER_FILTER_FIELD_MAP: Dict[str, str] = {
+        # Category fields
+        "categories": "broad_category",      # List[str] match
+        "category_l1": "category_l1",        # List[str] match
+        "category_l2": "category_l2",        # List[str] match
+        # Brand
+        "brands": "brand",                   # List[str] match
+        "exclude_brands": "brand",           # List[str] NOT match
+        # Appearance — single-value in result dict
+        "colors": "primary_color",           # Also check "colors" list
+        "color_family": "color_family",
+        "patterns": "pattern",
+        "formality": "formality",
+        "fit_type": "fit_type",
+        "neckline": "neckline",
+        "sleeve_type": "sleeve_type",
+        "length": "length",
+        "rise": "rise",
+        "silhouette": "silhouette",
+        "article_type": "article_type",
+        "style_tags": "style_tags",          # Multi-value in result dict
+        # Multi-value in result dict
+        "materials": "materials",
+        "occasions": "occasions",
+        "seasons": "seasons",
+    }
+
+    # Multi-value result dict fields (list of strings instead of scalar)
+    _USER_FILTER_MULTI_FIELDS = frozenset({
+        "style_tags", "materials", "occasions", "seasons",
+    })
+
+    # "colors" needs special handling: check both "primary_color" (scalar)
+    # and "colors" (list) in result dicts.
+    _USER_FILTER_DUAL_FIELDS = frozenset({"colors"})
+
+    # Multi-value facet fields — result dict stores these as lists.
+    # Each list element is counted individually (same as Algolia).
+    _MULTI_VALUE_FACET_FIELDS = frozenset({
+        "occasions", "seasons", "style_tags", "materials",
+    })
+
+    # Null-like values excluded from facet counts.
+    _FACET_NULL_VALUES = frozenset({"null", "n/a", "none", ""})
+
+    def _compute_facets_from_results(
+        self,
+        results: List[dict],
+    ) -> Optional[Dict[str, List["FacetValue"]]]:
+        """Compute facet counts from merged results.
+
+        Mirrors Algolia's facet processing logic:
+        1. For each field in _FACET_FIELDS, count value occurrences
+        2. Multi-value fields (occasions, seasons, etc.): each list
+           element counted individually
+        3. is_on_sale (bool) → "true"/"false" strings
+        4. Filter: count > 1, not null/N/A, field needs >= 2 distinct values
+        5. Sort values by count descending
+
+        Used when semantic results contributed to the merge (so Algolia
+        facets alone don't represent the full result set), or when user
+        UI filters narrowed the results post-merge.
+        """
+        if not results:
+            return None
+
+        from collections import Counter
+
+        computed: Dict[str, List[FacetValue]] = {}
+
+        for facet_field in _FACET_FIELDS:
+            counter: Counter = Counter()
+
+            if facet_field == "is_on_sale":
+                # Boolean → string
+                for item in results:
+                    val = item.get("is_on_sale")
+                    if val is not None:
+                        counter[str(val).lower()] += 1
+            elif facet_field in self._MULTI_VALUE_FACET_FIELDS:
+                # List field — count each element
+                for item in results:
+                    vals = item.get(facet_field)
+                    if vals and isinstance(vals, list):
+                        for v in vals:
+                            if v and str(v).lower() not in self._FACET_NULL_VALUES:
+                                counter[v] += 1
+            else:
+                # Scalar field
+                for item in results:
+                    val = item.get(facet_field)
+                    if val is not None:
+                        s = str(val)
+                        if s.lower() not in self._FACET_NULL_VALUES:
+                            counter[s] += 1
+
+            # Apply Algolia's 3 filtering rules:
+            # 1. count > 1
+            # 2. null/junk already excluded above
+            # 3. field needs >= 2 distinct valid values
+            values = [
+                FacetValue(value=val, count=cnt)
+                for val, cnt in sorted(counter.items(), key=lambda x: -x[1])
+                if cnt > 1
+            ]
+            if len(values) >= 2:
+                computed[facet_field] = values
+
+        return computed if computed else None
+
+    @staticmethod
+    def _snapshot_user_filters(
+        request: HybridSearchRequest,
+    ) -> Dict[str, Any]:
+        """Capture user-set filters BEFORE the planner mutates the request.
+
+        A filter is considered "user-set" if it is non-None (and non-default
+        for special fields like on_sale_only which defaults to False).
+
+        Returns a dict of {field_name: value} for every user-set filter.
+        This snapshot is used later to post-filter merged results.
+        """
+        snapshot: Dict[str, Any] = {}
+        for field_name in HybridSearchRequest.model_fields:
+            if field_name in HybridSearchService._NON_FILTER_SNAPSHOT_FIELDS:
+                continue
+            val = getattr(request, field_name, None)
+            # on_sale_only defaults to False; True = user set it
+            if field_name == "on_sale_only":
+                if val is True:
+                    snapshot[field_name] = val
+                continue
+            # is_set defaults to None; non-None = user set it
+            if field_name == "is_set":
+                if val is not None:
+                    snapshot[field_name] = val
+                continue
+            # All other filters default to None; non-None = user set
+            if val is not None:
+                snapshot[field_name] = val
+        return snapshot
+
+    @staticmethod
+    def _strip_filters_from_request(
+        request: HybridSearchRequest,
+        filter_names: Set[str],
+    ) -> HybridSearchRequest:
+        """Return a copy of *request* with the named filter fields reset.
+
+        Used to remove user-set UI filters from the request before passing
+        it to Algolia / semantic search.  The planner-derived filters remain.
+        """
+        if not filter_names:
+            return request
+        resets: Dict[str, Any] = {}
+        for field in filter_names:
+            if field == "on_sale_only":
+                resets[field] = False
+            elif field == "is_set":
+                resets[field] = None
+            elif field in ("min_price", "max_price"):
+                resets[field] = None
+            else:
+                resets[field] = None
+        return request.model_copy(update=resets)
+
+    def _apply_user_post_filters(
+        self,
+        results: List[dict],
+        user_filters: Dict[str, Any],
+    ) -> List[dict]:
+        """Apply user UI filters on merged results (post-RRF, pre-rerank).
+
+        This is the core of the architectural fix: user-set filters from
+        dropdowns/UI (brand, color, price, etc.) are NOT sent to Algolia
+        or semantic search as hard pre-filters. Instead, they are applied
+        here on the full merged result set — similar to facet filtering.
+
+        This prevents conflicts between the planner's structural guesses
+        (e.g. category_l1=Activewear) and the user's brand selection
+        (e.g. brand=Nike) which may not overlap.
+        """
+        if not user_filters:
+            return results
+
+        filtered = results
+
+        # --- Price filters ---
+        if "min_price" in user_filters:
+            min_p = user_filters["min_price"]
+            filtered = [
+                r for r in filtered
+                if r.get("price") is not None and float(r["price"]) >= min_p
+            ]
+        if "max_price" in user_filters:
+            max_p = user_filters["max_price"]
+            filtered = [
+                r for r in filtered
+                if r.get("price") is not None and float(r["price"]) <= max_p
+            ]
+
+        # --- Sale filter ---
+        if user_filters.get("on_sale_only"):
+            filtered = [r for r in filtered if r.get("is_on_sale")]
+
+        # --- Set / co-ord filter ---
+        if "is_set" in user_filters:
+            is_set_val = user_filters["is_set"]
+            filtered = [r for r in filtered if bool(r.get("is_set")) == is_set_val]
+
+        # --- Brand inclusion ---
+        if "brands" in user_filters:
+            brand_vals = {b.lower() for b in user_filters["brands"]}
+            filtered = [
+                r for r in filtered
+                if r.get("brand") and r["brand"].lower() in brand_vals
+            ]
+
+        # --- Brand exclusion ---
+        if "exclude_brands" in user_filters:
+            excl_vals = {b.lower() for b in user_filters["exclude_brands"]}
+            filtered = [
+                r for r in filtered
+                if not r.get("brand") or r["brand"].lower() not in excl_vals
+            ]
+
+        # --- Category filters (broad_category, category_l1, category_l2) ---
+        for cat_field, result_key in [
+            ("categories", "broad_category"),
+            ("category_l1", "category_l1"),
+            ("category_l2", "category_l2"),
+        ]:
+            if cat_field in user_filters:
+                vals = {v.lower() for v in user_filters[cat_field]}
+                filtered = [
+                    r for r in filtered
+                    if r.get(result_key) and r[result_key].lower() in vals
+                ]
+
+        # --- Colors (dual: check primary_color scalar AND colors list) ---
+        if "colors" in user_filters:
+            vals = {v.lower() for v in user_filters["colors"]}
+            filtered = [
+                r for r in filtered
+                if (r.get("primary_color") and r["primary_color"].lower() in vals)
+                or (r.get("colors") and any(c.lower() in vals for c in r["colors"]))
+            ]
+
+        # --- Color family ---
+        if "color_family" in user_filters:
+            vals = {v.lower() for v in user_filters["color_family"]}
+            filtered = [
+                r for r in filtered
+                if r.get("color_family") and r["color_family"].lower() in vals
+            ]
+
+        # --- Single-value attribute filters ---
+        _SINGLE_ATTRS = [
+            ("patterns", "pattern"),
+            ("formality", "formality"),
+            ("fit_type", "fit_type"),
+            ("neckline", "neckline"),
+            ("sleeve_type", "sleeve_type"),
+            ("length", "length"),
+            ("rise", "rise"),
+            ("silhouette", "silhouette"),
+            ("article_type", "article_type"),
+        ]
+        for req_field, data_field in _SINGLE_ATTRS:
+            if req_field in user_filters:
+                vals = {v.lower() for v in user_filters[req_field]}
+                filtered = [
+                    r for r in filtered
+                    if r.get(data_field) and r[data_field].lower() in vals
+                ]
+
+        # --- Multi-value attribute filters ---
+        _MULTI_ATTRS = [
+            ("materials", "materials"),
+            ("occasions", "occasions"),
+            ("seasons", "seasons"),
+            ("style_tags", "style_tags"),
+        ]
+        for req_field, data_field in _MULTI_ATTRS:
+            if req_field in user_filters:
+                vals = {v.lower() for v in user_filters[req_field]}
+                filtered = [
+                    r for r in filtered
+                    if r.get(data_field) and any(
+                        v.lower() in vals for v in r[data_field]
+                    )
+                ]
+
+        # --- Exclusion filters (exclude_neckline, exclude_colors, etc.) ---
+        _NULL_VALUES = {"n/a", "none", "null", "unknown", "-", ""}
+        for excl_field, data_field in self._EXCLUDE_SINGLE_FIELDS:
+            if excl_field in user_filters:
+                vals = {v.lower() for v in user_filters[excl_field]}
+                filtered = [
+                    r for r in filtered
+                    if not (
+                        r.get(data_field)
+                        and r[data_field].lower() not in _NULL_VALUES
+                        and r[data_field].lower() in vals
+                    )
+                ]
+        for excl_field, data_field in self._EXCLUDE_MULTI_FIELDS:
+            if excl_field in user_filters:
+                vals = {v.lower() for v in user_filters[excl_field]}
+                filtered = [
+                    r for r in filtered
+                    if not (
+                        r.get(data_field)
+                        and any(
+                            v.lower() in vals
+                            for v in r[data_field]
+                            if v.lower() not in _NULL_VALUES
+                        )
+                    )
+                ]
+
+        if len(filtered) < len(results):
+            logger.info(
+                "User post-filter applied on merged results",
+                before=len(results),
+                after=len(filtered),
+                dropped=len(results) - len(filtered),
+                user_filters=list(user_filters.keys()),
+            )
+
+        return filtered
+
+    # =========================================================================
     # Main Search
     # =========================================================================
 
@@ -159,6 +505,18 @@ class HybridSearchService:
         clean_query = html_mod.unescape(request.query).strip()
         if clean_query != request.query:
             request = request.model_copy(update={"query": clean_query})
+
+        # Step 0b: Snapshot user-set UI filters BEFORE the planner mutates
+        # the request.  These will be applied as post-filters on merged
+        # results instead of being sent as Algolia/semantic pre-filters.
+        # This prevents the "athleisure + Nike brand → 0 results" bug where
+        # the planner's category guess AND the user's brand filter conflict.
+        user_filters = self._snapshot_user_filters(request)
+        if user_filters:
+            logger.info(
+                "Snapshotted user UI filters for post-filtering",
+                user_filters=list(user_filters.keys()),
+            )
 
         # -----------------------------------------------------------------
         # SORT-MODE: handled via post-sort after hybrid merge+rerank.
@@ -461,6 +819,38 @@ class HybridSearchService:
             semantic_weight = request.semantic_boost
             algolia_weight = 1.0 - semantic_weight
 
+        # -----------------------------------------------------------------
+        # Step 2b½: Strip user UI filters from the request.
+        #
+        # The request now has BOTH user-set filters AND planner-derived
+        # filters merged together. We need the planner-derived filters
+        # for Algolia (structural: category_l1, mode exclusions) but NOT
+        # the user's UI selections (brand, color, price dropdowns).
+        #
+        # User filters will be applied post-RRF as computational filters
+        # on the full merged result set (like Algolia facets).
+        #
+        # We build a "pipeline request" with user filters stripped — this
+        # is what Algolia and semantic search will use.  The user_filters
+        # snapshot (captured in Step 0b) is applied after RRF merge.
+        # -----------------------------------------------------------------
+        if user_filters:
+            pipeline_request = self._strip_filters_from_request(
+                request, set(user_filters.keys()),
+            )
+            logger.info(
+                "Stripped user UI filters from pipeline request",
+                stripped=list(user_filters.keys()),
+                remaining_filters={
+                    f: getattr(pipeline_request, f)
+                    for f in HybridSearchRequest.model_fields
+                    if f not in self._NON_FILTER_SNAPSHOT_FIELDS
+                    and getattr(pipeline_request, f) not in (None, False, [])
+                },
+            )
+        else:
+            pipeline_request = request
+
         # Step 2c: Build Algolia filter strings.
         # When the planner is active OR skip_planner (refine path), split into
         # hard filters (brand, price, stock, category) and optional filters
@@ -471,7 +861,7 @@ class HybridSearchService:
         algolia_optional_filters: Optional[List[str]] = None
         use_split_filters = search_plan is not None or skip_planner
         if use_split_filters:
-            algolia_filters, algolia_optional_filters = self._build_algolia_filters_split(request)
+            algolia_filters, algolia_optional_filters = self._build_algolia_filters_split(pipeline_request)
             if algolia_optional_filters:
                 logger.info(
                     "Using optionalFilters for Algolia",
@@ -480,7 +870,7 @@ class HybridSearchService:
                     optional_count=len(algolia_optional_filters),
                 )
         else:
-            algolia_filters = self._build_algolia_filters(request)
+            algolia_filters = self._build_algolia_filters(pipeline_request)
 
         # Step 2d: Boost cluster brands in Algolia retrieval.
         # Two sources of brand boosting:
@@ -489,8 +879,9 @@ class HybridSearchService:
         #       style cluster(s) as the referenced brand.
         #   (b) User profile: when the user has preferred brands from
         #       onboarding, boost their cluster-adjacent brands.
-        # Skip when user explicitly filtered by brand (already constrained).
-        if not request.brands:
+        # Skip when pipeline already has brand constraints (vibe-brand or planner).
+        # User UI brand filters are post-applied, not on the pipeline request.
+        if not pipeline_request.brands:
             # (a) Vibe brand cluster boosting (query-level)
             if vibe_brand:
                 vibe_filters = self._build_vibe_brand_filters(vibe_brand)
@@ -562,13 +953,15 @@ class HybridSearchService:
         # run them in parallel.  For EXACT intent, semantic only runs if
         # Algolia returns 0, so we keep those sequential.
         #
-        # Auto-detect active filters from the request model.
-        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by", "planner_context"}
-        has_filters = any(
-            getattr(request, field_name) not in (None, False, [])
+        # Auto-detect active filters — either planner-derived (on
+        # pipeline_request) or user UI filters (applied post-merge).
+        # Both cause result drops, so we fetch more candidates.
+        has_pipeline_filters = any(
+            getattr(pipeline_request, field_name) not in (None, False, [])
             for field_name in HybridSearchRequest.model_fields
-            if field_name not in _NON_FILTER_FIELDS
+            if field_name not in self._NON_FILTER_SNAPSHOT_FIELDS
         )
+        has_filters = has_pipeline_filters or bool(user_filters)
         # Fetch extra semantic candidates when filters are active,
         # since strict post-filtering will drop non-matching results
         fetch_multiplier = 5 if has_filters else 3
@@ -587,8 +980,9 @@ class HybridSearchService:
         # or when filters are pre-resolved (refine path).  Subjective filters
         # (colors, patterns, occasions) are removed so pgvector returns more
         # candidates — the post-filter soft scoring will boost matches.
+        # Uses pipeline_request (user UI filters already stripped).
         if search_plan is not None or skip_planner:
-            semantic_request = request.model_copy(update={
+            semantic_request = pipeline_request.model_copy(update={
                 "categories": None,
                 "colors": None,
                 "patterns": None,
@@ -601,7 +995,7 @@ class HybridSearchService:
                 removed=["categories", "colors", "patterns", "occasions"],
             )
         else:
-            semantic_request = request
+            semantic_request = pipeline_request
 
         # Check if attribute-filtered semantic search should be used.
         # When v1.0.0.2 attribute filters are active, use the attribute
@@ -695,7 +1089,7 @@ class HybridSearchService:
         # results are scoped to that brand and remain useful even
         # without text matching.  Applies to ALL intents.
         _empty_query = not algolia_query or not algolia_query.strip()
-        _has_brand_filter = bool(request.brands)
+        _has_brand_filter = bool(pipeline_request.brands)
         _skip_algolia = _empty_query and not _has_brand_filter
         if _skip_algolia:
             logger.info(
@@ -797,8 +1191,12 @@ class HybridSearchService:
             enriched_snapshot = list(semantic_results)
             pre_filter_count = len(enriched_snapshot)
 
+            # Use pipeline_request (user UI filters stripped) for semantic
+            # post-filtering — only planner-derived filters apply here.
+            # User filters are applied post-RRF on all merged results.
             semantic_results = self._post_filter_semantic(
-                enriched_snapshot, request, expanded_filters=expanded_filters,
+                enriched_snapshot, pipeline_request,
+                expanded_filters=expanded_filters,
                 force_soft=skip_planner,
             )
 
@@ -810,7 +1208,7 @@ class HybridSearchService:
                 "exclude_seasons", "exclude_formality", "exclude_rise",
                 "exclude_style_tags",
             )
-            has_exclusions = any(getattr(request, f, None) for f in _EXCLUDE_FIELDS)
+            has_exclusions = any(getattr(pipeline_request, f, None) for f in _EXCLUDE_FIELDS)
 
             if len(semantic_results) == 0 and has_exclusions and pre_filter_count > 0:
                 # Retry 1: Keep exclusion filters but stop dropping null-valued items.
@@ -821,7 +1219,7 @@ class HybridSearchService:
                     pre_filter_count=pre_filter_count,
                 )
                 semantic_results = self._post_filter_semantic(
-                    list(enriched_snapshot), request,
+                    list(enriched_snapshot), pipeline_request,
                     expanded_filters=expanded_filters,
                     drop_nulls=False,
                     force_soft=skip_planner,
@@ -836,7 +1234,7 @@ class HybridSearchService:
                     "Progressive relaxation: retry without exclusion filters",
                     pre_filter_count=pre_filter_count,
                 )
-                relaxed_request = request.model_copy(update={
+                relaxed_request = pipeline_request.model_copy(update={
                     f: None for f in _EXCLUDE_FIELDS
                 })
                 semantic_results = self._post_filter_semantic(
@@ -892,8 +1290,10 @@ class HybridSearchService:
         # Use drop_nulls=True: if the user explicitly excludes certain attribute
         # values, products with unknown/missing attributes are suspect and should
         # be excluded from the final results.
+        # Post-merge exclusion filters use pipeline_request (planner-derived
+        # exclusions only). User UI exclusions are handled in _apply_user_post_filters.
         has_any_exclusion = any(
-            getattr(request, f, None)
+            getattr(pipeline_request, f, None)
             for f in (
                 "exclude_neckline", "exclude_sleeve_type", "exclude_length",
                 "exclude_fit_type", "exclude_silhouette", "exclude_patterns",
@@ -904,7 +1304,7 @@ class HybridSearchService:
         )
         if has_any_exclusion and merged:
             pre_count = len(merged)
-            strict_merged = self._apply_exclusion_filters(merged, request, drop_nulls=True)
+            strict_merged = self._apply_exclusion_filters(merged, pipeline_request, drop_nulls=True)
             # If strict filtering removes too many results (below page_size),
             # fall back to lenient mode that keeps null-attribute products
             min_needed = request.page_size
@@ -918,7 +1318,7 @@ class HybridSearchService:
                         dropped=pre_count - len(merged),
                     )
             else:
-                lenient_merged = self._apply_exclusion_filters(merged, request, drop_nulls=False)
+                lenient_merged = self._apply_exclusion_filters(merged, pipeline_request, drop_nulls=False)
                 if len(lenient_merged) >= min_needed:
                     merged = lenient_merged
                     logger.info(
@@ -960,6 +1360,27 @@ class HybridSearchService:
                     patterns=name_exclusions,
                 )
 
+        # Step 5d: Apply user UI filters on ALL merged results.
+        # This is the core architectural fix: user-set filters (brand, color,
+        # price dropdowns) are NOT sent to Algolia/semantic as pre-filters.
+        # Instead they are applied here on the full merged result set.
+        # This prevents "athleisure + Nike → 0" where the planner's category
+        # guess (Activewear) AND the user's brand (Nike) conflict.
+        if user_filters and merged:
+            merged = self._apply_user_post_filters(merged, user_filters)
+
+        # Step 5e: Recompute facets from merged results.
+        # Algolia facets only reflect its own result set. When semantic
+        # results contributed to the merge, or when user UI filters
+        # narrowed the results, recompute facets from the actual merged
+        # set so the UI shows accurate filter counts.
+        # When it's Algolia-only (no semantic), keep Algolia's facets
+        # as-is — they're already catalog-wide and correct.
+        if semantic_results or user_filters:
+            computed_facets = self._compute_facets_from_results(merged)
+            if computed_facets:
+                facets = computed_facets
+
         # Step 5.5: Load impression counts for soft demotion
         impression_counts: Optional[Dict[str, int]] = None
         if user_id:
@@ -979,7 +1400,9 @@ class HybridSearchService:
         # every result is from the same brand.
         # Exception: vibe-brand queries set request.brands programmatically
         # to cluster brands — we WANT the cap there to equalize across brands.
-        _user_set_brands = request.brands and not vibe_brand
+        # Use user_filters snapshot (not request.brands) because user UI
+        # brands are now post-filters, not on the pipeline request.
+        _user_set_brands = user_filters.get("brands") and not vibe_brand
         brand_cap = 0 if intent == QueryIntent.EXACT or _user_set_brands else None
 
         # Compute vibe-brand cluster set for reranker boost
@@ -1314,6 +1737,8 @@ class HybridSearchService:
                         "price": float(hit.get("price", 0) or 0),
                         "original_price": hit.get("original_price"),
                         "is_on_sale": hit.get("is_on_sale", False),
+                        "is_set": hit.get("is_set", False),
+                        "set_role": hit.get("set_role"),
                         "category_l1": hit.get("category_l1"),
                         "category_l2": hit.get("category_l2"),
                         "broad_category": hit.get("broad_category"),
@@ -1680,6 +2105,8 @@ class HybridSearchService:
                 "price": float(hit.get("price", 0) or 0),
                 "original_price": hit.get("original_price"),
                 "is_on_sale": hit.get("is_on_sale", False),
+                "is_set": hit.get("is_set", False),
+                "set_role": hit.get("set_role"),
                 "category_l1": hit.get("category_l1"),
                 "category_l2": hit.get("category_l2"),
                 "broad_category": hit.get("broad_category"),
@@ -1793,6 +2220,8 @@ class HybridSearchService:
                     "price": float(hit.get("price", 0) or 0),
                     "original_price": hit.get("original_price"),
                     "is_on_sale": hit.get("is_on_sale", False),
+                    "is_set": hit.get("is_set", False),
+                    "set_role": hit.get("set_role"),
                     "category_l1": hit.get("category_l1"),
                     "category_l2": hit.get("category_l2"),
                     "broad_category": hit.get("broad_category"),
@@ -2259,11 +2688,24 @@ class HybridSearchService:
     # =========================================================================
 
     _ENRICH_FIELDS = [
-        "category_l1", "category_l2", "primary_color", "color_family",
+        # Core attributes
+        "category_l1", "category_l2", "category_l3", "primary_color", "color_family",
         "formality", "silhouette", "neckline", "rise", "apparent_fabric",
-        "seasons", "fit_type", "sleeve_type", "length", "pattern",
+        "seasons", "fit_type", "sleeve_type", "length", "pattern", "pattern_scale",
         "style_tags", "occasions", "article_type", "broad_category",
         "is_on_sale", "original_price", "trending_score",
+        "is_set", "set_role",
+        # Coverage (v1.0.0.2)
+        "arm_coverage", "shoulder_coverage", "neckline_depth",
+        "midriff_exposure", "back_openness", "sheerness_visual",
+        # Shape / Silhouette (v1.0.0.2)
+        "body_cling_visual", "structure_level", "drape_level",
+        "cropped_degree", "waist_definition_visual", "leg_volume_visual",
+        # Details (v1.0.0.2)
+        "has_pockets", "slit_presence", "slit_height",
+        "detail_tags", "lining_status_likely", "pocket_types",
+        # Metadata
+        "vibe_tags", "coverage_level", "styling_role",
     ]
 
     def _enrich_semantic_results(self, results: List[dict]) -> List[dict]:
@@ -2517,6 +2959,9 @@ class HybridSearchService:
         if request.on_sale_only:
             hard_parts.append("is_on_sale:true")
 
+        if request.is_set is not None:
+            hard_parts.append(f"is_set:{str(request.is_set).lower()}")
+
         if request.categories:
             f = " OR ".join(f'broad_category:"{c}"' for c in request.categories)
             hard_parts.append(f"({f})")
@@ -2679,6 +3124,9 @@ class HybridSearchService:
         if request.on_sale_only:
             parts.append("is_on_sale:true")
 
+        if request.is_set is not None:
+            parts.append(f"is_set:{str(request.is_set).lower()}")
+
         if request.categories:
             cat_filter = " OR ".join(f'broad_category:"{c}"' for c in request.categories)
             parts.append(f"({cat_filter})")
@@ -2792,6 +3240,8 @@ class HybridSearchService:
             price=item.get("price", 0),
             original_price=item.get("original_price"),
             is_on_sale=item.get("is_on_sale", False),
+            is_set=item.get("is_set"),
+            set_role=item.get("set_role"),
             category_l1=item.get("category_l1"),
             category_l2=item.get("category_l2"),
             broad_category=item.get("broad_category"),
@@ -2891,6 +3341,10 @@ class HybridSearchService:
         # --- Sale filter ---
         if request.on_sale_only:
             filtered = [r for r in filtered if r.get("is_on_sale")]
+
+        # --- Set / co-ord filter ---
+        if request.is_set is not None:
+            filtered = [r for r in filtered if bool(r.get("is_set")) == request.is_set]
 
         # --- Price filters ---
         if request.min_price is not None:
@@ -3232,7 +3686,7 @@ class HybridSearchService:
             "occasions", "seasons", "formality", "fit_type", "neckline",
             "sleeve_type", "length", "rise", "silhouette", "article_type",
             "style_tags", "materials", "min_price", "max_price",
-            "on_sale_only",
+            "on_sale_only", "is_set",
             # Exclusion filters
             "exclude_neckline", "exclude_sleeve_type", "exclude_length",
             "exclude_fit_type", "exclude_silhouette", "exclude_patterns",

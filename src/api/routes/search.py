@@ -712,10 +712,12 @@ def _forward_search_signal(
 
     This wires search intent signals into the feed pipeline so the
     recommendation feed can adapt to what the user is searching for.
+    Forwards to both V2 and V3 pipelines (non-fatal if either fails).
     """
     if not session_id:
         return  # No session to update
 
+    # --- V2 pipeline ---
     try:
         from recs.api_endpoints import get_pipeline
         pipeline = get_pipeline()
@@ -744,4 +746,19 @@ def _forward_search_signal(
             filters=filters,
         )
     except Exception as e:
-        logger.debug("Failed to forward search signal", error=str(e))
+        logger.debug("Failed to forward search signal to V2", error=str(e))
+
+    # --- V3 pipeline ---
+    try:
+        from recs.v3.api import get_orchestrator
+        orch = get_orchestrator()
+        orch.record_search_signal(
+            session_id=session_id,
+            user_id=user_id,
+            query=query,
+            categories=request.categories,
+            brands=request.brands,
+            article_types=request.article_type,
+        )
+    except Exception as e:
+        logger.debug("Failed to forward search signal to V3", error=str(e))

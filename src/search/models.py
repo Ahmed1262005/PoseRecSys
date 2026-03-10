@@ -74,6 +74,7 @@ class HybridSearchRequest(BaseModel):
     min_price: Optional[float] = Field(None, ge=0, description="Minimum price")
     max_price: Optional[float] = Field(None, ge=0, description="Maximum price")
     on_sale_only: bool = Field(False, description="Only show sale items")
+    is_set: Optional[bool] = Field(None, description="Filter for matching set/co-ord products (True = only sets, False = exclude sets)")
 
     # Pagination
     page: int = Field(1, ge=1, description="Page number (1-indexed)")
@@ -209,6 +210,10 @@ class ProductResult(BaseModel):
     style_tags: Optional[List[str]] = None
     occasions: Optional[List[str]] = None
     seasons: Optional[List[str]] = None
+
+    # Set / Co-ord
+    is_set: Optional[bool] = None
+    set_role: Optional[str] = None
 
     # Ranking info
     algolia_rank: Optional[int] = None

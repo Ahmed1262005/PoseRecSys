@@ -631,6 +631,31 @@ class TestFilterBuilding:
         parts = result.split(" AND ")
         assert len(parts) >= 3  # in_stock + is_on_sale + category + brand
 
+    # ------ is_set filter building tests ------
+
+    def test_is_set_filter_true(self):
+        """is_set=True should produce 'is_set:true' filter."""
+        result = self._build(is_set=True)
+        assert "is_set:true" in result
+
+    def test_is_set_filter_false(self):
+        """is_set=False should produce 'is_set:false' filter."""
+        result = self._build(is_set=False)
+        assert "is_set:false" in result
+
+    def test_is_set_none_no_filter(self):
+        """is_set=None (default) should not add any is_set filter."""
+        result = self._build()
+        assert "is_set" not in result
+
+    def test_is_set_combined_with_other_filters(self):
+        """is_set=True combined with other filters should AND-join."""
+        result = self._build(is_set=True, brands=["Nike"])
+        assert "is_set:true" in result
+        assert "Nike" in result
+        parts = result.split(" AND ")
+        assert len(parts) >= 3  # in_stock + is_set + brand
+
 
 # =============================================================================
 # 5. Filter Summary Extraction Tests
@@ -677,6 +702,16 @@ class TestFilterSummary:
         result = self._extract(min_price=10, max_price=200)
         assert result["min_price"] == 10
         assert result["max_price"] == 200
+
+    # ------ is_set filter summary tests ------
+
+    def test_includes_is_set_when_true(self):
+        result = self._extract(is_set=True)
+        assert result["is_set"] is True
+
+    def test_excludes_is_set_when_none(self):
+        result = self._extract()
+        assert "is_set" not in result
 
 
 # =============================================================================
@@ -960,6 +995,8 @@ class TestSemanticPostFilter:
             "category_l2": "Midi Dress",
             "color_family": "Dark",
             "is_on_sale": False,
+            "is_set": False,
+            "set_role": None,
             "source": "semantic",
         }
         base.update(overrides)
@@ -1086,6 +1123,46 @@ class TestSemanticPostFilter:
         results = [self._make_semantic(fit_type="SLIM")]
         filtered = self._filter(results, fit_type=["slim"])
         assert len(filtered) == 1
+
+    # ------ is_set semantic post-filter tests ------
+
+    def test_is_set_filter_keeps_sets(self):
+        """is_set=True keeps products with is_set=True."""
+        results = [self._make_semantic(is_set=True)]
+        filtered = self._filter(results, is_set=True)
+        assert len(filtered) == 1
+
+    def test_is_set_filter_rejects_non_sets(self):
+        """is_set=True rejects products with is_set=False."""
+        results = [self._make_semantic(is_set=False)]
+        filtered = self._filter(results, is_set=True)
+        assert len(filtered) == 0
+
+    def test_is_set_filter_rejects_none(self):
+        """is_set=True rejects products with is_set=None."""
+        results = [self._make_semantic(is_set=None)]
+        filtered = self._filter(results, is_set=True)
+        assert len(filtered) == 0
+
+    def test_is_set_not_applied_when_none(self):
+        """is_set=None (no preference) keeps all products."""
+        results = [
+            self._make_semantic(product_id="set-1", is_set=True),
+            self._make_semantic(product_id="non-set-1", is_set=False),
+        ]
+        filtered = self._filter(results)
+        assert len(filtered) == 2
+
+    def test_is_set_combined_with_category(self):
+        """is_set=True + category_l1 both applied."""
+        results = [
+            self._make_semantic(product_id="set-dress", is_set=True, category_l1="Dresses"),
+            self._make_semantic(product_id="set-top", is_set=True, category_l1="Tops"),
+            self._make_semantic(product_id="non-set-dress", is_set=False, category_l1="Dresses"),
+        ]
+        filtered = self._filter(results, is_set=True, category_l1=["Dresses"])
+        assert len(filtered) == 1
+        assert filtered[0]["product_id"] == "set-dress"
 
 
 # =============================================================================
@@ -1510,6 +1587,72 @@ class TestAlgoliaRecordMapping:
         assert record.get("neckline") == "V-Neck"
         assert record.get("sleeve_type") == "Long"
         assert record.get("length") == "Midi"
+
+    # ------ is_set / set_role record mapping tests ------
+
+    def test_is_set_from_set_features_true(self):
+        """is_set True when set_features.is_set is truthy."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": True, "set_role": "top"}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["is_set"] is True
+
+    def test_is_set_false_when_set_features_false(self):
+        """is_set False when set_features.is_set is False."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": False, "set_role": None}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["is_set"] is False
+
+    def test_is_set_false_when_set_features_missing(self):
+        """is_set False when set_features key is absent."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {}
+        record = product_to_algolia_record(product, attrs)
+        assert record["is_set"] is False
+
+    def test_is_set_false_when_set_features_empty(self):
+        """is_set False when set_features is empty dict."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["is_set"] is False
+
+    def test_set_role_normalization_top(self):
+        """set_role 'shirt' normalizes to 'top'."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": True, "set_role": "shirt"}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["set_role"] == "top"
+
+    def test_set_role_normalization_full_set(self):
+        """set_role 'top and bottom' normalizes to 'full_set'."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": True, "set_role": "top and bottom"}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["set_role"] == "full_set"
+
+    def test_set_role_null_becomes_unknown(self):
+        """set_role None normalizes to 'unknown'."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": True, "set_role": None}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["set_role"] == "unknown"
+
+    def test_set_role_case_insensitive(self):
+        """set_role normalization is case-insensitive."""
+        from search.algolia_config import product_to_algolia_record
+        product = {"id": "p1", "in_stock": True}
+        attrs = {"set_features": {"is_set": True, "set_role": "Matching Set"}}
+        record = product_to_algolia_record(product, attrs)
+        assert record["set_role"] == "full_set"
 
 
 # =============================================================================
@@ -2044,6 +2187,17 @@ class TestAutoDetectFilters:
         from search.models import HybridSearchRequest
         _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
         request = HybridSearchRequest(query="test", min_price=10)
+        has_filters = any(
+            getattr(request, f) not in (None, False, [])
+            for f in HybridSearchRequest.model_fields
+            if f not in _NON_FILTER_FIELDS
+        )
+        assert has_filters
+
+    def test_is_set_filter_detected(self):
+        from search.models import HybridSearchRequest
+        _NON_FILTER_FIELDS = {"query", "page", "page_size", "session_id", "semantic_boost", "sort_by"}
+        request = HybridSearchRequest(query="test", is_set=True)
         has_filters = any(
             getattr(request, f) not in (None, False, [])
             for f in HybridSearchRequest.model_fields

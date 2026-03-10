@@ -116,6 +116,10 @@ class SearchPlan(BaseModel):
         default=False,
         description="True if user wants sale/discounted items only"
     )
+    is_set: Optional[bool] = Field(
+        default=None,
+        description="True if user wants matching sets/co-ords only, False to exclude sets, None for no preference"
+    )
 
     # Non-filterable product details from the query (e.g., "zipped pockets",
     # "pearl buttons", "ruched sides").  These are details that have NO
@@ -389,6 +393,7 @@ Return a JSON object with these fields:
 - max_price: number | null
 - min_price: number | null
 - on_sale_only: boolean
+- is_set: boolean | null (true = user wants matching sets/co-ords only; null = no preference)
 - confidence: number (0.0-1.0)
 
 ## SECTION 3: MODE MENU
@@ -507,6 +512,35 @@ avoid for specific concrete values that no mode covers.
 - Convert descriptive language: "floral leaves" → "leaf print" or "floral print"
 - Remove filler/intent words: "a", "with", "for", "outfit", "look", "wear"
 - If all terms became filters/modes, return empty string ""
+- **Vocabulary normalization** — convert user language to product-name language. Our product
+  names use industry terms, not conversational language:
+  "athletic wear" / "gym clothes" / "workout clothes" / "sporty clothes" → "activewear"
+  "semi-formal dress" → "cocktail dress" or "formal dress"
+  "comfy pants" / "lounge pants" → "joggers" or "sweatpants"
+  "crewneck" / "crew neck" → "crew neck sweater"
+  "turtleneck" → "turtleneck sweater"
+  "going out top" → "party top" or "going out top"
+  "summer dress" → "sundress" or "summer dress"
+  "work pants" → "trousers" or "tailored pants"
+- **Search index synonym groups** — these terms are equivalent in our search engine.
+  When the user uses any term from a group, prefer the FIRST term (most common in product names):
+  CLOTHING: pants↔trousers↔slacks | sweater↔jumper↔pullover | tee↔t-shirt↔tshirt |
+    jeans↔denim jeans | cardigan↔cardi | leggings↔tights | hoodie↔hoody |
+    romper↔playsuit | blazer↔sport coat | swimsuit↔bathing suit | camisole↔cami |
+    joggers↔sweatpants↔track pants | frock→dress | gown→dress | parka→coat | bodycon→bodycon dress
+  FIT: oversized↔baggy | cropped↔crop | slim fit↔skinny fit
+  PATTERN: striped↔stripes | floral↔flower↔flowery | plaid↔tartan↔checkered |
+    polka dot↔dotted | leopard print↔animal print | camo↔camouflage
+  MATERIAL: faux leather↔vegan leather↔pleather | denim↔chambray | linen↔flax
+  COLOR: navy↔navy blue | burgundy↔wine↔maroon | grey↔gray | ivory↔cream↔off-white
+  STYLE: boho↔bohemian | retro↔vintage | athleisure↔activewear↔athletic↔sportswear
+  BRAND: alo→alo yoga | plt→prettylittlething
+  Use this knowledge to pick the term most likely to match product names.
+- **Brand queries**: Do NOT put the brand name in algolia_query — the brand is already
+  applied as a hard filter. Only include the product terms. Examples:
+  "alo crewneck" → brand: "Alo Yoga", algolia_query: "crewneck"
+  "boohoo party dress" → brand: "Boohoo", algolia_query: "party dress"
+  "princess polly" (no product terms) → brand: "Princess Polly", algolia_query: ""
 
 **semantic_query**: Rich POSITIVE visual description for FashionCLIP image-similarity.
 - Describe what the garment LOOKS LIKE — never use "not", "no", "without", "non-" (Principle 8)
@@ -670,10 +704,20 @@ Example for "Boho maxi dress like Anthropologie":
 
 - **intent**: "exact" (pure brand search), "specific" (concrete product + attributes), "vague" (mood/aesthetic only)
 - **brand**: Detected brand name or null. For EXACT brand purchase — hard filter.
+  CRITICAL: Only set `brand` to a name that appears in the KNOWN BRANDS list (appended at
+  the end of this prompt). If the user mentions a partial/abbreviated brand name, match it
+  to the closest brand from the list (e.g., "alo" → "Alo Yoga", "plt" → "PrettyLittleThing",
+  "fp" → "Free People"). If NO brand on the list matches, the term is NOT a brand — treat
+  it as a product/style search term instead (do NOT set brand, do NOT set intent to "exact").
 - **vibe_brand**: Brand referenced as a STYLE SIGNAL, not a purchase target. Mutually exclusive with `brand`.
+  Same rule: only use brand names from the KNOWN BRANDS list.
 - **max_price**: From "under $50" → 50.0. "Looks expensive" is NOT a price constraint.
 - **min_price**: From "over $200" → 200.0
 - **on_sale_only**: True for "on sale", "discounted", "clearance". NOT for "affordable" or "cheap".
+- **is_set**: True when the user explicitly wants matching sets, co-ord sets, two-piece sets, or matching outfits.
+  Set true for: "matching set", "co-ord", "two-piece", "matching outfit", "set", "co-ordinated set".
+  Leave null (default) when the user does not mention sets. Never set false — only true or null.
+  About 4% of our inventory are sets, so this is a hard filter that significantly narrows results.
 - **confidence**: 0.0-1.0
 
 ### Brand-as-Vibe Queries
@@ -688,8 +732,11 @@ When a user references a brand as a STYLE REFERENCE (not wanting to buy that spe
 
 **Exact brand patterns** — set `brand`, do NOT set `vibe_brand`:
 - "X dress", "X tops", just the brand name, "buy X", "shop X"
-- Misspelled or partial brand names: "zar" → brand: "Zara", "bohoo" → brand: "Boohoo",
-  "prin polly" → brand: "Princess Polly", "forver 21" → brand: "Forever 21"
+- Misspelled, partial, or abbreviated brand names — ALWAYS resolve to the KNOWN BRANDS list:
+  "zar" → "Zara", "bohoo" → "Boohoo", "prin polly" → "Princess Polly",
+  "forver 21" → "Forever 21", "alo" → "Alo Yoga", "plt" → "PrettyLittleThing"
+- If the user's term does NOT match any brand on the KNOWN BRANDS list, it is NOT a brand
+  search. Do NOT set brand. Treat it as a product/style term in algolia_query instead.
 - CRITICAL: A bare brand name (even misspelled/truncated) means the user wants to SHOP
   that brand. Set brand (not vibe_brand) and intent "exact". vibe_brand requires explicit
   comparative language ("like X", "X style", "X vibe", "similar to X", "X but...").
@@ -703,9 +750,11 @@ concrete search attributes:
 3. Identify the brand's formality level → appropriate formality mode
 4. Identify the brand's typical occasions → relevant occasion modes
 5. Generate semantic_queries that capture the brand's visual DNA (e.g., for "like Anthropologie": "flowing bohemian maxi dress earthy layered textures")
-6. Correct misspelled/partial brand names to the official spelling in BOTH brand and vibe_brand
-   (e.g., "Antropologie" → "Anthropologie", "zar" → "Zara", "bohoo" → "Boohoo").
-   Always set algolia_query to the corrected brand name for exact brand queries.
+6. Correct misspelled/partial brand names to the official spelling from the KNOWN BRANDS list
+   in BOTH brand and vibe_brand (e.g., "Antropologie" → "Anthropologie", "alo" → "Alo Yoga").
+   For exact brand queries, set algolia_query to the NON-BRAND product terms only (the brand
+   is already in the brand filter). E.g., "alo crewneck" → brand: "Alo Yoga", algolia_query: "crewneck".
+   For pure brand queries with no product terms (e.g., just "alo yoga"), set algolia_query to "".
 
 **Quality/price modifiers** — use the brand's price tier as reference:
 - "better quality than X" / "elevated X" → same style DNA, set min_price ABOVE the brand's tier.
@@ -1113,6 +1162,50 @@ Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
 _SYSTEM_PROMPT = _build_system_prompt()
 
 
+# ---------------------------------------------------------------------------
+# Dynamic brand-list addendum (appended to system prompt at call time)
+# ---------------------------------------------------------------------------
+_brand_list_cache: Optional[str] = None
+
+
+def _get_brand_list_addendum() -> str:
+    """Return a prompt addendum listing all known brands from the catalog.
+
+    The brand list is loaded from Algolia facets at server startup by
+    ``query_classifier.load_brands()``.  We cache the formatted string so
+    it is only built once (brands don't change during a server's lifetime).
+
+    Returns an empty string if brands have not been loaded yet.
+    """
+    global _brand_list_cache
+    if _brand_list_cache is not None:
+        return _brand_list_cache
+
+    try:
+        from search.query_classifier import get_brand_originals
+        originals = get_brand_originals()          # {lowercase: OriginalCasing}
+    except Exception:
+        return ""
+
+    if not originals:
+        return ""
+
+    # Deduplicate and sort by original casing for readability
+    brand_names = sorted(set(originals.values()), key=str.lower)
+    brand_list_str = ", ".join(brand_names)
+
+    _brand_list_cache = (
+        "\n\n## KNOWN BRANDS IN OUR CATALOG\n"
+        "When setting `brand` or `vibe_brand`, you MUST use the EXACT spelling "
+        "from this list.  If the user's term is a partial name, abbreviation, or "
+        "misspelling, match it to the closest brand below.  If no brand on this "
+        "list matches, the term is NOT a brand — treat it as a product/style term "
+        "instead.\n\n"
+        f"{brand_list_str}"
+    )
+    return _brand_list_cache
+
+
 # =============================================================================
 # Query Planner
 # =============================================================================
@@ -1384,10 +1477,14 @@ class QueryPlanner:
                     query, user_context, selected_filters, selection_labels,
                 )
 
+                # Append the dynamic brand list so the LLM knows our
+                # exact catalog brands (loaded from Algolia at startup).
+                system_prompt = _SYSTEM_PROMPT + _get_brand_list_addendum()
+
                 api_params = {
                     "model": self._model,
                     "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},
                     ],
                     "response_format": {"type": "json_object"},
@@ -1670,10 +1767,12 @@ class QueryPlanner:
                     for p in ("gpt-5", "o1", "o3", "o4")
                 )
 
+                system_prompt = _SYSTEM_PROMPT + _get_brand_list_addendum()
+
                 api_params = {
                     "model": self._model,
                     "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},
                     ],
                     "response_format": {"type": "json_object"},
@@ -1996,6 +2095,8 @@ class QueryPlanner:
             request_updates["min_price"] = plan.min_price
         if plan.on_sale_only:
             request_updates["on_sale_only"] = True
+        if plan.is_set is not None:
+            request_updates["is_set"] = plan.is_set
 
         # -----------------------------------------------------------
         # Build the semantic queries list.

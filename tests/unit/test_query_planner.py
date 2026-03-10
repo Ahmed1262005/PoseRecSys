@@ -174,6 +174,23 @@ class TestSearchPlanModel:
         assert "Distressed" in plan.avoid["style_tags"]
         assert "Animal Print" in plan.avoid["patterns"]
 
+    # ------ is_set SearchPlan model tests ------
+
+    def test_search_plan_accepts_is_set(self):
+        """SearchPlan should accept is_set=True."""
+        plan = SearchPlan(intent="specific", is_set=True)
+        assert plan.is_set is True
+
+    def test_search_plan_defaults_is_set_none(self):
+        """SearchPlan should default is_set to None."""
+        plan = SearchPlan(intent="specific")
+        assert plan.is_set is None
+
+    def test_search_plan_extra_ignore_with_is_set(self):
+        """Extra fields should be ignored even when is_set is present."""
+        plan = SearchPlan(intent="specific", is_set=True, unknown_field="test")
+        assert plan.is_set is True
+
 
 # =============================================================================
 # 2. plan_to_request_updates Tests
@@ -413,6 +430,33 @@ class TestPlanToRequestUpdates:
         plan = SearchPlan(intent="specific")
         _, _, _, matched, _, _, _, _ = planner.plan_to_request_updates(plan)
         assert matched == []
+
+    # ------ is_set plan_to_request_updates tests ------
+
+    def test_is_set_injection(self):
+        """is_set=True should be injected into request_updates."""
+        planner = self._make_planner()
+        plan = SearchPlan(
+            intent="specific",
+            modes=[],
+            attributes={},
+            avoid={},
+            is_set=True,
+        )
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        assert updates["is_set"] is True
+
+    def test_is_set_none_not_injected(self):
+        """is_set=None should NOT appear in request_updates."""
+        planner = self._make_planner()
+        plan = SearchPlan(
+            intent="specific",
+            modes=[],
+            attributes={},
+            avoid={},
+        )
+        updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
+        assert "is_set" not in updates
 
 
 # =============================================================================

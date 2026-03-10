@@ -14,8 +14,7 @@ Authorization: Bearer <supabase_jwt_token>
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/search/hybrid` | POST | Yes | Hybrid search with LLM query planning and follow-up questions |
-| `/api/search/refine` | POST | Yes | Re-search with follow-up selections (skips LLM planner) |
+| `/api/search/hybrid` | POST | Yes | Hybrid search with LLM query planning, follow-up questions, and extend-search pagination |
 | `/api/search/autocomplete` | GET | Yes | Product + brand autocomplete |
 | `/api/search/click` | POST | Yes | Track click event |
 | `/api/search/conversion` | POST | Yes | Track conversion event |
@@ -25,7 +24,7 @@ Authorization: Bearer <supabase_jwt_token>
 
 ## POST `/api/search/hybrid`
 
-Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + FashionCLIP semantic search → RRF merge → reranker → follow-up questions.
+Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + FashionCLIP semantic search → RRF merge → reranker → post-sort (if applicable) → follow-up questions.
 
 ### Request Body
 
@@ -38,19 +37,25 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
   "page": 1,                    // 1-indexed, default 1
   "page_size": 50,              // 1-100, default 50
 
+  // Extend-search pagination (page 2+)
+  // Pass both back from a previous response to get the next page
+  // without re-running the LLM planner (~2-3s instead of ~12-15s)
+  "search_session_id": "ss_abc123",  // from previous response
+  "cursor": "eyJwIjoyfQ==",         // from previous response
+
   // Sort order
   "sort_by": "relevance",       // "relevance" | "price_asc" | "price_desc" | "trending"
 
   // Session (for dedup across pages)
-  "session_id": "sess_abc123",  // optional, server generates one if omitted
+  "session_id": "sess_abc123",  // optional, for session-level seen-item dedup
 
   // Semantic weight (advanced)
   "semantic_boost": 0.4,        // 0.0-1.0, weight of semantic results in RRF merge
 
   // ---- Include filters (all optional, null = no filter) ----
-  "categories": ["dresses"],              // broad categories
-  "category_l1": ["Dresses"],             // Gemini L1 (Tops, Bottoms, Dresses, Outerwear, Activewear, Swimwear, Accessories)
-  "category_l2": ["Midi Dress"],          // Gemini L2 (Blouse, Jeans, Midi Dress, ...)
+  "categories": ["dresses"],
+  "category_l1": ["Dresses"],
+  "category_l2": ["Midi Dress"],
   "brands": ["Boohoo"],
   "colors": ["Red", "Burgundy"],
   "color_family": ["Warm"],
@@ -85,7 +90,14 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
   "exclude_fit_type": ["Oversized"],
   "exclude_silhouette": ["Bodycon"],
   "exclude_rise": ["Low"],
-  "exclude_style_tags": ["Sporty"]
+  "exclude_style_tags": ["Sporty"],
+
+  // ---- Follow-up refinement (pass back from follow-up interactions) ----
+  "selected_filters": {                    // accumulated follow-up selections
+    "formality": ["Casual", "Smart Casual"],
+    "style_tags": ["Glamorous"]
+  },
+  "selection_labels": ["Casual", "Smart Casual", "Glamorous"]  // human-readable labels
 }
 ```
 
@@ -140,6 +152,10 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
     "total_results": 237
   },
 
+  // Extend-search pagination — pass both back for page 2+
+  "search_session_id": "ss_abc123",
+  "cursor": "eyJwIjoyfQ==",
+
   "facets": {
     "brand": [
       {"value": "Boohoo", "count": 42},
@@ -164,67 +180,230 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
       "dimension": "formality",
       "question": "How dressed up do you want to be?",
       "options": [
-        {
-          "label": "Casual",
-          "filters": {"formality": ["Casual"]}
-        },
-        {
-          "label": "Smart casual",
-          "filters": {"formality": ["Smart Casual"]}
-        },
-        {
-          "label": "Dressy",
-          "filters": {"formality": ["Semi-Formal"]}
-        },
-        {
-          "label": "Formal",
-          "filters": {"formality": ["Formal"]}
-        }
-      ]
-    },
-    {
-      "dimension": "vibe",
-      "question": "What vibe are you going for?",
-      "options": [
-        {
-          "label": "Glamorous",
-          "filters": {"style_tags": ["Glamorous"]}
-        },
-        {
-          "label": "Edgy",
-          "filters": {"style_tags": ["Edgy"]}
-        },
-        {
-          "label": "Romantic",
-          "filters": {"style_tags": ["Romantic"]}
-        },
-        {
-          "label": "Minimal",
-          "filters": {"style_tags": ["Minimalist"]}
-        }
+        { "label": "Casual", "filters": {"formality": ["Casual"]} },
+        { "label": "Smart casual", "filters": {"formality": ["Smart Casual"]} },
+        { "label": "Dressy", "filters": {"formality": ["Semi-Formal"]} },
+        { "label": "Formal", "filters": {"formality": ["Formal"]} }
       ]
     }
   ],
+
+  // Refinement state (present after follow-up selections)
+  "applied_filters": { "formality": ["Casual"] },
+  "answered_dimensions": ["formality"],
 
   "timing": {
     "planner_ms": 3200,
     "algolia_ms": 180,
     "semantic_ms": 520,
-    "semantic_query_count": 3,
+    "semantic_query_count": 5,
     "total_ms": 4100
   }
 }
 ```
 
-### Follow-up Questions
+---
 
-Follow-ups are generated by the LLM planner when the query is vague or under-specified. They are **not** generated when:
+## Sort Modes
 
-- The query is already specific (e.g. "red midi dress")
-- `sort_by` is not `"relevance"` (sorted modes skip the full pipeline)
-- The planner is skipped (e.g. via the `/refine` endpoint)
+| Value | Pipeline | Speed | Description |
+|-------|----------|-------|-------------|
+| `relevance` | Full hybrid: LLM planner → Algolia + FashionCLIP → RRF → reranker | ~12-15s (page 1), ~2-3s (page 2+) | Default. Best result quality and diversity. |
+| `price_asc` | Full hybrid pipeline → **post-sort by price ascending** | ~12-15s (page 1), ~2-3s (page 2+) | Cheapest first among relevant results. |
+| `price_desc` | Full hybrid pipeline → **post-sort by price descending** | ~12-15s (page 1), ~2-3s (page 2+) | Most expensive first among relevant results. |
+| `trending` | Full hybrid pipeline → **post-sort by trending score** | ~12-15s (page 1), ~2-3s (page 2+) | Trending items first among relevant results. |
 
-**Dimensions** (7 possible):
+All sort modes run the full hybrid pipeline (Algolia + semantic + RRF merge + reranker), then sort the merged results before pagination. This ensures rich, diverse candidates regardless of sort order.
+
+All filters work with all sort modes. Follow-up questions are generated for all sort modes.
+
+---
+
+## Extend-Search Pagination
+
+Page 1 runs the full pipeline (LLM planner + Algolia + semantic + RRF + rerank). The plan state is cached server-side.
+
+Page 2+ reuses the cached plan: skips the LLM planner, runs Algolia (native page=N) + semantic (reuses cached FashionCLIP embeddings, excludes already-seen product IDs) + RRF merge + rerank on fresh candidates.
+
+### Client flow
+
+```
+Page 1:
+  POST /api/search/hybrid
+  {"query": "vacation outfits"}
+  → Response includes search_session_id + cursor + has_more=true
+
+Page 2:
+  POST /api/search/hybrid
+  {"query": "vacation outfits",
+   "search_session_id": "ss_abc123",
+   "cursor": "eyJwIjoyfQ=="}
+  → Fresh candidates, zero overlap with page 1
+
+Page 3:
+  POST /api/search/hybrid
+  {"query": "vacation outfits",
+   "search_session_id": "ss_abc123",
+   "cursor": "eyJwIjozfQ=="}
+  → Fresh candidates, zero overlap with pages 1-2
+
+End of results:
+  → has_more=false, cursor=null → stop requesting
+```
+
+### Key rules
+
+- Always pass back both `search_session_id` and `cursor` from the previous response.
+- `query` must still be provided (validated) but the cached plan is used.
+- Sessions expire after 10 minutes of inactivity.
+- When `has_more=false` and `cursor=null`, there are no more results.
+
+---
+
+## Filter Reference
+
+All filters are optional. When not provided (null), no filtering is applied for that dimension.
+
+List filters (string arrays) use **OR** logic within the filter — e.g., `brands: ["Boohoo", "Princess Polly"]` returns products from either brand.
+
+Multiple filters across different fields use **AND** logic — e.g., `brands: ["Boohoo"]` + `colors: ["Red"]` returns red Boohoo products.
+
+### How Filters Apply in the Hybrid Pipeline
+
+Filters are enforced at multiple stages:
+
+| Stage | What happens |
+|-------|-------------|
+| **Algolia search** | Include filters → facet filters (AND). Exclude filters → NOT clauses. Price → numeric filter. On-sale → `is_on_sale:true`. |
+| **Semantic post-filter** | After pgvector results are enriched with Algolia attributes, the same filters are enforced. Products with `null` attribute values are excluded by default (strict mode). |
+| **RRF merge** | Both Algolia and semantic results have already been filtered. Merge produces a union. |
+| **Reranker** | Session dedup, near-duplicate removal, brand diversity cap. Does not drop filtered results. |
+
+### Include Filters (22)
+
+| Field | Type | Algolia Facet | Example Values | Notes |
+|-------|------|---------------|---------------|-------|
+| `categories` | `string[]` | `broad_category` | `tops`, `bottoms`, `dresses`, `outerwear` | Legacy broad categories |
+| `category_l1` | `string[]` | `category_l1` | `Tops`, `Bottoms`, `Dresses`, `Outerwear`, `Activewear`, `Swimwear`, `Accessories` | Gemini L1 categories (recommended) |
+| `category_l2` | `string[]` | `category_l2` | `Blouse`, `Jeans`, `Midi Dress`, `Bomber Jacket` | Gemini L2 subcategories |
+| `brands` | `string[]` | `brand` | `Boohoo`, `Princess Polly`, `Forever 21`, `A.P.C`, `Ba&sh` | Case-sensitive exact match |
+| `colors` | `string[]` | `primary_color` | `Black`, `White`, `Red`, `Blue`, `Navy Blue`, `Green`, `Pink`, `Yellow`, `Purple`, `Orange`, `Brown`, `Beige`, `Cream`, `Gray`, `Burgundy`, `Olive`, `Taupe`, `Off White`, `Light Blue` | Primary product color |
+| `color_family` | `string[]` | `color_family` | `Warm`, `Cool`, `Neutral` | Color temperature grouping |
+| `patterns` | `string[]` | `pattern` | `Solid`, `Floral`, `Striped`, `Plaid`, `Polka Dot`, `Animal Print`, `Abstract`, `Geometric`, `Tie Dye`, `Camo`, `Colorblock`, `Tropical` | |
+| `materials` | `string[]` | `apparent_fabric` | `Cotton`, `Linen`, `Silk`, `Satin`, `Denim`, `Faux Leather`, `Wool`, `Velvet`, `Chiffon`, `Lace`, `Mesh`, `Knit`, `Jersey`, `Fleece`, `Sheer` | Gemini-detected fabric |
+| `occasions` | `string[]` | `occasions` | `Date Night`, `Party`, `Office`, `Work`, `Wedding Guest`, `Vacation`, `Workout`, `Everyday`, `Brunch`, `Night Out`, `Weekend`, `Lounging`, `Beach` | Multi-valued (product can have multiple) |
+| `seasons` | `string[]` | `seasons` | `Summer`, `Spring`, `Fall`, `Winter` | Multi-valued |
+| `formality` | `string[]` | `formality` | `Formal`, `Semi-Formal`, `Business Casual`, `Smart Casual`, `Casual`, `Loungewear` | |
+| `fit_type` | `string[]` | `fit_type` | `Slim`, `Fitted`, `Regular`, `Relaxed`, `Oversized`, `Loose` | |
+| `neckline` | `string[]` | `neckline` | `V-Neck`, `Crew`, `Turtleneck`, `Off-Shoulder`, `Strapless`, `Halter`, `Scoop`, `Square`, `Sweetheart`, `Cowl`, `Boat`, `One Shoulder`, `Collared`, `Hooded`, `Mock`, `Deep V-Neck`, `Plunging` | |
+| `sleeve_type` | `string[]` | `sleeve_type` | `Sleeveless`, `Short`, `Long`, `Cap`, `Puff`, `3/4`, `Flutter`, `Spaghetti Strap` | |
+| `length` | `string[]` | `length` | `Mini`, `Midi`, `Maxi`, `Cropped`, `Floor-length`, `Ankle`, `Micro` | |
+| `rise` | `string[]` | `rise` | `High`, `Mid`, `Low` | Bottoms only |
+| `silhouette` | `string[]` | `silhouette` | `A-Line`, `Bodycon`, `Flared`, `Straight`, `Wide Leg` | |
+| `article_type` | `string[]` | `article_type` | `midi dress`, `jeans`, `t-shirt`, `blazer`, `bodysuit` | Specific garment type |
+| `style_tags` | `string[]` | `style_tags` | `Bohemian`, `Romantic`, `Glamorous`, `Edgy`, `Vintage`, `Sporty`, `Classic`, `Modern`, `Minimalist`, `Preppy`, `Streetwear`, `Sexy`, `Western`, `Utility` | Multi-valued |
+| `min_price` | `float` | numeric | `20.0` | Minimum price (inclusive). Must be >= 0. |
+| `max_price` | `float` | numeric | `100.0` | Maximum price (inclusive). Must be >= min_price. |
+| `on_sale_only` | `bool` | `is_on_sale` | `true` | Only return products where original_price > price. Default: `false`. |
+
+### Exclude Filters (13)
+
+Exclude filters remove products that match ANY of the specified values. They use `NOT` clauses in Algolia and strict exclusion in post-filtering.
+
+| Field | Type | Excludes from | Example |
+|-------|------|--------------|---------|
+| `exclude_brands` | `string[]` | `brand` | `["Shein", "Temu"]` |
+| `exclude_colors` | `string[]` | `primary_color` | `["Yellow", "Orange"]` |
+| `exclude_patterns` | `string[]` | `pattern` | `["Animal Print", "Camo"]` |
+| `exclude_materials` | `string[]` | `apparent_fabric` | `["Polyester", "Sheer"]` |
+| `exclude_occasions` | `string[]` | `occasions` | `["Workout", "Lounging"]` |
+| `exclude_seasons` | `string[]` | `seasons` | `["Winter"]` |
+| `exclude_formality` | `string[]` | `formality` | `["Formal", "Loungewear"]` |
+| `exclude_neckline` | `string[]` | `neckline` | `["Strapless", "Plunging"]` |
+| `exclude_sleeve_type` | `string[]` | `sleeve_type` | `["Sleeveless", "Spaghetti Strap"]` |
+| `exclude_length` | `string[]` | `length` | `["Mini", "Micro"]` |
+| `exclude_fit_type` | `string[]` | `fit_type` | `["Oversized", "Loose"]` |
+| `exclude_silhouette` | `string[]` | `silhouette` | `["Bodycon"]` |
+| `exclude_rise` | `string[]` | `rise` | `["Low"]` |
+| `exclude_style_tags` | `string[]` | `style_tags` | `["Sporty", "Utility"]` |
+
+---
+
+## Filter Examples
+
+### Basic: Sale dresses under $50
+
+```json
+{
+  "query": "dress",
+  "category_l1": ["Dresses"],
+  "max_price": 50,
+  "on_sale_only": true
+}
+```
+
+### Brand + color + price sort
+
+```json
+{
+  "query": "tops",
+  "brands": ["Boohoo", "Forever 21"],
+  "colors": ["Black", "White"],
+  "sort_by": "price_asc"
+}
+```
+
+### Modest evening wear (using exclude filters)
+
+```json
+{
+  "query": "evening outfit",
+  "formality": ["Semi-Formal", "Formal"],
+  "exclude_neckline": ["Strapless", "Plunging", "Deep V-Neck"],
+  "exclude_sleeve_type": ["Sleeveless", "Spaghetti Strap"],
+  "exclude_length": ["Mini", "Micro"]
+}
+```
+
+### Vacation outfits sorted by price
+
+```json
+{
+  "query": "vacation outfits for Europe",
+  "sort_by": "price_desc",
+  "page_size": 20
+}
+```
+
+### Multi-filter with material and occasion
+
+```json
+{
+  "query": "summer top",
+  "materials": ["Cotton", "Linen"],
+  "occasions": ["Vacation", "Weekend"],
+  "seasons": ["Summer"],
+  "max_price": 80
+}
+```
+
+---
+
+## Follow-up Questions
+
+Follow-ups are generated by the LLM planner when the query is vague or under-specified. They help narrow down results interactively.
+
+### When follow-ups appear
+
+- Query is vague (e.g., "outfit for this weekend")
+- Query is broad enough that filtering would help
+
+### When follow-ups do NOT appear
+
+- Query is already specific (e.g., "red midi dress")
+- Query is an exact brand search (e.g., "Boohoo")
+
+### Dimensions (7 possible)
 
 | Dimension | What it refines | Filter keys used |
 |-----------|----------------|------------------|
@@ -232,52 +411,19 @@ Follow-ups are generated by the LLM planner when the query is vague or under-spe
 | `occasion` | When/where they'll wear it | `occasions` |
 | `formality` | How dressed up | `formality` |
 | `vibe` | Style aesthetic | `style_tags` |
-| `coverage` | Modesty/skin coverage | `modes` (coverage-only: `cover_arms`, `cover_chest`, etc.) |
+| `coverage` | Modesty/skin coverage | `modes` (expanded server-side) |
 | `price` | Budget | `min_price`, `max_price` |
 | `color` | Color preference | `colors` |
 
-**Selection model: multi-select.** Each follow-up question allows the user to pick **one or more** options. For example, the user can select both "Casual" and "Smart Casual" from a formality question, or both "Dresses" and "Tops" from a garment type question. Selected options are combined using the merge rules described under the `/refine` endpoint below.
+### Selection model: multi-select
 
-Each option's `filters` object is a **PATCH** — a partial filter update that the client merges into `selected_filters` for the `/refine` endpoint.
+Each follow-up question allows the user to pick **one or more** options. Selected options are merged and sent back via the `selected_filters` field on the next `/hybrid` request.
 
----
-
-## POST `/api/search/refine`
-
-Apply follow-up question selections to re-run the search **without calling the LLM planner again**. This is faster than `/hybrid` (~200-500ms savings by skipping the LLM call).
-
-### Request Body
-
-```jsonc
-{
-  "original_query": "something cute for a night out",
-
-  // Merged filters from all selected follow-up options
-  "selected_filters": {
-    "formality": ["Casual", "Smart Casual"],
-    "style_tags": ["Glamorous"],
-    "category_l1": ["Dresses"]
-  },
-
-  // Optional (same as /hybrid)
-  "page": 1,
-  "page_size": 50,
-  "session_id": "sess_abc123",
-  "sort_by": "relevance",
-  "semantic_boost": 0.4
-}
-```
-
-### How to build `selected_filters`
-
-Each follow-up question supports **multi-select**. The client tracks which options the user has toggled on per question, then merges everything into a single flat `selected_filters` dict.
+### How to apply follow-up selections
 
 #### Step 1: Track selections per question
 
-Maintain a map of `questionIndex -> selectedOptions[]`:
-
 ```javascript
-// Internal state (not sent to server)
 const selections = {
   0: [  // garment_type question
     { label: "Dresses", filters: { category_l1: ["Dresses"] } },
@@ -287,57 +433,33 @@ const selections = {
     { label: "Casual",       filters: { formality: ["Casual"] } },
     { label: "Smart Casual", filters: { formality: ["Smart Casual"] } },
   ],
-  2: [  // vibe question (single selection)
-    { label: "Glamorous", filters: { style_tags: ["Glamorous"] } },
-  ],
 };
 ```
 
-Clicking a pill toggles it on/off. Multiple pills per question can be active simultaneously.
-
-#### Step 2: Merge within each question (union)
-
-For each question, combine the `filters` from all selected options:
+#### Step 2: Merge selections
 
 | Filter type | Merge rule | Example |
 |-------------|-----------|---------|
-| List values (`formality`, `colors`, `category_l1`, `style_tags`, `occasions`, etc.) | **Union** (deduplicated) | `["Casual"] + ["Smart Casual"]` → `["Casual", "Smart Casual"]` |
+| List values | **Union** (deduplicated) | `["Casual"] + ["Smart Casual"]` → `["Casual", "Smart Casual"]` |
 | `modes` list | **Union** (additive coverage) | `["cover_arms"] + ["cover_chest"]` → `["cover_arms", "cover_chest"]` |
-| `min_price` | **Min** of all values (widest floor) | `min(30, 60)` → `30` |
-| `max_price` | **Max** of all values (widest ceiling) | `max(30, 60)` → `60` |
+| `min_price` | **Min** of all values | `min(30, 60)` → `30` |
+| `max_price` | **Max** of all values | `max(30, 60)` → `60` |
 
-```javascript
-// Question 0 merged: { category_l1: ["Dresses", "Tops"] }
-// Question 1 merged: { formality: ["Casual", "Smart Casual"] }
-// Question 2 merged: { style_tags: ["Glamorous"] }
-```
+#### Step 3: Send back via `/hybrid`
 
-#### Step 3: Merge across questions (overwrite by key)
-
-Spread all per-question merged dicts into one. Since each question targets a different dimension, keys rarely collide. If they do, the later question's value wins.
-
-```javascript
-const selected_filters = {
-  category_l1: ["Dresses", "Tops"],          // from question 0
-  formality: ["Casual", "Smart Casual"],     // from question 1
-  style_tags: ["Glamorous"],                 // from question 2
-};
-```
-
-#### Step 4: Send to `/refine`
-
-```javascript
-POST /api/search/refine
+```json
+POST /api/search/hybrid
 {
-  "original_query": "something cute for a night out",
+  "query": "outfit for this weekend",
   "selected_filters": {
     "category_l1": ["Dresses", "Tops"],
-    "formality": ["Casual", "Smart Casual"],
-    "style_tags": ["Glamorous"]
+    "formality": ["Casual", "Smart Casual"]
   },
-  "session_id": "sess_abc123"
+  "selection_labels": ["Dresses", "Tops", "Casual", "Smart Casual"]
 }
 ```
+
+The server runs the LLM planner in **refinement mode** — it regenerates semantic queries incorporating the selected filters and produces 1-2 new follow-up questions about unanswered dimensions.
 
 #### Reference: merge function (JavaScript)
 
@@ -349,7 +471,6 @@ function mergeSelections(selections) {
     const selectedOptions = selections[questionIdx];
     if (!selectedOptions.length) continue;
 
-    // Merge all options within this question
     const questionMerged = {};
     for (const { filters } of selectedOptions) {
       for (const [key, value] of Object.entries(filters)) {
@@ -372,7 +493,6 @@ function mergeSelections(selections) {
       }
     }
 
-    // Spread into overall merged (across questions)
     Object.assign(merged, questionMerged);
   }
 
@@ -382,22 +502,41 @@ function mergeSelections(selections) {
 
 #### Special handling: `modes`
 
-If `selected_filters` contains a `"modes"` key, the `/refine` endpoint expands those modes server-side into concrete include/exclude filters. For example:
+If `selected_filters` contains a `"modes"` key, the server expands those modes into concrete include/exclude filters:
 
 - `{"modes": ["cover_arms"]}` → adds `exclude_sleeve_type: ["Sleeveless", "Spaghetti Strap"]`
 - `{"modes": ["cover_arms", "cover_chest"]}` → adds exclusions for both (additive)
 
 The client does not need to expand modes — just pass the mode names through.
 
-### Response
+---
 
-Same shape as `/api/search/hybrid` (returns `HybridSearchResponse`), but `follow_ups` will be `null` since the planner is skipped.
+## Follow-up `filters` Keys
+
+The `filters` object inside each follow-up option uses a subset of the main filter keys:
+
+| Key | Type | Used by dimension | Multi-select merge |
+|-----|------|-------------------|--------------------|
+| `category_l1` | `string[]` | `garment_type` | Union |
+| `formality` | `string[]` | `formality` | Union |
+| `occasions` | `string[]` | `occasion` | Union |
+| `style_tags` | `string[]` | `vibe` | Union |
+| `colors` | `string[]` | `color` | Union |
+| `min_price` | `float` | `price` | Min (widest floor) |
+| `max_price` | `float` | `price` | Max (widest ceiling) |
+| `modes` | `string[]` | `coverage` | Union (additive) |
+| `fit_type` | `string[]` | concrete attribute | Union |
+| `sleeve_type` | `string[]` | concrete attribute | Union |
+| `length` | `string[]` | concrete attribute | Union |
+| `neckline` | `string[]` | concrete attribute | Union |
+| `materials` | `string[]` | concrete attribute | Union |
+| `patterns` | `string[]` | concrete attribute | Union |
 
 ---
 
 ## Client Integration Flow
 
-### Basic search (no follow-ups)
+### Basic search
 
 ```
 Client                          Server
@@ -408,13 +547,26 @@ Client                          Server
   |                               |
   |  200 OK                       |
   |  { results: [...],            |
-  |    follow_ups: [] }           |  <-- specific query, no follow-ups
+  |    follow_ups: [],            |
+  |    search_session_id: "ss_x", |
+  |    cursor: "eyJwIjoyfQ==" }   |
   |<------------------------------|
   |                               |
   |  Render product grid          |
+  |                               |
+  |  (User scrolls down)          |
+  |                               |
+  |  POST /api/search/hybrid      |
+  |  {"query": "red midi dress",  |
+  |   "search_session_id":"ss_x", |
+  |   "cursor":"eyJwIjoyfQ=="}    |
+  |------------------------------>|
+  |                               |
+  |  200 OK (fresh page 2 ~2-3s)  |
+  |<------------------------------|
 ```
 
-### Search with follow-ups (multi-select)
+### Search with follow-ups + refinement
 
 ```
 Client                                    Server
@@ -424,80 +576,52 @@ Client                                    Server
   |---------------------------------------->|
   |                                         |
   |  200 OK                                 |
-  |  { results: [...],                      |  <-- show results immediately
+  |  { results: [...],                      |  ← show results immediately
   |    follow_ups: [                        |
-  |      {dimension: "garment_type",        |
-  |       question: "What are you           |
-  |         looking for?",                  |
-  |       options: [                        |
-  |         {label: "Dresses",              |
-  |          filters: {category_l1:         |
-  |            ["Dresses"]}},               |
-  |         {label: "Tops",                 |
-  |          filters: {category_l1:         |
-  |            ["Tops"]}},                  |
-  |         {label: "Outerwear",            |
-  |          filters: {category_l1:         |
-  |            ["Outerwear"]}}              |
-  |       ]},                               |
-  |      {dimension: "formality", ...},     |
-  |      {dimension: "vibe", ...}           |
+  |      {question: "What are you           |
+  |        looking for?", ...},             |
+  |      {question: "How dressed up?", ...} |
   |    ] }                                  |
   |<----------------------------------------|
   |                                         |
-  |  Render follow-up pills (multi-select)  |
-  |                                         |
   |  User taps: [Dresses] [Tops]            |
-  |  User taps: [Casual] [Smart Casual]     |
-  |  User taps: [Glamorous]                 |
-  |  User taps "Apply" button               |
+  |  User taps: [Casual]                    |
+  |  User taps "Apply"                      |
   |                                         |
-  |  Client merges selections:              |
-  |  selected_filters = {                   |
-  |    category_l1: ["Dresses", "Tops"],    |
-  |    formality: ["Casual",                |
-  |                "Smart Casual"],          |
-  |    style_tags: ["Glamorous"]            |
-  |  }                                      |
-  |                                         |
-  |  POST /api/search/refine                |
-  |  { original_query: "outfit for this     |
-  |      weekend",                          |
-  |    selected_filters: {...},             |
-  |    session_id: "sess_abc123" }          |
+  |  POST /api/search/hybrid                |
+  |  {"query": "outfit for this weekend",   |
+  |   "selected_filters": {                 |
+  |     "category_l1":["Dresses","Tops"],   |
+  |     "formality": ["Casual"]             |
+  |   },                                    |
+  |   "selection_labels":                   |
+  |     ["Dresses","Tops","Casual"]}        |
   |---------------------------------------->|
   |                                         |
   |  200 OK                                 |
-  |  { results: [...],                      |  <-- refined results
-  |    follow_ups: null }                   |
+  |  { results: [...],                      |  ← refined results
+  |    follow_ups: [new questions...],      |  ← 1-2 new follow-ups
+  |    applied_filters: {...},              |
+  |    answered_dimensions: ["garment_type",|
+  |      "formality"] }                     |
   |<----------------------------------------|
-  |                                         |
-  |  Replace product grid with new results  |
 ```
 
 ### Key implementation notes
 
-1. **Show results and follow-ups together.** The initial `/hybrid` response contains both `results` and `follow_ups`. Display the product grid immediately and show follow-up questions as pills/chips alongside or above the grid.
+1. **Show results and follow-ups together.** The initial response contains both. Display the product grid immediately with follow-up pills alongside or above.
 
 2. **Follow-ups are optional.** If `follow_ups` is `null` or `[]`, don't render any question UI.
 
-3. **Users can select from multiple questions.** Each question is independent. Merge all selected `filters` into one `selected_filters` dict before calling `/refine`.
+3. **Multi-select within each question.** Clicking a pill toggles it on/off. Multiple pills per question can be active simultaneously.
 
-4. **Multiple selections per question (multi-select).** Each question allows the user to toggle multiple options on/off. Display selected pills with a distinct visual state (e.g. filled/primary color). Merge rules:
-   - List values: **union** (deduplicated, order-preserved)
-   - `min_price`: **min** of all selected values (widest floor)
-   - `max_price`: **max** of all selected values (widest ceiling)
-   - `modes`: **union** (additive coverage constraints)
+4. **Partial selection is fine.** The user doesn't need to answer all questions.
 
-5. **Toggle behavior.** Clicking a selected pill deselects it (removes from the list). Clicking an unselected pill adds it. This gives the user full control over combinations.
+5. **Refinement generates new follow-ups.** After applying selections, the server returns 1-2 new questions about unanswered dimensions. The `answered_dimensions` field tracks what's been answered.
 
-6. **Partial selection is fine.** The user doesn't have to answer all questions. Only include filters from questions they actually interacted with.
+6. **Session continuity.** Pass the same `session_id` for seen-item dedup. Use `search_session_id` + `cursor` for extend-search pagination.
 
-7. **Session continuity.** Pass the same `session_id` to both `/hybrid` and `/refine` so seen-item dedup carries across.
-
-8. **Refine is idempotent.** Calling `/refine` multiple times with different selections is safe. Each call runs a fresh search with the provided filters.
-
-9. **Server handles list filters as OR.** When `selected_filters` contains `formality: ["Casual", "Smart Casual"]`, the server returns products matching **either** value. The multi-select widens within that dimension while the overall follow-up narrows the search by adding constraints.
+7. **Server handles list filters as OR.** `formality: ["Casual", "Smart Casual"]` returns products matching either value.
 
 ---
 
@@ -597,90 +721,6 @@ No authentication required.
   "status": "healthy",        // "healthy" | "degraded" | "unhealthy"
   "algolia": "healthy",       // "healthy" | "unhealthy"
   "semantic": "healthy",      // "healthy" | "degraded" | "unhealthy"
-  "index_records": 94000      // only when algolia is healthy
+  "index_records": 132711     // only when algolia is healthy
 }
 ```
-
----
-
-## Sort Modes
-
-| Value | Pipeline | Speed | Follow-ups |
-|-------|----------|-------|------------|
-| `relevance` | Full hybrid: LLM planner → Algolia + FashionCLIP → RRF → reranker | ~3-15s | Yes |
-| `price_asc` | LLM planner → Algolia virtual replica (cheapest first) | ~1-3s | No |
-| `price_desc` | LLM planner → Algolia virtual replica (most expensive first) | ~1-3s | No |
-| `trending` | LLM planner → Algolia virtual replica (trending score) | ~1-3s | No |
-
-When `sort_by != "relevance"`:
-- Semantic search, RRF merge, and reranker are skipped
-- Algolia handles pagination natively
-- All filters still apply
-- `follow_ups` will be `null`
-
----
-
-## Filter Reference
-
-### Include Filters (21)
-
-| Field | Type | Example Values |
-|-------|------|---------------|
-| `categories` | `string[]` | `tops`, `bottoms`, `dresses`, `outerwear` |
-| `category_l1` | `string[]` | `Tops`, `Bottoms`, `Dresses`, `Outerwear`, `Activewear`, `Swimwear`, `Accessories` |
-| `category_l2` | `string[]` | `Blouse`, `Jeans`, `Midi Dress`, `Bomber Jacket` |
-| `brands` | `string[]` | `Boohoo`, `Princess Polly`, `Forever 21` |
-| `colors` | `string[]` | `Black`, `White`, `Red`, `Blue`, `Navy Blue`, `Green`, `Pink`, `Yellow`, `Purple`, `Orange`, `Brown`, `Beige`, `Cream`, `Gray`, `Burgundy`, `Olive`, `Taupe`, `Off White`, `Light Blue` |
-| `color_family` | `string[]` | `Warm`, `Cool`, `Neutral` |
-| `patterns` | `string[]` | `Solid`, `Floral`, `Striped`, `Plaid`, `Polka Dot`, `Animal Print`, `Abstract`, `Geometric`, `Tie Dye`, `Camo`, `Colorblock`, `Tropical` |
-| `materials` | `string[]` | `Cotton`, `Linen`, `Silk`, `Satin`, `Denim`, `Faux Leather`, `Wool`, `Velvet`, `Chiffon`, `Lace`, `Mesh`, `Knit`, `Jersey`, `Fleece`, `Sheer` |
-| `occasions` | `string[]` | `Date Night`, `Party`, `Office`, `Work`, `Wedding Guest`, `Vacation`, `Workout`, `Everyday`, `Brunch`, `Night Out`, `Weekend`, `Lounging`, `Beach` |
-| `seasons` | `string[]` | `Summer`, `Spring`, `Fall`, `Winter` |
-| `formality` | `string[]` | `Formal`, `Semi-Formal`, `Business Casual`, `Smart Casual`, `Casual` |
-| `fit_type` | `string[]` | `Slim`, `Fitted`, `Regular`, `Relaxed`, `Oversized`, `Loose` |
-| `neckline` | `string[]` | `V-Neck`, `Crew`, `Turtleneck`, `Off-Shoulder`, `Strapless`, `Halter`, `Scoop`, `Square`, `Sweetheart`, `Cowl`, `Boat`, `One Shoulder`, `Collared`, `Hooded`, `Mock`, `Deep V-Neck`, `Plunging` |
-| `sleeve_type` | `string[]` | `Sleeveless`, `Short`, `Long`, `Cap`, `Puff`, `3/4`, `Flutter`, `Spaghetti Strap` |
-| `length` | `string[]` | `Mini`, `Midi`, `Maxi`, `Cropped`, `Floor-length`, `Ankle`, `Micro` |
-| `rise` | `string[]` | `High`, `Mid`, `Low` |
-| `silhouette` | `string[]` | `A-Line`, `Bodycon`, `Flared`, `Straight`, `Wide Leg` |
-| `article_type` | `string[]` | `midi dress`, `jeans`, `t-shirt`, `blazer` |
-| `style_tags` | `string[]` | `Bohemian`, `Romantic`, `Glamorous`, `Edgy`, `Vintage`, `Sporty`, `Classic`, `Modern`, `Minimalist`, `Preppy`, `Streetwear`, `Sexy`, `Western`, `Utility` |
-| `min_price` | `float` | `20.0` |
-| `max_price` | `float` | `100.0` |
-| `on_sale_only` | `bool` | `true` |
-
-### Exclude Filters (13)
-
-All are `string[]` and use the same allowed values as their include counterparts:
-
-`exclude_brands`, `exclude_colors`, `exclude_patterns`, `exclude_materials`, `exclude_occasions`, `exclude_seasons`, `exclude_formality`, `exclude_neckline`, `exclude_sleeve_type`, `exclude_length`, `exclude_fit_type`, `exclude_silhouette`, `exclude_rise`, `exclude_style_tags`
-
----
-
-## Follow-up `filters` Keys
-
-The `filters` object inside each follow-up option uses a **subset** of the main filter keys:
-
-| Key | Type | Used by dimension | Multi-select merge |
-|-----|------|-------------------|--------------------|
-| `category_l1` | `string[]` | `garment_type` | Union |
-| `formality` | `string[]` | `formality` | Union |
-| `occasions` | `string[]` | `occasion` | Union |
-| `style_tags` | `string[]` | `vibe` | Union |
-| `colors` | `string[]` | `color` | Union |
-| `min_price` | `float` | `price` | Min (widest floor) |
-| `max_price` | `float` | `price` | Max (widest ceiling) |
-| `modes` | `string[]` | `coverage` | Union (additive) |
-| `fit_type` | `string[]` | concrete attribute | Union |
-| `sleeve_type` | `string[]` | concrete attribute | Union |
-| `length` | `string[]` | concrete attribute | Union |
-| `neckline` | `string[]` | concrete attribute | Union |
-| `materials` | `string[]` | concrete attribute | Union |
-| `patterns` | `string[]` | concrete attribute | Union |
-
-**Multi-select merge** column shows how multiple selected options within the same question are combined:
-- **Union**: Deduplicated concatenation. `["Casual"] + ["Smart Casual"]` → `["Casual", "Smart Casual"]`. The server treats list values as OR (matches either).
-- **Min/Max**: For price, multiple selections widen to the broadest range. `max_price: 30` + `max_price: 60` → `max_price: 60`.
-- **Union (additive)**: For `modes`, multiple coverage modes are all applied. `["cover_arms", "cover_chest"]` excludes sleeveless AND low-neckline items.
-
-The `modes` key is special — it is expanded server-side by `/refine` into concrete exclude filters (e.g. `cover_arms` → `exclude_sleeve_type: ["Sleeveless", "Spaghetti Strap"]`).
