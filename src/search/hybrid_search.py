@@ -1007,16 +1007,16 @@ class HybridSearchService:
         )
 
         def _run_algolia() -> tuple:
-            """Run Algolia search, return (results, facets, elapsed_ms)."""
+            """Run Algolia search, return (results, facets, elapsed_ms, nb_hits)."""
             t0 = time.time()
-            results, fcts = self._search_algolia(
+            results, fcts, nb_hits = self._search_algolia(
                 query=algolia_query,
                 filters=algolia_filters,
                 hits_per_page=fetch_size,
                 facets=_FACET_FIELDS,
                 optional_filters=algolia_optional_filters,
             )
-            return results, fcts, int((time.time() - t0) * 1000)
+            return results, fcts, int((time.time() - t0) * 1000), nb_hits
 
         # Mutable container to capture semantic embeddings from _run_semantic().
         # Populated by _search_semantic_multi() when it batch-encodes queries.
@@ -1104,6 +1104,12 @@ class HybridSearchService:
                 brands=(request.brands or [])[:5],
             )
 
+        # Algolia's total hit count (nbHits) — the full catalog count for
+        # the query+filters, independent of our fetch_size limit.  Surfaced
+        # as total_results in the response so the client can display "47K
+        # results" instead of just the merged-pool size.
+        algolia_nb_hits: int = 0
+
         if intent == QueryIntent.EXACT:
             # EXACT: run Algolia first; only run semantic if Algolia returns 0
             if _skip_algolia:
@@ -1114,7 +1120,7 @@ class HybridSearchService:
                 timing["semantic_ms"] = semantic_ms
                 timing["semantic_query_count"] = sq_count
             else:
-                algolia_results, facets, algolia_ms = _run_algolia()
+                algolia_results, facets, algolia_ms, algolia_nb_hits = _run_algolia()
                 timing["algolia_ms"] = algolia_ms
 
                 if len(algolia_results) == 0:
@@ -1147,7 +1153,7 @@ class HybridSearchService:
                     future_semantic = executor.submit(_run_semantic)
 
                     try:
-                        algolia_results, facets, algolia_ms = future_algolia.result()
+                        algolia_results, facets, algolia_ms, algolia_nb_hits = future_algolia.result()
                     except Exception as e:
                         logger.warning("Algolia search failed in parallel", error=str(e))
 
@@ -1606,6 +1612,8 @@ class HybridSearchService:
                     follow_ups=follow_ups,
                     applied_filters=_applied_filters,
                     answered_dimensions=_answered_dims,
+                    # Algolia catalog count
+                    algolia_total_hits=algolia_nb_hits,
                     # Flags
                     skip_algolia=_skip_algolia,
                     use_attribute_search=_use_attribute_search,
@@ -1628,7 +1636,10 @@ class HybridSearchService:
                 page=request.page,
                 page_size=request.page_size,
                 has_more=has_more,
-                total_results=len(merged),
+                # Surface Algolia's full catalog count (nbHits) so the client
+                # can show "47K results" instead of the merged-pool size.
+                # Falls back to merged count when Algolia was skipped.
+                total_results=algolia_nb_hits if algolia_nb_hits > 0 else len(merged),
             ),
             search_session_id=_search_session_id,
             cursor=_cursor,
@@ -1944,7 +1955,8 @@ class HybridSearchService:
                 page=page,
                 page_size=entry.page_size,
                 has_more=has_more,
-                total_results=len(products),
+                # Carry forward Algolia's catalog count from page 1.
+                total_results=entry.algolia_total_hits if entry.algolia_total_hits > 0 else len(products),
             ),
             search_session_id=session_id,
             cursor=next_cursor,
@@ -2194,11 +2206,11 @@ class HybridSearchService:
         hits_per_page: int = 100,
         facets: Optional[List[str]] = None,
         optional_filters: Optional[List[str]] = None,
-    ) -> Tuple[List[dict], Optional[Dict[str, List[FacetValue]]]]:
-        """Search Algolia and return normalized results + facet counts.
+    ) -> Tuple[List[dict], Optional[Dict[str, List[FacetValue]]], int]:
+        """Search Algolia and return normalized results + facet counts + total hits.
 
         Returns:
-            Tuple of (results list, facets dict or None).
+            Tuple of (results list, facets dict or None, nbHits from Algolia).
         """
         try:
             resp = self.algolia.search(
@@ -2264,10 +2276,11 @@ class HybridSearchService:
                     if len(values) >= 2:
                         parsed_facets[facet_name] = values
 
-            return results, parsed_facets
+            nb_hits = resp.get("nbHits", len(results))
+            return results, parsed_facets, nb_hits
         except Exception as e:
             logger.error("Algolia search failed", error=str(e))
-            return [], None
+            return [], None, 0
 
     # =========================================================================
     # FashionCLIP Semantic Search

@@ -227,7 +227,7 @@ class PaginationInfo(BaseModel):
     page: int
     page_size: int
     has_more: bool
-    total_results: Optional[int] = Field(None, description="Total merged results available (before pagination)")
+    total_results: Optional[int] = Field(None, description="Total matching products in catalog (Algolia nbHits). Falls back to merged result count when Algolia is unavailable.")
 
 
 class FacetValue(BaseModel):

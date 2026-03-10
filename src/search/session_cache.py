@@ -103,6 +103,9 @@ class SearchSessionEntry:
     applied_filters: Optional[Dict[str, Any]] = None
     answered_dimensions: Optional[List[str]] = None
 
+    # Algolia catalog count (nbHits) — surfaced as total_results on all pages
+    algolia_total_hits: int = 0
+
     # Flags
     skip_algolia: bool = False          # empty query + no brand filter
     use_attribute_search: bool = False  # attribute-filtered semantic path
