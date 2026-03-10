@@ -789,8 +789,8 @@ class FullOnboardingRequestV3(BaseModel):
     - brands has renamed fields
     - styleDiscovery simplified to completed + swipedItems
     """
-    # User identification
-    userId: str
+    # User identification (optional — JWT is the source of truth)
+    userId: Optional[str] = None
     gender: str = "female"
 
     # All modules with new structure
@@ -808,7 +808,10 @@ class FullOnboardingRequestV3(BaseModel):
     completedAt: Optional[str] = None
 
 
-def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> OnboardingProfile:
+def transform_frontend_to_profile_v3(
+    request: FullOnboardingRequestV3,
+    user_id: Optional[str] = None,
+) -> OnboardingProfile:
     """
     Transform V3 frontend request structure to internal OnboardingProfile.
 
@@ -818,8 +821,13 @@ def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> Onboar
     - Simplified typePreferences -> top_types, bottom_types, dress_types, outerwear_types
     - Separate pattern arrays -> patterns_liked, patterns_avoided
     - stylePersona is now stored
+
+    ``user_id`` is the canonical identity from JWT.  Falls back to
+    ``request.userId`` for backward-compatible callers that still send it
+    in the body.
     """
-    profile = OnboardingProfile(user_id=request.userId)
+    resolved_user_id = user_id or request.userId or ""
+    profile = OnboardingProfile(user_id=resolved_user_id)
 
     # Core Setup
     profile.categories = request.coreSetup.categories
@@ -1313,11 +1321,11 @@ async def save_onboarding_v3(
 ):
     """Save V3 onboarding profile."""
 
-    # User ID comes from JWT token
+    # User ID comes from JWT token (source of truth, not the request body)
     user_id = user.id
 
     # Transform V3 frontend structure to internal profile
-    profile = transform_frontend_to_profile_v3(request)
+    profile = transform_frontend_to_profile_v3(request, user_id=user_id)
 
     # Check what we have
     has_taste_vector = profile.taste_vector is not None and len(profile.taste_vector) == 512
