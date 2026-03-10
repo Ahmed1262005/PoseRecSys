@@ -381,7 +381,7 @@ Return a JSON object with these fields:
 - intent: "exact" | "specific" | "vague"
 - algolia_query: string (product-name keywords for text search)
 - semantic_query: string (rich visual description for FashionCLIP — used as fallback)
-- semantic_queries: string[] (2-6 DIVERSE FashionCLIP queries — see Section 6b below)
+- semantic_queries: string[] (2-4 DIVERSE FashionCLIP queries — see Section 6b below)
 - modes: string[] (mode tags from the menu below)
 - attributes: object (positive filter values — keys and allowed values listed below)
 - avoid: object (negative filter values — same keys as attributes, for things user said NO to)
@@ -560,32 +560,29 @@ RULES:
 - Do NOT repeat the same description with synonyms — each must pull a genuinely different cluster
 - For exact brand queries: just 1 query is fine (set semantic_queries to [semantic_query])
 - For specific queries: 2-3 queries exploring different interpretations
-- For vague/open queries: 5-6 queries — each MUST target a DIFFERENT garment category or type.
+- For vague/open queries: 3-4 queries — each MUST target a DIFFERENT garment category or type.
   If the query is about "outfits" or a general occasion, cover: dresses, tops, bottoms (trousers/shorts/skirts),
   outerwear/layering, and co-ord sets or jumpsuits. Do NOT generate multiple queries that describe
   the same garment type with slightly different wording — that defeats the purpose.
 - Keep each query under 77 tokens (FashionCLIP model limit)
 
-Example for "work outfit" (vague — 5 queries, each a DIFFERENT garment):
+Example for "work outfit" (vague — 4 queries, each a DIFFERENT garment):
 ```json
 "semantic_queries": [
   "structured tailored blazer in solid neutral tones, professional office wear",
   "elegant silk button-up blouse with refined collar, polished workwear",
   "fitted knee-length pencil dress in dark fabric, clean professional silhouette",
-  "high-waisted tailored wide-leg trousers in black or navy, polished office bottoms",
-  "matching coordinated two-piece blazer and trouser set, professional power suiting"
+  "high-waisted tailored wide-leg trousers in black or navy, polished office bottoms"
 ]
 ```
 
-Example for "vacation outfits for Europe" (vague — 6 queries spanning garment categories):
+Example for "vacation outfits for Europe" (vague — 4 queries spanning garment categories):
 ```json
 "semantic_queries": [
   "lightweight floral midi sundress with strappy details, warm-weather resort wear",
   "relaxed linen blouse in soft neutral tones, breezy European summer top",
   "high-waisted wide-leg linen trousers in light earthy tones, comfortable travel bottoms",
-  "lightweight knit cardigan or linen blazer for layering, versatile outerwear for cool evenings",
-  "tailored high-waisted shorts in neutral cotton, casual chic summer bottoms",
-  "matching two-piece co-ord set in breathable fabric, effortless vacation outfit"
+  "lightweight knit cardigan or linen blazer for layering, versatile outerwear for cool evenings"
 ]
 ```
 
