@@ -178,9 +178,9 @@ class RecommendationPipeline:
         # Step 1: Load user state
         user_state = self._load_user_state(user_id, anon_id, session_id)
 
-        # Optional: Override categories from request
+        # Optional: Override categories from request (DB stores lowercase)
         if categories and user_state.onboarding_profile:
-            user_state.onboarding_profile.categories = categories
+            user_state.onboarding_profile.categories = [c.lower() for c in categories]
 
         # Step 2: Get candidates
         candidates = self.candidate_module.get_candidates(user_state, gender)
@@ -304,8 +304,9 @@ class RecommendationPipeline:
         # Step 1: Load user state
         user_state = self._load_user_state(user_id, anon_id, session_id)
 
-        # Override categories from request (even for cold-start users)
+        # Override categories from request (DB stores lowercase)
         if categories:
+            categories = [c.lower() for c in categories]
             if user_state.onboarding_profile:
                 user_state.onboarding_profile.categories = categories
             else:
@@ -621,8 +622,9 @@ class RecommendationPipeline:
             db_seen_ids = future_seen.result()
         db_history_count = len(db_seen_ids)
 
-        # Override categories from request
+        # Override categories from request (DB stores lowercase: tops, bottoms, dresses, outerwear)
         if categories:
+            categories = [c.lower() for c in categories]
             if user_state.onboarding_profile:
                 user_state.onboarding_profile.categories = categories
             else:
@@ -1378,8 +1380,9 @@ class RecommendationPipeline:
             user_state = future_state.result()
             db_seen_ids = future_seen.result()
 
-        # Override categories from request
+        # Override categories from request (DB stores lowercase)
         if categories:
+            categories = [c.lower() for c in categories]
             if user_state.onboarding_profile:
                 user_state.onboarding_profile.categories = categories
             else:

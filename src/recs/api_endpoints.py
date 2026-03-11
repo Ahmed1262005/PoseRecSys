@@ -290,10 +290,10 @@ async def get_feed(
 
     service = get_service()
 
-    # Parse categories
+    # Parse categories (DB stores lowercase: tops, bottoms, dresses, outerwear)
     cat_list = None
     if categories:
-        cat_list = [c.strip() for c in categories.split(",")]
+        cat_list = [c.strip().lower() for c in categories.split(",")]
 
     # Check if it's a UUID or anon_id
     is_uuid = len(user_id) == 36 and user_id.count("-") == 4
@@ -1492,15 +1492,15 @@ async def get_pipeline_feed(
 
     pipeline = get_pipeline()
 
-    # Parse categories
+    # Parse categories (DB stores lowercase: tops, bottoms, dresses, outerwear)
     cat_list = None
     if categories:
-        cat_list = [c.strip() for c in categories.split(",")]
+        cat_list = [c.strip().lower() for c in categories.split(",")]
 
-    # Parse article_types
+    # Parse article_types (DB stores lowercase)
     article_type_list = None
     if article_types:
-        article_type_list = [a.strip() for a in article_types.split(",")]
+        article_type_list = [a.strip().lower() for a in article_types.split(",")]
 
     # Parse lifestyle filters
     exclude_styles_list = None
@@ -1745,8 +1745,9 @@ async def get_sale_items(
     def _parse_csv(val: Optional[str]) -> Optional[list]:
         return [v.strip() for v in val.split(",")] if val else None
 
-    cat_list = _parse_csv(categories)
-    article_type_list = _parse_csv(article_types)
+    # DB stores categories/article_types lowercase
+    cat_list = [c.strip().lower() for c in categories.split(",")] if categories else None
+    article_type_list = [a.strip().lower() for a in article_types.split(",")] if article_types else None
     exclude_styles_list = _parse_csv(exclude_styles)
     include_occasions_list = _parse_csv(include_occasions)
     exclude_brands_list = _parse_csv(exclude_brands)
@@ -1901,8 +1902,9 @@ async def get_new_arrivals(
     def _parse_csv(val: Optional[str]) -> Optional[list]:
         return [v.strip() for v in val.split(",")] if val else None
 
-    cat_list = _parse_csv(categories)
-    article_type_list = _parse_csv(article_types)
+    # DB stores categories/article_types lowercase
+    cat_list = [c.strip().lower() for c in categories.split(",")] if categories else None
+    article_type_list = [a.strip().lower() for a in article_types.split(",")] if article_types else None
     exclude_styles_list = _parse_csv(exclude_styles)
     include_occasions_list = _parse_csv(include_occasions)
     exclude_brands_list = _parse_csv(exclude_brands)
@@ -2006,10 +2008,10 @@ async def get_endless_feed(
 
     pipeline = get_pipeline()
 
-    # Parse categories
+    # Parse categories (DB stores lowercase: tops, bottoms, dresses, outerwear)
     cat_list = None
     if categories:
-        cat_list = [c.strip() for c in categories.split(",")]
+        cat_list = [c.strip().lower() for c in categories.split(",")]
 
     response = pipeline.get_feed_endless(
         user_id=user_id,
