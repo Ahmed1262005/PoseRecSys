@@ -781,8 +781,8 @@ class FullOnboardingRequestV3(BaseModel):
     - brands has renamed fields
     - styleDiscovery simplified to completed + swipedItems
     """
-    # User identification
-    userId: str
+    # User identification (optional — derived from JWT if not provided)
+    userId: Optional[str] = None
     gender: str = "female"
 
     # All modules with new structure
@@ -800,7 +800,7 @@ class FullOnboardingRequestV3(BaseModel):
     completedAt: Optional[str] = None
 
 
-def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> OnboardingProfile:
+def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3, user_id: str) -> OnboardingProfile:
     """
     Transform V3 frontend request structure to internal OnboardingProfile.
 
@@ -811,7 +811,8 @@ def transform_frontend_to_profile_v3(request: FullOnboardingRequestV3) -> Onboar
     - Separate pattern arrays -> patterns_liked, patterns_avoided
     - stylePersona is now stored
     """
-    profile = OnboardingProfile(user_id=request.userId)
+    # Use JWT-derived user_id; fall back to request.userId for backward compat
+    profile = OnboardingProfile(user_id=user_id or request.userId)
 
     # Core Setup
     profile.categories = request.coreSetup.categories
@@ -1309,7 +1310,7 @@ async def save_onboarding_v3(
     user_id = user.id
 
     # Transform V3 frontend structure to internal profile
-    profile = transform_frontend_to_profile_v3(request)
+    profile = transform_frontend_to_profile_v3(request, user_id=user_id)
 
     # Check what we have
     has_taste_vector = profile.taste_vector is not None and len(profile.taste_vector) == 512
