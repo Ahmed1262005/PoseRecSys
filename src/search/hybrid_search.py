@@ -1614,6 +1614,15 @@ class HybridSearchService:
                     answered_dimensions=_answered_dims,
                     # Algolia catalog count
                     algolia_total_hits=algolia_nb_hits,
+                    # Post-filter criteria for endless semantic (page 2+)
+                    post_filter_criteria={
+                        k: getattr(pipeline_request, k, None)
+                        for k in (
+                            "category_l1", "category_l2", "brands",
+                            "exclude_brands", "min_price", "max_price",
+                        )
+                        if getattr(pipeline_request, k, None) is not None
+                    } or None,
                     # Flags
                     skip_algolia=_skip_algolia,
                     use_attribute_search=_use_attribute_search,
@@ -1689,7 +1698,12 @@ class HybridSearchService:
             )
             return None
 
-        return self._extend_search(entry, page, sid)
+        # EXACT intent: Algolia-native pagination (unchanged).
+        # SPECIFIC / VAGUE intent: endless semantic pump (pgvector only).
+        if entry.intent == "exact":
+            return self._extend_search(entry, page, sid)
+        else:
+            return self._endless_semantic_page(entry, page, sid)
 
     def _extend_search(
         self,
@@ -1962,6 +1976,277 @@ class HybridSearchService:
             cursor=next_cursor,
             timing=timing,
             facets=entry.facets or algolia_facets,
+            follow_ups=entry.follow_ups,
+            applied_filters=entry.applied_filters,
+            answered_dimensions=entry.answered_dimensions,
+        )
+
+    # =========================================================================
+    # Endless Semantic Search (page 2+ for SPECIFIC / VAGUE intent)
+    # =========================================================================
+
+    # Max rounds of pgvector fetch-filter-accumulate before giving up.
+    _ENDLESS_MAX_ROUNDS = 10
+    # Per-query limit per round (each semantic query fetches this many).
+    _ENDLESS_BATCH_SIZE = 100
+
+    @staticmethod
+    def _apply_endless_post_filter(
+        results: List[dict],
+        criteria: Dict[str, Any],
+    ) -> List[dict]:
+        """Apply cached structural filters to semantic results.
+
+        Only enforces hard structural filters from the page-1 planner output:
+        category_l1, category_l2, brands, exclude_brands, min_price, max_price.
+
+        Items with None/missing values for a filter field are EXCLUDED
+        (strict mode — same as page-1 post-filter behaviour).
+
+        Args:
+            results: Enriched semantic result dicts.
+            criteria: Dict with optional keys: category_l1, category_l2,
+                brands, exclude_brands, min_price, max_price.
+
+        Returns:
+            Filtered list (may be shorter than input).
+        """
+        if not criteria:
+            return results
+
+        filtered = results
+
+        # --- Category L1 ---
+        cat_l1 = criteria.get("category_l1")
+        if cat_l1:
+            vals = {v.lower() for v in cat_l1} if isinstance(cat_l1, list) else {cat_l1.lower()}
+            filtered = [
+                r for r in filtered
+                if r.get("category_l1") and r["category_l1"].lower() in vals
+            ]
+
+        # --- Category L2 ---
+        cat_l2 = criteria.get("category_l2")
+        if cat_l2:
+            vals = {v.lower() for v in cat_l2} if isinstance(cat_l2, list) else {cat_l2.lower()}
+            filtered = [
+                r for r in filtered
+                if r.get("category_l2") and (
+                    r["category_l2"].lower() in vals
+                    or any(v in r["category_l2"].lower() for v in vals)
+                )
+            ]
+
+        # --- Brand include ---
+        brands = criteria.get("brands")
+        if brands:
+            vals = {v.lower() for v in brands}
+            filtered = [
+                r for r in filtered
+                if r.get("brand") and r["brand"].lower() in vals
+            ]
+
+        # --- Brand exclude ---
+        exclude_brands = criteria.get("exclude_brands")
+        if exclude_brands:
+            vals = {v.lower() for v in exclude_brands}
+            filtered = [
+                r for r in filtered
+                if not r.get("brand") or r["brand"].lower() not in vals
+            ]
+
+        # --- Price range ---
+        min_price = criteria.get("min_price")
+        if min_price is not None:
+            filtered = [
+                r for r in filtered
+                if r.get("price") is not None and r["price"] >= min_price
+            ]
+        max_price = criteria.get("max_price")
+        if max_price is not None:
+            filtered = [
+                r for r in filtered
+                if r.get("price") is not None and r["price"] <= max_price
+            ]
+
+        return filtered
+
+    def _endless_semantic_page(
+        self,
+        entry: SearchSessionEntry,
+        page: int,
+        session_id: str,
+    ) -> HybridSearchResponse:
+        """Serve page 2+ for SPECIFIC/VAGUE intent via batched pgvector pump.
+
+        Instead of re-running the full hybrid pipeline (planner → Algolia →
+        semantic → RRF → reranker), this method:
+        1. Queries pgvector with cached embeddings, excluding all seen IDs.
+        2. Enriches results from Algolia (batch get_objects).
+        3. Applies structural post-filters from the page-1 planner output.
+        4. Accumulates survivors until page_size is filled (or exhausted).
+        5. Deduplicates (near-dupe only — NO brand/category caps).
+
+        Properties:
+        - No planner, no follow-ups, no Algolia search, no RRF.
+        - Dedup only (via SessionReranker._deduplicate).
+        - Typical latency: 2-3 rounds × ~700ms = ~1.5-2s per page.
+        - has_more = False when pgvector returns 0 new candidates in a round.
+
+        Args:
+            entry: Cached plan state from page 1.
+            page: The requested page number (2+).
+            session_id: The search session ID.
+
+        Returns:
+            HybridSearchResponse with fresh semantic results.
+        """
+        t_start = time.time()
+        timing: Dict[str, Any] = {
+            "endless_semantic": True,
+            "page": page,
+            "rounds": 0,
+            "semantic_ms": 0,
+            "enrich_ms": 0,
+            "filter_ms": 0,
+        }
+
+        criteria = entry.post_filter_criteria or {}
+        accumulated: List[dict] = []
+        exhausted = False
+        round_num = 0
+
+        queries = entry.semantic_queries or [entry.query]
+        embeddings = entry.semantic_embeddings
+
+        # Build a minimal request for _search_semantic / _search_semantic_multi.
+        # We DON'T pass brand/category filters here — those are applied in
+        # post-filter after enrichment (pgvector doesn't have Gemini attrs).
+        # We DO pass price + brand filters that pgvector SQL supports natively
+        # to reduce the fetch set.
+        base_request = HybridSearchRequest(query=entry.query)
+        if entry.semantic_request_updates:
+            base_request = base_request.model_copy(
+                update=entry.semantic_request_updates
+            )
+
+        while len(accumulated) < entry.page_size and round_num < self._ENDLESS_MAX_ROUNDS:
+            round_num += 1
+            seen_ids_list = list(entry.seen_product_ids)
+
+            # --- Fetch from pgvector ---
+            t_sem = time.time()
+            per_query_limit = max(self._ENDLESS_BATCH_SIZE // max(len(queries), 1), 30)
+
+            if len(queries) > 1 and embeddings is not None:
+                batch_results, _ = self._search_semantic_multi(
+                    queries=queries,
+                    request=base_request,
+                    limit_per_query=per_query_limit,
+                    precomputed_embeddings=embeddings,
+                    exclude_product_ids=seen_ids_list,
+                )
+            elif embeddings and len(embeddings) >= 1:
+                batch_results = self._search_semantic(
+                    query=queries[0],
+                    request=base_request,
+                    limit=self._ENDLESS_BATCH_SIZE,
+                    query_embedding=embeddings[0],
+                    exclude_product_ids=seen_ids_list,
+                )
+            else:
+                # No cached embeddings — shouldn't happen, but handle gracefully
+                logger.warning("Endless semantic: no cached embeddings, re-encoding")
+                batch_results = self._search_semantic(
+                    query=queries[0],
+                    request=base_request,
+                    limit=self._ENDLESS_BATCH_SIZE,
+                    exclude_product_ids=seen_ids_list,
+                )
+            timing["semantic_ms"] += int((time.time() - t_sem) * 1000)
+
+            if not batch_results:
+                exhausted = True
+                break
+
+            # Add ALL fetched IDs to seen set (even ones that will be
+            # filtered out) so we never re-fetch them in the next round.
+            batch_ids = [r["product_id"] for r in batch_results if r.get("product_id")]
+            entry.add_seen_ids(batch_ids)
+
+            # --- Enrich from Algolia ---
+            t_enr = time.time()
+            if not entry.use_attribute_search:
+                batch_results = self._enrich_semantic_results(batch_results)
+            timing["enrich_ms"] += int((time.time() - t_enr) * 1000)
+
+            # --- Post-filter ---
+            t_flt = time.time()
+            survivors = self._apply_endless_post_filter(batch_results, criteria)
+            timing["filter_ms"] += int((time.time() - t_flt) * 1000)
+
+            accumulated.extend(survivors)
+
+            logger.info(
+                "Endless semantic round",
+                round=round_num,
+                fetched=len(batch_results),
+                survived_filter=len(survivors),
+                accumulated=len(accumulated),
+                target=entry.page_size,
+            )
+
+        timing["rounds"] = round_num
+
+        # --- Deduplicate (near-dupe only, NO brand/category caps) ---
+        deduped = self._reranker._deduplicate(accumulated)
+
+        # Take page_size results
+        page_results = deduped[:entry.page_size]
+
+        # has_more: False only when pgvector is fully exhausted
+        has_more = not exhausted and len(page_results) >= entry.page_size
+
+        products = [
+            self._to_product_result(r, idx + 1)
+            for idx, r in enumerate(page_results)
+        ]
+
+        # Build next cursor
+        next_cursor = encode_cursor(page=page + 1) if has_more else None
+
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+        timing["seen_ids_total"] = len(entry.seen_product_ids)
+        timing["dedup_removed"] = len(accumulated) - len(deduped)
+
+        logger.info(
+            "Endless semantic page served",
+            search_session_id=session_id,
+            page=page,
+            results=len(products),
+            has_more=has_more,
+            rounds=round_num,
+            accumulated_before_dedup=len(accumulated),
+            deduped=len(deduped),
+            exhausted=exhausted,
+            total_ms=timing["total_ms"],
+        )
+
+        return HybridSearchResponse(
+            query=entry.query,
+            intent=entry.intent,
+            sort_by=entry.sort_by,
+            results=products,
+            pagination=PaginationInfo(
+                page=page,
+                page_size=entry.page_size,
+                has_more=has_more,
+                total_results=entry.algolia_total_hits if entry.algolia_total_hits > 0 else len(products),
+            ),
+            search_session_id=session_id,
+            cursor=next_cursor,
+            timing=timing,
+            facets=entry.facets,
             follow_ups=entry.follow_ups,
             applied_filters=entry.applied_filters,
             answered_dimensions=entry.answered_dimensions,

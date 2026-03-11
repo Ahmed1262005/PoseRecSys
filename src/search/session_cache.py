@@ -106,6 +106,10 @@ class SearchSessionEntry:
     # Algolia catalog count (nbHits) — surfaced as total_results on all pages
     algolia_total_hits: int = 0
 
+    # Post-filter criteria for endless semantic search (page 2+).
+    # Structural filters from the planner that semantic results must satisfy.
+    post_filter_criteria: Optional[Dict[str, Any]] = None
+
     # Flags
     skip_algolia: bool = False          # empty query + no brand filter
     use_attribute_search: bool = False  # attribute-filtered semantic path
