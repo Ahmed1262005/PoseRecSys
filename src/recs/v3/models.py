@@ -229,9 +229,11 @@ class SessionProfile:
     action_seq: int = 0
     last_action_at: float = 0.0
     recent_actions: List[Dict[str, Any]] = field(default_factory=list)
+    search_intents: List[Dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     MAX_RECENT_ACTIONS: int = 50
+    MAX_SEARCH_INTENTS: int = 10
 
     def record_action(
         self,
@@ -286,6 +288,33 @@ class SessionProfile:
         if len(self.recent_actions) > self.MAX_RECENT_ACTIONS:
             self.recent_actions = self.recent_actions[-self.MAX_RECENT_ACTIONS :]
 
+    def record_search(
+        self,
+        query: str,
+        categories: Optional[List[str]] = None,
+        brands: Optional[List[str]] = None,
+        article_types: Optional[List[str]] = None,
+    ) -> None:
+        """Record a search query so the feed ranker can boost matching items.
+
+        Stores the raw search signals (categories, article_types, brands)
+        with a timestamp.  The ranker reads ``search_intents`` and applies
+        an additive boost for matching candidates (capped at 0.18).
+        """
+        self.action_seq += 1
+        self.last_action_at = time.time()
+        self.intent_strength = min(1.0, self.intent_strength + 0.15)
+
+        self.search_intents.append({
+            "q": query,
+            "ts": time.time(),
+            "cats": [c.lower() for c in (categories or [])],
+            "types": [t.lower() for t in (article_types or [])],
+            "brands": [b.lower() for b in (brands or [])],
+        })
+        if len(self.search_intents) > self.MAX_SEARCH_INTENTS:
+            self.search_intents = self.search_intents[-self.MAX_SEARCH_INTENTS:]
+
     # -- serialisation ------------------------------------------------------
 
     def to_dict(self) -> dict:
@@ -305,6 +334,7 @@ class SessionProfile:
             "action_seq": self.action_seq,
             "last_action": self.last_action_at,
             "recent": self.recent_actions,
+            "search": self.search_intents,
             "created": self.created_at,
         }
 
@@ -326,6 +356,7 @@ class SessionProfile:
             action_seq=d.get("action_seq", 0),
             last_action_at=d.get("last_action", 0.0),
             recent_actions=d.get("recent", []),
+            search_intents=d.get("search", []),
             created_at=d.get("created", 0.0),
         )
 

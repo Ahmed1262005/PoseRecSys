@@ -233,11 +233,12 @@ def test_router_has_five_routes():
     prefix = router.prefix
     assert f"{prefix}/feed" in paths
     assert f"{prefix}/feed/action" in paths
+    assert f"{prefix}/feed/search-signal" in paths
     assert f"{prefix}/feed/health" in paths
     assert f"{prefix}/feed/session/{{session_id}}" in paths
     # DELETE and GET on same path count as separate routes
-    # Check we have at least 5 routes
-    assert len(paths) >= 5
+    # Check we have at least 6 routes
+    assert len(paths) >= 6
 
 
 def test_router_feed_is_get():

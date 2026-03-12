@@ -543,6 +543,31 @@ class HybridSearchService:
                 search_session_id=request.search_session_id,
             )
 
+        # -----------------------------------------------------------------
+        # FILTER REFINEMENT FAST PATH
+        # When the client passes a search_session_id + user filters but NO
+        # cursor, this signals "apply new facet filters, reset to page 1".
+        # Reuses cached FashionCLIP embeddings + planner state (~3-5s)
+        # instead of re-running the full pipeline (~12-15s).
+        # -----------------------------------------------------------------
+        if request.search_session_id and not request.cursor and user_filters:
+            refined = self._filter_refine_search(
+                request=request,
+                user_filters=user_filters,
+                user_id=user_id,
+                user_profile=user_profile,
+                seen_ids=seen_ids,
+                user_context=user_context,
+                session_scores=session_scores,
+            )
+            if refined is not None:
+                return refined
+            # Cache miss — fall through to full pipeline
+            logger.info(
+                "Filter refinement cache miss, running full pipeline",
+                search_session_id=request.search_session_id,
+            )
+
         # =====================================================================
         # STEP 1: Query Understanding (LLM Planner with regex fallback)
         # =====================================================================
@@ -1375,17 +1400,23 @@ class HybridSearchService:
         if user_filters and merged:
             merged = self._apply_user_post_filters(merged, user_filters)
 
-        # Step 5e: Recompute facets from merged results.
-        # Algolia facets only reflect its own result set. When semantic
-        # results contributed to the merge, or when user UI filters
-        # narrowed the results, recompute facets from the actual merged
-        # set so the UI shows accurate filter counts.
-        # When it's Algolia-only (no semantic), keep Algolia's facets
-        # as-is — they're already catalog-wide and correct.
+        # Step 5e: Facet strategy.
+        # For SPECIFIC/VAGUE intents, prefer Algolia's catalog-wide facets.
+        # The merged set is too small (45-200 items) to give meaningful
+        # facet counts — e.g. "Boohoo: 3" when catalog has 20K matches.
+        # Algolia facets reflect the full filtered catalog and are correct.
+        #
+        # For EXACT intent with user UI filters, recompute from merged
+        # results since Algolia won't reflect post-filter narrowing.
+        # For EXACT without user filters, Algolia facets are already correct.
         if semantic_results or user_filters:
-            computed_facets = self._compute_facets_from_results(merged)
-            if computed_facets:
-                facets = computed_facets
+            if intent.value != "exact" and facets:
+                # Keep Algolia's catalog-wide facets for SPECIFIC/VAGUE
+                pass
+            else:
+                computed_facets = self._compute_facets_from_results(merged)
+                if computed_facets:
+                    facets = computed_facets
 
         # Step 5.5: Load impression counts for soft demotion
         impression_counts: Optional[Dict[str, int]] = None
@@ -2247,6 +2278,414 @@ class HybridSearchService:
             cursor=next_cursor,
             timing=timing,
             facets=entry.facets,
+            follow_ups=entry.follow_ups,
+            applied_filters=entry.applied_filters,
+            answered_dimensions=entry.answered_dimensions,
+        )
+
+    # =========================================================================
+    # Filter Refinement (facet filters applied mid-session)
+    # =========================================================================
+
+    # Mapping from user filter snapshot keys to Algolia facet names.
+    # Used by _build_user_filter_clauses() to convert a dict of user-selected
+    # facet values into an Algolia filter string.
+    _USER_FILTER_ALGOLIA_MAP: Dict[str, str] = {
+        # Inclusion filters  → Algolia facet attribute
+        "brands": "brand",
+        "categories": "broad_category",
+        "category_l1": "category_l1",
+        "category_l2": "category_l2",
+        "colors": "primary_color",
+        "color_family": "color_family",
+        "patterns": "pattern",
+        "occasions": "occasions",
+        "seasons": "seasons",
+        "formality": "formality",
+        "fit_type": "fit_type",
+        "neckline": "neckline",
+        "sleeve_type": "sleeve_type",
+        "length": "length",
+        "rise": "rise",
+        "silhouette": "silhouette",
+        "article_type": "article_type",
+        "style_tags": "style_tags",
+        "materials": "apparent_fabric",
+    }
+
+    # Exclusion filters → Algolia facet attribute (reuses class-level mapping)
+    _USER_EXCLUDE_FILTER_ALGOLIA_MAP: Dict[str, str] = {
+        "exclude_brands": "brand",
+        "exclude_neckline": "neckline",
+        "exclude_sleeve_type": "sleeve_type",
+        "exclude_length": "length",
+        "exclude_fit_type": "fit_type",
+        "exclude_silhouette": "silhouette",
+        "exclude_patterns": "pattern",
+        "exclude_colors": "primary_color",
+        "exclude_materials": "apparent_fabric",
+        "exclude_occasions": "occasions",
+        "exclude_seasons": "seasons",
+        "exclude_formality": "formality",
+        "exclude_rise": "rise",
+        "exclude_style_tags": "style_tags",
+    }
+
+    @classmethod
+    def _build_user_filter_clauses(cls, user_filters: Dict[str, Any]) -> str:
+        """Convert user UI filter snapshot into Algolia filter string clauses.
+
+        Takes the dict produced by ``_snapshot_user_filters()`` and returns
+        an Algolia-compatible filter string (AND-joined).  This is merged
+        with the cached planner filter string during filter refinement so
+        that Algolia returns facets reflecting the user's selection.
+
+        Returns:
+            Algolia filter string, or empty string if no filters apply.
+        """
+        parts: List[str] = []
+
+        # --- Price ---
+        min_price = user_filters.get("min_price")
+        if min_price is not None:
+            parts.append(f"price >= {min_price}")
+        max_price = user_filters.get("max_price")
+        if max_price is not None:
+            parts.append(f"price <= {max_price}")
+
+        # --- Sale / Set ---
+        if user_filters.get("on_sale_only") is True:
+            parts.append("is_on_sale:true")
+        is_set = user_filters.get("is_set")
+        if is_set is not None:
+            parts.append(f"is_set:{str(is_set).lower()}")
+
+        # --- Inclusion filters (OR within field, AND across fields) ---
+        for key, algolia_facet in cls._USER_FILTER_ALGOLIA_MAP.items():
+            vals = user_filters.get(key)
+            if not vals:
+                continue
+            if isinstance(vals, list):
+                clause = " OR ".join(f'{algolia_facet}:"{v}"' for v in vals)
+                parts.append(f"({clause})")
+            else:
+                parts.append(f'{algolia_facet}:"{vals}"')
+
+        # --- Exclusion filters (NOT per value) ---
+        for key, algolia_facet in cls._USER_EXCLUDE_FILTER_ALGOLIA_MAP.items():
+            vals = user_filters.get(key)
+            if not vals:
+                continue
+            if isinstance(vals, list):
+                for v in vals:
+                    parts.append(f'NOT {algolia_facet}:"{v}"')
+            else:
+                parts.append(f'NOT {algolia_facet}:"{vals}"')
+
+        return " AND ".join(parts)
+
+    def _filter_refine_search(
+        self,
+        request: HybridSearchRequest,
+        user_filters: Dict[str, Any],
+        user_id: Optional[str] = None,
+        user_profile: Optional[Dict[str, Any]] = None,
+        seen_ids: Optional[Set[str]] = None,
+        user_context: Optional[Any] = None,
+        session_scores: Optional[Any] = None,
+    ) -> Optional[HybridSearchResponse]:
+        """Apply new facet filters to an existing search session.
+
+        Reuses cached FashionCLIP embeddings and planner state from the
+        original search.  Runs Algolia (fresh facets) + semantic (cached
+        embeddings, fresh start) + RRF merge + rerank.
+
+        Expected latency: ~3-5s (vs 12-15s full pipeline).
+
+        Returns:
+            HybridSearchResponse with new session ID, or None on cache miss.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        t_start = time.time()
+        timing: Dict[str, Any] = {"filter_refine": True}
+
+        # 1. Look up cached session
+        cache = SearchSessionCache.get_instance()
+        sid = request.search_session_id
+        assert sid is not None
+        entry = cache.get(sid)
+        if entry is None:
+            return None
+
+        logger.info(
+            "Filter refinement: reusing cached session",
+            original_session_id=sid,
+            intent=entry.intent,
+            user_filters=list(user_filters.keys()),
+        )
+
+        # 2. Build merged Algolia filter string:
+        #    planner filters (from page 1) AND user UI filter clauses.
+        user_clauses = self._build_user_filter_clauses(user_filters)
+        if entry.algolia_filters and user_clauses:
+            merged_filters = f"{entry.algolia_filters} AND {user_clauses}"
+        elif user_clauses:
+            merged_filters = user_clauses
+        else:
+            merged_filters = entry.algolia_filters or ""
+
+        # Ensure in_stock:true is present (defensive)
+        if "in_stock:true" not in merged_filters:
+            merged_filters = f"in_stock:true AND {merged_filters}" if merged_filters else "in_stock:true"
+
+        logger.info(
+            "Filter refinement: merged Algolia filters",
+            original_filters=entry.algolia_filters,
+            user_clauses=user_clauses,
+            merged=merged_filters,
+        )
+
+        # 3. Run Algolia + Semantic in parallel
+        algolia_results: List[dict] = []
+        algolia_facets = None
+        algolia_nb_hits = 0
+        semantic_results: List[dict] = []
+
+        fetch_size = entry.fetch_size or 150
+
+        def _run_algolia_refine():
+            t0 = time.time()
+            results, fcts, nb_hits = self._search_algolia(
+                query=entry.algolia_query,
+                filters=merged_filters,
+                hits_per_page=fetch_size,
+                facets=_FACET_FIELDS,
+                optional_filters=entry.algolia_optional_filters,
+            )
+            elapsed = int((time.time() - t0) * 1000)
+            return results, fcts, elapsed, nb_hits
+
+        def _run_semantic_refine():
+            if entry.skip_algolia and not entry.semantic_queries:
+                return [], 0
+            queries = entry.semantic_queries or [entry.query]
+            embeddings = entry.semantic_embeddings
+
+            # Build relaxed request for semantic (same as page 1)
+            sem_request = HybridSearchRequest(query=entry.query)
+            if entry.semantic_request_updates:
+                sem_request = sem_request.model_copy(
+                    update=entry.semantic_request_updates
+                )
+
+            t0 = time.time()
+            if embeddings is not None and len(queries) > 1:
+                results, _ = self._search_semantic_multi(
+                    queries=queries,
+                    request=sem_request,
+                    limit_per_query=max(fetch_size // max(len(queries), 1), 30),
+                    precomputed_embeddings=embeddings,
+                    exclude_product_ids=[],  # fresh start — no exclusions
+                )
+            elif embeddings is not None and len(embeddings) >= 1:
+                results = self._search_semantic(
+                    query=queries[0],
+                    request=sem_request,
+                    limit=fetch_size,
+                    query_embedding=embeddings[0],
+                    exclude_product_ids=[],  # fresh start
+                )
+            else:
+                # No cached embeddings — shouldn't happen, but handle gracefully
+                logger.warning("Filter refine: no cached embeddings, re-encoding")
+                results = self._search_semantic(
+                    query=queries[0],
+                    request=sem_request,
+                    limit=fetch_size,
+                    exclude_product_ids=[],
+                )
+            elapsed = int((time.time() - t0) * 1000)
+            return results, elapsed
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            algolia_future = executor.submit(_run_algolia_refine)
+            semantic_future = executor.submit(_run_semantic_refine)
+
+            algolia_results, algolia_facets, algolia_ms, algolia_nb_hits = algolia_future.result()
+            semantic_results, semantic_ms = semantic_future.result()
+
+        timing["algolia_ms"] = algolia_ms
+        timing["semantic_ms"] = semantic_ms
+        timing["algolia_results"] = len(algolia_results)
+        timing["semantic_results_raw"] = len(semantic_results)
+
+        # 4. Enrich semantic results (batch fetch Gemini attrs from Algolia)
+        if semantic_results and not entry.use_attribute_search:
+            t0 = time.time()
+            semantic_results = self._enrich_semantic_results(semantic_results)
+            timing["enrich_ms"] = int((time.time() - t0) * 1000)
+
+        # 5. RRF merge
+        t0 = time.time()
+        merged = self._reciprocal_rank_fusion(
+            algolia_results=algolia_results,
+            semantic_results=semantic_results,
+            algolia_weight=entry.algolia_weight,
+            semantic_weight=entry.semantic_weight,
+        )
+        timing["rrf_ms"] = int((time.time() - t0) * 1000)
+        timing["merged_total"] = len(merged)
+
+        # 6. Apply user post-filters on merged results
+        if user_filters and merged:
+            merged = self._apply_user_post_filters(merged, user_filters)
+            timing["post_filter_results"] = len(merged)
+
+        # 7. Rerank using cached rerank config
+        #
+        # Override caps when the user explicitly filtered by brand:
+        # - max_per_brand=0 → skip brand diversity cap (the user WANTS
+        #   all results from that brand; capping to 4 is wrong).
+        # - page_size=0 → skip category proportional caps (the original
+        #   VAGUE category distribution doesn't apply when the user is
+        #   actively narrowing by brand/price/etc.).
+        _user_set_brands = bool(user_filters.get("brands"))
+
+        if merged and entry.rerank_kwargs:
+            rk = entry.rerank_kwargs.copy()
+            rk["results"] = merged
+            rk["seen_ids"] = seen_ids
+            # Restore runtime-only params that aren't in cached kwargs
+            if "user_profile" not in rk:
+                rk["user_profile"] = user_profile
+            if "user_context" not in rk:
+                rk["user_context"] = user_context
+            if "session_scores" not in rk:
+                rk["session_scores"] = session_scores
+            # Disable brand cap when user explicitly filters by brand
+            if _user_set_brands:
+                rk["max_per_brand"] = 0
+            # Disable category proportional caps — user's explicit filter
+            # intent overrides the original VAGUE category distribution
+            rk["page_size"] = 0
+            merged = self._reranker.rerank(**rk)
+        elif merged:
+            # No cached rerank kwargs — just deduplicate
+            merged = self._reranker._deduplicate(merged)
+
+        # 8. Paginate (always page 1 for refinement)
+        page_results = merged[:request.page_size]
+        has_more = len(merged) > request.page_size
+
+        products = [
+            self._to_product_result(r, idx + 1)
+            for idx, r in enumerate(page_results)
+        ]
+
+        # 9. Use Algolia facets (catalog-wide, not computed from small merged set)
+        # For SPECIFIC/VAGUE, Algolia facets are far more accurate than
+        # computing from the 45-200 item merged set.
+        final_facets = algolia_facets if algolia_facets else entry.facets
+
+        # 10. Create NEW session entry with updated state
+        new_session_id: Optional[str] = None
+        new_cursor: Optional[str] = None
+        if len(merged) > 0:
+            try:
+                new_session_id = cache.generate_session_id()
+                _page1_ids: Set[str] = {
+                    r["product_id"] for r in merged if r.get("product_id")
+                }
+
+                # Build updated post_filter_criteria from user filters
+                _post_criteria_keys = (
+                    "category_l1", "category_l2", "brands",
+                    "exclude_brands", "min_price", "max_price",
+                )
+                new_post_criteria = {
+                    k: user_filters[k]
+                    for k in _post_criteria_keys
+                    if k in user_filters and user_filters[k] is not None
+                }
+                # Also inherit criteria from original entry that user didn't override
+                if entry.post_filter_criteria:
+                    for k in _post_criteria_keys:
+                        if k not in new_post_criteria and k in entry.post_filter_criteria:
+                            new_post_criteria[k] = entry.post_filter_criteria[k]
+
+                cache.store(SearchSessionEntry(
+                    session_id=new_session_id,
+                    query=entry.query,
+                    intent=entry.intent,
+                    sort_by=entry.sort_by,
+                    # Algolia state — use MERGED filters for page 2+
+                    algolia_query=entry.algolia_query,
+                    algolia_filters=merged_filters,
+                    algolia_optional_filters=entry.algolia_optional_filters,
+                    # Semantic state — REUSE from original
+                    semantic_queries=entry.semantic_queries,
+                    semantic_embeddings=entry.semantic_embeddings,
+                    semantic_request_updates=entry.semantic_request_updates,
+                    # RRF weights — REUSE from original
+                    algolia_weight=entry.algolia_weight,
+                    semantic_weight=entry.semantic_weight,
+                    # Reranker config — REUSE from original
+                    rerank_kwargs=entry.rerank_kwargs,
+                    # Pagination tracking — FRESH start
+                    seen_product_ids=_page1_ids,
+                    algolia_page=0,
+                    page_size=request.page_size,
+                    fetch_size=fetch_size,
+                    # Response metadata — UPDATED
+                    facets=final_facets,
+                    follow_ups=entry.follow_ups,
+                    applied_filters=entry.applied_filters,
+                    answered_dimensions=entry.answered_dimensions,
+                    # Algolia catalog count — UPDATED
+                    algolia_total_hits=algolia_nb_hits,
+                    # Post-filter criteria — UPDATED with user filters
+                    post_filter_criteria=new_post_criteria or None,
+                    # Flags — REUSE from original
+                    skip_algolia=entry.skip_algolia,
+                    use_attribute_search=entry.use_attribute_search,
+                    attribute_filters=entry.attribute_filters,
+                ))
+                new_cursor = encode_cursor(page=2)
+                has_more = True
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cache refined search session",
+                    error=str(exc),
+                )
+
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+
+        logger.info(
+            "Filter refinement complete",
+            original_session_id=sid,
+            new_session_id=new_session_id,
+            algolia_hits=algolia_nb_hits,
+            merged=len(merged),
+            returned=len(products),
+            total_ms=timing["total_ms"],
+        )
+
+        return HybridSearchResponse(
+            query=entry.query,
+            intent=entry.intent,
+            sort_by=entry.sort_by,
+            results=products,
+            pagination=PaginationInfo(
+                page=1,
+                page_size=request.page_size,
+                has_more=has_more,
+                total_results=algolia_nb_hits if algolia_nb_hits > 0 else len(merged),
+            ),
+            search_session_id=new_session_id,
+            cursor=new_cursor,
+            timing=timing,
+            facets=final_facets,
             follow_ups=entry.follow_ups,
             applied_filters=entry.applied_filters,
             answered_dimensions=entry.answered_dimensions,

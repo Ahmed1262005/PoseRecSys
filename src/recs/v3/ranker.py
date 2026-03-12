@@ -184,7 +184,17 @@ class FeedRanker:
             if elig_pen > 0:
                 penalty_mult *= (1.0 - elig_pen)
 
-            candidate.final_score = _clamp01(score * penalty_mult)
+            base = score * penalty_mult
+
+            # Search affinity: additive boost when candidate matches
+            # recently searched categories / article_types / brands.
+            search_boost = 0.0
+            if session and session.search_intents:
+                search_boost = self._compute_search_affinity(
+                    candidate, session,
+                )
+
+            candidate.final_score = _clamp01(base + search_boost)
 
         # Sort descending
         candidates.sort(key=lambda x: getattr(x, "final_score", 0.0), reverse=True)
@@ -371,6 +381,50 @@ class FeedRanker:
             return 0.0
         return hits / checks
 
+    @staticmethod
+    def _compute_search_affinity(
+        candidate: Candidate,
+        session: SessionProfile,
+    ) -> float:
+        """Additive score boost when a candidate matches recent searches.
+
+        For each recent search intent (most-recent first, recency decay
+        0.7^i), checks three dimensions:
+
+            category match   → 0.06
+            article_type match → 0.12
+            brand match      → 0.04
+
+        Returns ``min(best_boost, 0.18)`` so a single perfect search
+        match gives up to +0.18 on final_score.
+        """
+        DECAY = 0.7
+        CAT_W = 0.06
+        TYPE_W = 0.12
+        BRAND_W = 0.04
+        CAP = 0.18
+
+        cand_cat = (getattr(candidate, "category", None) or "").lower()
+        cand_type = (getattr(candidate, "article_type", None) or "").lower()
+        cand_brand = (getattr(candidate, "brand", None) or "").lower()
+
+        best = 0.0
+
+        for i, intent in enumerate(reversed(session.search_intents)):
+            recency = DECAY ** i
+            boost = 0.0
+
+            if cand_cat and cand_cat in intent.get("cats", []):
+                boost += CAT_W
+            if cand_type and cand_type in intent.get("types", []):
+                boost += TYPE_W
+            if cand_brand and cand_brand in intent.get("brands", []):
+                boost += BRAND_W
+
+            best = max(best, recency * boost)
+
+        return min(best, CAP)
+
     def rerank_pool_from_meta(
         self,
         pool: CandidatePool,
@@ -447,7 +501,14 @@ class FeedRanker:
                 if cat_count > 0:
                     penalty_mult *= self.penalties.repeated_category
 
-            new_scores[item_id] = max(0.0, score * penalty_mult)
+            base = score * penalty_mult
+
+            # Search affinity boost from ScoringMeta fields
+            search_boost = self._search_affinity_from_meta(
+                session, meta.broad_category, meta.article_type, meta.brand,
+            )
+
+            new_scores[item_id] = max(0.0, base + search_boost)
 
         # Re-sort remaining IDs by new scores
         remaining_ids.sort(
@@ -512,6 +573,45 @@ class FeedRanker:
             except Exception:
                 blended = None
         return self._score_from_meta(blended, brand, cluster_id, broad_category, article_type)
+
+    @staticmethod
+    def _search_affinity_from_meta(
+        session: SessionProfile,
+        broad_category: str,
+        article_type: str,
+        brand: str,
+    ) -> float:
+        """Same logic as _compute_search_affinity but using ScoringMeta fields.
+
+        Used on the rerank-from-meta path where full Candidate objects
+        are not available.
+        """
+        if not session.search_intents:
+            return 0.0
+
+        DECAY = 0.7
+        CAT_W = 0.06
+        TYPE_W = 0.12
+        BRAND_W = 0.04
+        CAP = 0.18
+
+        cat_l = (broad_category or "").lower()
+        type_l = (article_type or "").lower()
+        brand_l = (brand or "").lower()
+
+        best = 0.0
+        for i, intent in enumerate(reversed(session.search_intents)):
+            recency = DECAY ** i
+            boost = 0.0
+            if cat_l and cat_l in intent.get("cats", []):
+                boost += CAT_W
+            if type_l and type_l in intent.get("types", []):
+                boost += TYPE_W
+            if brand_l and brand_l in intent.get("brands", []):
+                boost += BRAND_W
+            best = max(best, recency * boost)
+
+        return min(best, CAP)
 
 
 def _clamp01(v: float) -> float:

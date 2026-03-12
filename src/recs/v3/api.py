@@ -120,6 +120,15 @@ class V3ActionResponse(BaseModel):
     action_seq: Optional[int] = None
 
 
+class V3SearchSignalRequest(BaseModel):
+    """Request body for POST /feed/search-signal."""
+    session_id: str = Field(..., description="V3 session ID (from feed response)")
+    query: str = Field(..., description="Search query text")
+    categories: Optional[List[str]] = Field(default=None, description="Matched categories (e.g. ['dresses'])")
+    brands: Optional[List[str]] = Field(default=None, description="Matched brands")
+    article_types: Optional[List[str]] = Field(default=None, description="Matched article types (e.g. ['midi dress', 'maxi dress'])")
+
+
 VALID_ACTIONS = {
     "click", "save", "wishlist", "cart", "add_to_cart",
     "purchase", "skip", "hide", "dislike", "hover",
@@ -395,6 +404,41 @@ async def record_v3_action(
     except Exception as e:
         logger.error("V3 action error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Feed error: " + str(e))
+
+
+@router.post(
+    "/feed/search-signal",
+    summary="Forward search query to feed session",
+    description="""
+    Called by the search module after each hybrid search so that the
+    feed ranker can boost items matching recent search intent.
+
+    The search route extracts categories/brands/article_types from the
+    query and forwards them here.  The next feed request will apply an
+    additive score boost (up to +0.18) for matching candidates.
+    """,
+)
+async def record_v3_search_signal(
+    request: V3SearchSignalRequest,
+    user: SupabaseUser = Depends(require_auth),
+):
+    """Record a search query as a feed intent signal."""
+    try:
+        orch = _get_orchestrator_or_503()
+        orch.record_search_signal(
+            session_id=request.session_id,
+            user_id=user.id,
+            query=request.query,
+            categories=request.categories,
+            brands=request.brands,
+            article_types=request.article_types,
+        )
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("V3 search-signal error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Search signal error: " + str(e))
 
 
 @router.get(

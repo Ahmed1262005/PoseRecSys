@@ -366,6 +366,31 @@ class FeedOrchestrator:
             metadata=meta,
         )
 
+    def record_search_signal(
+        self,
+        session_id: str,
+        user_id: str,
+        query: str,
+        categories: Optional[List[str]] = None,
+        brands: Optional[List[str]] = None,
+        article_types: Optional[List[str]] = None,
+    ) -> None:
+        """Forward a search query into the V3 session.
+
+        Called by the search route after every hybrid search so the feed
+        ranker can boost items matching the user's recent searches.
+        Increments action_seq → may trigger pool rerank on next feed
+        request.
+        """
+        session = self.session_store.get_or_create_session(session_id, user_id)
+        session.record_search(
+            query=query,
+            categories=categories,
+            brands=brands,
+            article_types=article_types,
+        )
+        self.session_store.save_session(session_id, session)
+
     def _rebuild_pool(
         self,
         request: FeedRequest,

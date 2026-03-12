@@ -1,9 +1,9 @@
 """
-Gradio demo for Endless Semantic Search pagination.
+Gradio demo for Endless Semantic Search + Filter Refinement.
 
-Shows page-by-page results with product cards, timing stats, and
-a "Load More" button that fetches the next page via the endless
-semantic pipeline.
+Shows page-by-page results with product cards, timing stats,
+a "Load More" button for endless pagination, and facet filter
+dropdowns for mid-session filter refinement.
 
 Usage:
     1. Start the API server:
@@ -58,6 +58,8 @@ _state = {
     "query": "",
     "all_ids": set(),
     "page_data": [],  # list of (page_num, results, timing, pagination)
+    "facets": {},     # facets from latest response
+    "p1_ms": 0,       # page 1 latency (for comparison)
 }
 
 
@@ -69,6 +71,8 @@ def _reset():
         "query": "",
         "all_ids": set(),
         "page_data": [],
+        "facets": {},
+        "p1_ms": 0,
     })
 
 
@@ -208,6 +212,18 @@ def _product_card(i: int, p: dict, page: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _extract_brand_choices(facets: dict) -> list:
+    """Extract brand names from facets for dropdown."""
+    brands = facets.get("brand", [])
+    choices = []
+    for fv in brands:
+        name = fv.get("value") if isinstance(fv, dict) else getattr(fv, "value", "")
+        count = fv.get("count") if isinstance(fv, dict) else getattr(fv, "count", 0)
+        if name:
+            choices.append(f"{name} ({count})")
+    return sorted(choices)
+
+
 def do_search(query: str) -> tuple:
     """Run page 1 search."""
     _reset()
@@ -219,7 +235,7 @@ def do_search(query: str) -> tuple:
         r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=90)
         r.raise_for_status()
     except Exception as e:
-        return f"<b>Error:</b> {e}", gr.update(interactive=False)
+        return f"<b>Error:</b> {e}", gr.update(interactive=False), gr.update(choices=[], value=None), ""
 
     wall_ms = int((time.time() - t0) * 1000)
     data = r.json()
@@ -227,6 +243,8 @@ def do_search(query: str) -> tuple:
     _state["search_session_id"] = data.get("search_session_id")
     _state["cursor"] = data.get("cursor")
     _state["current_page"] = 1
+    _state["facets"] = data.get("facets", {})
+    _state["p1_ms"] = data.get("timing", {}).get("total_ms", wall_ms)
 
     results = data.get("results", [])
     ids = {p["product_id"] for p in results}
@@ -235,7 +253,17 @@ def do_search(query: str) -> tuple:
 
     html = _render_all_pages(data.get("intent", "?"))
     has_more = data.get("pagination", {}).get("has_more", False)
-    return html, gr.update(interactive=has_more and bool(_state["cursor"]))
+
+    # Populate brand dropdown from facets
+    brand_choices = _extract_brand_choices(_state["facets"])
+    filter_status = f"Session: {_state['search_session_id'] or 'none'} | P1: {_state['p1_ms']}ms"
+
+    return (
+        html,
+        gr.update(interactive=has_more and bool(_state["cursor"])),
+        gr.update(choices=brand_choices, value=None),
+        filter_status,
+    )
 
 
 def do_load_more() -> tuple:
@@ -270,15 +298,91 @@ def do_load_more() -> tuple:
     _state["all_ids"].update(new_ids)
     _state["page_data"].append((next_page, results, data.get("timing", {}), data.get("pagination", {})))
 
-    intent = _state["page_data"][0][3].get("intent") if _state["page_data"] else "?"
-    # Get intent from the first page's response
-    if _state["page_data"]:
-        # intent was stored in page 1 response
-        pass
-
     html = _render_all_pages()
     has_more = data.get("pagination", {}).get("has_more", False)
     return html, gr.update(interactive=has_more and bool(_state["cursor"]))
+
+
+def do_refine(brand_filter: str, max_price: float) -> tuple:
+    """Apply facet filters via cached session (filter refinement)."""
+    if not _state["search_session_id"]:
+        return (
+            "<b>No active session.</b> Search first, then apply filters.",
+            gr.update(interactive=False),
+            gr.update(),
+            "No active session",
+        )
+
+    body = {
+        "query": _state["query"],
+        "page_size": 50,
+        "search_session_id": _state["search_session_id"],
+        # NO cursor → signals filter refinement
+    }
+
+    # Parse brand name from "Boohoo (200)" format
+    if brand_filter:
+        brand_name = brand_filter.split(" (")[0].strip()
+        if brand_name:
+            body["brands"] = [brand_name]
+
+    if max_price and max_price > 0:
+        body["max_price"] = max_price
+
+    # Need at least one filter for refinement to trigger
+    if "brands" not in body and "max_price" not in body:
+        return (
+            "<b>Select at least one filter.</b>",
+            gr.update(),
+            gr.update(),
+            "No filters selected",
+        )
+
+    t0 = time.time()
+    try:
+        r = requests.post(f"{SEARCH_URL}/hybrid", json=body, headers=HEADERS, timeout=90)
+        r.raise_for_status()
+    except Exception as e:
+        return (
+            f"<b>Refine error:</b> {e}",
+            gr.update(interactive=False),
+            gr.update(),
+            f"Error: {e}",
+        )
+
+    wall_ms = int((time.time() - t0) * 1000)
+    data = r.json()
+
+    # Update state with refined results
+    _state["search_session_id"] = data.get("search_session_id")
+    _state["cursor"] = data.get("cursor")
+    _state["current_page"] = 1
+    _state["facets"] = data.get("facets", _state["facets"])
+
+    results = data.get("results", [])
+    ids = {p["product_id"] for p in results}
+    _state["all_ids"] = ids
+    _state["page_data"] = [(1, results, data.get("timing", {}), data.get("pagination", {}))]
+
+    html = _render_all_pages(data.get("intent", "?"))
+    has_more = data.get("pagination", {}).get("has_more", False)
+
+    # Build status line
+    refine_ms = data.get("timing", {}).get("total_ms", wall_ms)
+    is_refine = data.get("timing", {}).get("filter_refine", False)
+    total_results = data.get("pagination", {}).get("total_results", "?")
+    brand_choices = _extract_brand_choices(_state["facets"])
+
+    mode = "filter_refine" if is_refine else "full_pipeline (cache miss)"
+    speedup = f" ({_state['p1_ms']}ms -> {refine_ms}ms)" if _state['p1_ms'] else ""
+    status = f"{mode}: {refine_ms}ms{speedup} | total: {total_results} | session: {_state['search_session_id']}"
+
+    return (
+        html,
+        gr.update(interactive=has_more and bool(_state["cursor"])),
+        gr.update(choices=brand_choices, value=brand_filter),
+        status,
+    )
 
 
 def _render_all_pages(intent: str = None) -> str:
@@ -321,7 +425,11 @@ def _render_all_pages(intent: str = None) -> str:
         is_extend = timing.get("extend_search", False)
         seen_ids = timing.get("seen_ids_total", "?")
 
-        if page_num == 1:
+        is_refine = timing.get("filter_refine", False)
+
+        if is_refine:
+            mode = "filter refinement (cached embeddings)"
+        elif page_num == 1:
             mode = "full pipeline"
         elif is_endless:
             mode = f"endless semantic (rounds={rounds})"
@@ -364,15 +472,14 @@ def _render_all_pages(intent: str = None) -> str:
 # ---------------------------------------------------------------------------
 
 with gr.Blocks(
-    title="Endless Semantic Search Demo",
+    title="Endless Search + Filter Refinement Demo",
     css=CSS,
     theme=gr.themes.Soft(),
 ) as app:
-    gr.Markdown("## Endless Semantic Search Demo")
+    gr.Markdown("## Endless Search + Filter Refinement Demo")
     gr.Markdown(
-        "Search, then click **Load More** to paginate. "
-        "SPECIFIC/VAGUE queries use the endless semantic pipeline (pgvector). "
-        "EXACT queries use Algolia-native pagination."
+        "**Search** to run the full pipeline. **Load More** for endless pagination. "
+        "Use the **filter dropdowns** to refine mid-session (reuses cached embeddings, ~3-5s)."
     )
 
     with gr.Row():
@@ -383,23 +490,49 @@ with gr.Blocks(
         )
         search_btn = gr.Button("Search", variant="primary", scale=1)
 
+    # Filter refinement controls
+    with gr.Row():
+        brand_dropdown = gr.Dropdown(
+            label="Brand filter",
+            choices=[],
+            value=None,
+            allow_custom_value=False,
+            scale=3,
+        )
+        max_price_slider = gr.Number(
+            label="Max price ($)",
+            value=0,
+            minimum=0,
+            maximum=500,
+            step=5,
+            scale=1,
+        )
+        refine_btn = gr.Button("Apply Filters", variant="secondary", scale=1)
+
+    filter_status = gr.Textbox(label="Filter status", value="", interactive=False)
+
     load_more_btn = gr.Button("Load More", variant="secondary", interactive=False)
     results_html = gr.HTML(value="<div style='color:#999;padding:20px;'>Enter a query and click Search</div>")
 
     search_btn.click(
         fn=do_search,
         inputs=[query_input],
-        outputs=[results_html, load_more_btn],
+        outputs=[results_html, load_more_btn, brand_dropdown, filter_status],
     )
     query_input.submit(
         fn=do_search,
         inputs=[query_input],
-        outputs=[results_html, load_more_btn],
+        outputs=[results_html, load_more_btn, brand_dropdown, filter_status],
     )
     load_more_btn.click(
         fn=do_load_more,
         inputs=[],
         outputs=[results_html, load_more_btn],
+    )
+    refine_btn.click(
+        fn=do_refine,
+        inputs=[brand_dropdown, max_price_slider],
+        outputs=[results_html, load_more_btn, brand_dropdown, filter_status],
     )
 
 app.launch(server_name="0.0.0.0", server_port=7680, share=False)

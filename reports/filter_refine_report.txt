@@ -1,0 +1,91 @@
+================================================================================
+FILTER REFINEMENT REPORT
+Query: "athletic get together outfits"
+Brand filter: Boohoo
+Page size: 50
+Server: http://localhost:8000
+================================================================================
+
+--- PHASE 1: Initial Search (full pipeline) ---
+  Intent:          vague
+  Results:         48
+  total_results:   123
+  Session ID:      ss_96c5eabb1109
+  Cursor:          yes
+  Wall time:       16539ms
+  Server timing:   15548ms
+    planner:       7324ms
+    algolia:       1605ms
+    semantic:      7246ms
+    rrf+rerank:    ?ms
+
+  Brands in results: {'Old Navy': 4, 'Missguided': 4, 'Urban Outfitters': 4, 'Alo Yoga': 4, 'Quince': 3, 'Gap': 3, 'Free People': 3, 'Cotton On': 3, 'Adanola': 3, 'Athleta': 3, 'Adidas': 2, 'DKNY': 2, 'Bershka': 1, 'Garage': 1, 'Outdoor Voices': 1, 'Urban Planet': 1, 'American Eagle Outfitters': 1, 'Tommy Hilfiger': 1, 'Skims': 1, 'Vuori': 1, "Levi's": 1, 'Skechers': 1}
+  Categories:        {'Bottoms': 23, 'Tops': 13, 'Dresses': 9, 'Activewear': 3}
+
+  Brand facets (top 15):
+  +---------------------------+-------+
+  | Brand                     | Count |
+  +---------------------------+-------+
+  | Urban Outfitters          | 45    |
+  | Athleta                   | 24    |
+  | Alo Yoga                  | 13    |
+  | Boohoo                    | 13    |
+  | American Eagle Outfitters | 7     |
+  | Nasty Gal                 | 7     |
+  | Missguided                | 5     |
+  | Vuori                     | 2     |
+  +---------------------------+-------+
+
+--- PHASE 2: Filter Refinement (brand=Boohoo) ---
+  Mode:            filter_refine
+  Results:         4
+  total_results:   13 (was 123 before filter)
+  New Session ID:  ss_80328524bd3a
+  Session changed: True
+  Cursor:          yes
+  Wall time:       1140ms
+  Server timing:   1135ms
+    algolia:       210ms
+    semantic:      654ms
+    enrich:        479ms
+    rrf:           0ms
+
+  Speedup vs full pipeline: 13.7x (15548ms -> 1135ms)
+
+  Brands in results: {'Boohoo': 4}
+  Categories:        {'Tops': 2, 'Bottoms': 1, 'Dresses': 1}
+
+  Overlap with original page 1: 0 products
+
+  Category facets after refinement (top 10):
+  +----------+-------+
+  | Category | Count |
+  +----------+-------+
+  | Bottoms  | 7     |
+  | Tops     | 5     |
+  +----------+-------+
+
+--- PHASE 3: Endless Pagination (exhaust semantic) ---
+
++------+---------+--------------+---------+---------+-----------+------------------+--------+----------+
+| Page | Results | Unique Total | Overlap | Wall ms | Server ms | Mode             | Rounds | Seen IDs |
++------+---------+--------------+---------+---------+-----------+------------------+--------+----------+
+| 1    | 4       | 4            | 0       | 1140    | 1135      | filter_refine    | -      | -        |
+| 2    | 49      | 53           | 0       | 8950    | 8943      | endless_semantic | 9      | 1001     |
++------+---------+--------------+---------+---------+-----------+------------------+--------+----------+
+
+--- SUMMARY ---
+  Query:              "athletic get together outfits"
+  Brand filter:       Boohoo
+  Intent:             vague
+  Original total:     123
+  Filtered total:     13
+  Total pages:        2
+  Total unique:       53
+  Total duplicates:   0
+  Full pipeline P1:   15548ms
+  Filter refine:      1135ms
+  Speedup:            13.7x
+  Avg page 2+ ms:     10078ms
+  Last page results:  49
+  Exhausted:          yes
