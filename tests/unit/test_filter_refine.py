@@ -2139,3 +2139,1654 @@ class TestRerankerCapOverrides:
         # Should have more than 4 results (the old bug cap)
         assert len(result.results) > 4, \
             f"Expected >4 results (all Boohoo), got {len(result.results)}. Brand cap bug?"
+
+
+def _make_multi_entry(query: str = "black midi dress", **kwargs):
+    """Helper: _make_entry with 2 semantic queries (ensures _search_semantic_multi is used)
+    and max_per_brand=0 to disable brand diversity cap (test focus: filter accuracy)."""
+    if "semantic_queries" not in kwargs:
+        kwargs["semantic_queries"] = [query, f"{query} alternative"]
+    if "rerank_kwargs" not in kwargs:
+        kwargs["rerank_kwargs"] = {
+            "user_profile": None,
+            "user_context": None,
+            "session_scores": None,
+            "page_size": 0,
+            "max_per_brand": 0,
+        }
+    return _make_entry(query=query, **kwargs)
+
+
+# =============================================================================
+# 11. Post-filter accuracy during refinement
+# =============================================================================
+
+class TestPostFilterAccuracyInRefinement:
+    """Verify _apply_user_post_filters correctly filters results during refinement
+    for various filter dimensions (colors, patterns, occasions, materials, etc.)."""
+
+    def test_color_filter_keeps_matching(self, hybrid_service):
+        """Color filter keeps only products matching primary_color or colors list."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="summer dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="summer dress",
+            search_session_id=entry.session_id,
+            colors=["Red"],
+            page_size=50,
+        )
+
+        # Mix of red and blue products
+        red_results = _make_algolia_batch("red", 8, primary_color="Red", colors=["red"])
+        blue_results = _make_algolia_batch("blue", 5, primary_color="Blue", colors=["blue"])
+        all_algolia = red_results + blue_results
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(all_algolia, _make_algolia_facets(), 200)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"colors": ["Red"]},
+            )
+
+        # All returned products should be red
+        for p in result.results:
+            assert "red" in p.product_id, f"Non-red product in results: {p.product_id}"
+
+    def test_pattern_filter(self, hybrid_service):
+        """Pattern filter keeps only matching patterns."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            patterns=["Floral"],
+            page_size=50,
+        )
+
+        floral = _make_algolia_batch("floral", 6, pattern="Floral")
+        solid = _make_algolia_batch("solid", 6, pattern="Solid")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(floral + solid, _make_algolia_facets(), 100)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"patterns": ["Floral"]},
+            )
+
+        for p in result.results:
+            assert "floral" in p.product_id
+
+    def test_occasion_filter(self, hybrid_service):
+        """Occasion filter keeps products whose occasions list contains the value."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="going out looks")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="going out looks",
+            search_session_id=entry.session_id,
+            occasions=["Party"],
+            page_size=50,
+        )
+
+        party = _make_algolia_batch("party", 5, occasions=["Party", "Night Out"])
+        work = _make_algolia_batch("work", 5, occasions=["Work", "Office"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(party + work, _make_algolia_facets(), 80)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"occasions": ["Party"]},
+            )
+
+        for p in result.results:
+            assert "party" in p.product_id
+
+    def test_materials_filter(self, hybrid_service):
+        """Materials filter (multi-value) keeps products with matching material."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="cotton dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="cotton dress",
+            search_session_id=entry.session_id,
+            materials=["Cotton"],
+            page_size=50,
+        )
+
+        cotton = _make_algolia_batch("cotton", 7, materials=["Cotton", "Elastane"])
+        silk = _make_algolia_batch("silk", 4, materials=["Silk"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(cotton + silk, _make_algolia_facets(), 60)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"materials": ["Cotton"]},
+            )
+
+        for p in result.results:
+            assert "cotton" in p.product_id
+
+    def test_sleeve_type_filter(self, hybrid_service):
+        """Sleeve type (single-value attr) correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="summer tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="summer tops",
+            search_session_id=entry.session_id,
+            sleeve_type=["Sleeveless"],
+            page_size=50,
+        )
+
+        sleeveless = _make_algolia_batch("sl", 5, sleeve_type="Sleeveless")
+        longsleeve = _make_algolia_batch("ls", 5, sleeve_type="Long Sleeve")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(sleeveless + longsleeve, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"sleeve_type": ["Sleeveless"]},
+            )
+
+        for p in result.results:
+            assert "sl-" in p.product_id
+
+    def test_neckline_filter(self, hybrid_service):
+        """Neckline filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="blouse")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="blouse",
+            search_session_id=entry.session_id,
+            neckline=["V-Neck"],
+            page_size=50,
+        )
+
+        vneck = _make_algolia_batch("vn", 4, neckline="V-Neck")
+        crew = _make_algolia_batch("cr", 4, neckline="Crew")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(vneck + crew, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"neckline": ["V-Neck"]},
+            )
+
+        for p in result.results:
+            assert "vn-" in p.product_id
+
+    def test_formality_filter(self, hybrid_service):
+        """Formality filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="office outfits")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="office outfits",
+            search_session_id=entry.session_id,
+            formality=["Smart Casual"],
+            page_size=50,
+        )
+
+        smart = _make_algolia_batch("sc", 5, formality="Smart Casual")
+        casual = _make_algolia_batch("cas", 5, formality="Casual")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(smart + casual, _make_algolia_facets(), 60)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"formality": ["Smart Casual"]},
+            )
+
+        for p in result.results:
+            assert "sc-" in p.product_id
+
+    def test_on_sale_filter(self, hybrid_service):
+        """on_sale_only filter keeps only sale items."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dresses")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dresses",
+            search_session_id=entry.session_id,
+            on_sale_only=True,
+            page_size=50,
+        )
+
+        sale = _make_algolia_batch("sale", 4, is_on_sale=True)
+        full = _make_algolia_batch("full", 6, is_on_sale=False)
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(sale + full, _make_algolia_facets(), 30)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"on_sale_only": True},
+            )
+
+        for p in result.results:
+            assert "sale-" in p.product_id
+
+    def test_is_set_filter(self, hybrid_service):
+        """is_set filter keeps only co-ord/set products."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="matching sets")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="matching sets",
+            search_session_id=entry.session_id,
+            is_set=True,
+            page_size=50,
+        )
+
+        sets = _make_algolia_batch("set", 3, is_set=True)
+        singles = _make_algolia_batch("single", 5, is_set=False)
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(sets + singles, _make_algolia_facets(), 20)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"is_set": True},
+            )
+
+        for p in result.results:
+            assert "set-" in p.product_id
+
+    def test_season_filter(self, hybrid_service):
+        """Season filter (multi-value) keeps matching products."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="winter looks")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="winter looks",
+            search_session_id=entry.session_id,
+            seasons=["Winter"],
+            page_size=50,
+        )
+
+        winter = _make_algolia_batch("win", 5, seasons=["Winter", "Fall"])
+        summer = _make_algolia_batch("sum", 5, seasons=["Summer", "Spring"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(winter + summer, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"seasons": ["Winter"]},
+            )
+
+        for p in result.results:
+            assert "win-" in p.product_id
+
+    def test_silhouette_filter(self, hybrid_service):
+        """Silhouette filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dresses")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dresses",
+            search_session_id=entry.session_id,
+            silhouette=["A-Line"],
+            page_size=50,
+        )
+
+        aline = _make_algolia_batch("al", 4, silhouette="A-Line")
+        fitted = _make_algolia_batch("ft", 4, silhouette="Fitted")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(aline + fitted, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"silhouette": ["A-Line"]},
+            )
+
+        for p in result.results:
+            assert "al-" in p.product_id
+
+    def test_style_tags_filter(self, hybrid_service):
+        """Style tags (multi-value) filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="trendy outfits")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="trendy outfits",
+            search_session_id=entry.session_id,
+            style_tags=["boho"],
+            page_size=50,
+        )
+
+        boho = _make_algolia_batch("boho", 4, style_tags=["boho", "casual"])
+        preppy = _make_algolia_batch("preppy", 4, style_tags=["preppy", "classic"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(boho + preppy, _make_algolia_facets(), 30)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"style_tags": ["boho"]},
+            )
+
+        for p in result.results:
+            assert "boho-" in p.product_id
+
+    def test_category_l1_filter(self, hybrid_service):
+        """category_l1 filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="casual looks")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="casual looks",
+            search_session_id=entry.session_id,
+            category_l1=["Tops"],
+            page_size=50,
+        )
+
+        tops = _make_algolia_batch("tops", 6, category_l1="Tops")
+        bottoms = _make_algolia_batch("bots", 4, category_l1="Bottoms")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(tops + bottoms, _make_algolia_facets(), 80)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"category_l1": ["Tops"]},
+            )
+
+        for p in result.results:
+            assert "tops-" in p.product_id
+
+    def test_length_filter(self, hybrid_service):
+        """Length filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="midi dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="midi dress",
+            search_session_id=entry.session_id,
+            length=["Midi"],
+            page_size=50,
+        )
+
+        midi = _make_algolia_batch("midi", 5, length="Midi")
+        mini = _make_algolia_batch("mini", 5, length="Mini")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(midi + mini, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"length": ["Midi"]},
+            )
+
+        for p in result.results:
+            assert "midi-" in p.product_id
+
+    def test_fit_type_filter(self, hybrid_service):
+        """Fit type filter correctly filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="jeans")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="jeans",
+            search_session_id=entry.session_id,
+            fit_type=["Slim"],
+            page_size=50,
+        )
+
+        slim = _make_algolia_batch("slim", 5, fit_type="Slim")
+        relaxed = _make_algolia_batch("relax", 5, fit_type="Relaxed")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(slim + relaxed, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"fit_type": ["Slim"]},
+            )
+
+        for p in result.results:
+            assert "slim-" in p.product_id
+
+    def test_color_matches_colors_list(self, hybrid_service):
+        """Color filter should match on the colors list field too, not just primary_color."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            colors=["Pink"],
+            page_size=50,
+        )
+
+        # Product has primary_color="Multi" but "Pink" in colors list
+        multi_with_pink = _make_algolia_batch("mp", 3, primary_color="Multi", colors=["pink", "white"])
+        pure_blue = _make_algolia_batch("blue", 3, primary_color="Blue", colors=["blue"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(multi_with_pink + pure_blue, _make_algolia_facets(), 30)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"colors": ["Pink"]},
+            )
+
+        assert len(result.results) == 3
+        for p in result.results:
+            assert "mp-" in p.product_id
+
+
+# =============================================================================
+# 12. Exclusion filters during refinement
+# =============================================================================
+
+class TestExclusionFiltersInRefinement:
+    """Verify exclusion filters work correctly during filter refinement."""
+
+    def test_exclude_brands(self, hybrid_service):
+        """exclude_brands removes matching brands from results."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dresses")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dresses",
+            search_session_id=entry.session_id,
+            exclude_brands=["Boohoo"],
+            page_size=50,
+        )
+
+        boohoo = _make_algolia_batch("boo", 5, brand="Boohoo")
+        zara = _make_algolia_batch("zara", 5, brand="Zara")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(boohoo + zara, _make_algolia_facets(), 100)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"exclude_brands": ["Boohoo"]},
+            )
+
+        for p in result.results:
+            assert "zara-" in p.product_id
+
+    def test_exclude_neckline(self, hybrid_service):
+        """exclude_neckline removes matching neckline from results."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            exclude_neckline=["Strapless"],
+            page_size=50,
+        )
+
+        strapless = _make_algolia_batch("strap", 4, neckline="Strapless")
+        vneck = _make_algolia_batch("vn", 4, neckline="V-Neck")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(strapless + vneck, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"exclude_neckline": ["Strapless"]},
+            )
+
+        for p in result.results:
+            assert "vn-" in p.product_id
+
+    def test_exclude_colors(self, hybrid_service):
+        """exclude_colors removes matching colors."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dresses")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dresses",
+            search_session_id=entry.session_id,
+            exclude_colors=["Black"],
+            page_size=50,
+        )
+
+        black = _make_algolia_batch("blk", 5, primary_color="Black")
+        white = _make_algolia_batch("wht", 5, primary_color="White")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(black + white, _make_algolia_facets(), 60)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"exclude_colors": ["Black"]},
+            )
+
+        for p in result.results:
+            assert "wht-" in p.product_id
+
+    def test_exclude_patterns(self, hybrid_service):
+        """exclude_patterns removes matching patterns."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            exclude_patterns=["Animal Print"],
+            page_size=50,
+        )
+
+        animal = _make_algolia_batch("ani", 3, pattern="Animal Print")
+        solid = _make_algolia_batch("sol", 5, pattern="Solid")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(animal + solid, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"exclude_patterns": ["Animal Print"]},
+            )
+
+        for p in result.results:
+            assert "sol-" in p.product_id
+
+    def test_exclude_with_null_values_passthrough(self, hybrid_service):
+        """Products with N/A or null attribute values should NOT be excluded."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            exclude_neckline=["Halter"],
+            page_size=50,
+        )
+
+        halter = _make_algolia_batch("halt", 3, neckline="Halter")
+        na_neck = _make_algolia_batch("na", 3, neckline="N/A")
+        none_neck = _make_algolia_batch("none", 2, neckline=None)
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(halter + na_neck + none_neck, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"exclude_neckline": ["Halter"]},
+            )
+
+        # N/A and None products should survive; only Halter removed
+        ids = [p.product_id for p in result.results]
+        assert any("na-" in pid for pid in ids), "N/A products should not be excluded"
+        assert any("none-" in pid for pid in ids), "None-neckline products should not be excluded"
+        assert not any("halt-" in pid for pid in ids), "Halter products should be excluded"
+
+
+# =============================================================================
+# 13. Combined / multi-filter refinement
+# =============================================================================
+
+class TestCombinedFilterRefinement:
+    """Test refinement with multiple filters applied simultaneously."""
+
+    def test_brand_plus_color_plus_price(self, hybrid_service):
+        """Multiple filters narrow results to intersection."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            colors=["Red"],
+            max_price=40.0,
+            page_size=50,
+        )
+
+        # Only "match" products satisfy all three filters
+        match = _make_algolia_batch("match", 3, brand="Boohoo", primary_color="Red", colors=["red"], price=30.0)
+        wrong_brand = _make_algolia_batch("wb", 2, brand="Zara", primary_color="Red", colors=["red"], price=30.0)
+        wrong_color = _make_algolia_batch("wc", 2, brand="Boohoo", primary_color="Blue", colors=["blue"], price=30.0)
+        wrong_price = _make_algolia_batch("wp", 2, brand="Boohoo", primary_color="Red", colors=["red"], price=60.0)
+
+        all_results = match + wrong_brand + wrong_color + wrong_price
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(all_results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"], "colors": ["Red"], "max_price": 40.0},
+            )
+
+        assert len(result.results) == 3
+        for p in result.results:
+            assert "match-" in p.product_id
+
+    def test_pattern_plus_occasion_plus_sleeve(self, hybrid_service):
+        """Three attribute filters narrow correctly."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="vague", query="garden party")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="garden party",
+            search_session_id=entry.session_id,
+            patterns=["Floral"],
+            occasions=["Party"],
+            sleeve_type=["Short"],
+            page_size=50,
+        )
+
+        perfect = _make_algolia_batch("ok", 4, pattern="Floral", occasions=["Party"], sleeve_type="Short")
+        wrong_pattern = _make_algolia_batch("wp", 3, pattern="Solid", occasions=["Party"], sleeve_type="Short")
+        wrong_occasion = _make_algolia_batch("wo", 3, pattern="Floral", occasions=["Work"], sleeve_type="Short")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(perfect + wrong_pattern + wrong_occasion, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"patterns": ["Floral"], "occasions": ["Party"], "sleeve_type": ["Short"]},
+            )
+
+        assert len(result.results) == 4
+        for p in result.results:
+            assert "ok-" in p.product_id
+
+    def test_inclusion_plus_exclusion(self, hybrid_service):
+        """Include brand + exclude color should both apply."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            exclude_colors=["Black"],
+            page_size=50,
+        )
+
+        good = _make_algolia_batch("good", 4, brand="Boohoo", primary_color="White")
+        bad_brand = _make_algolia_batch("bb", 3, brand="Zara", primary_color="White")
+        bad_color = _make_algolia_batch("bc", 3, brand="Boohoo", primary_color="Black")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(good + bad_brand + bad_color, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"], "exclude_colors": ["Black"]},
+            )
+
+        assert len(result.results) == 4
+        for p in result.results:
+            assert "good-" in p.product_id
+
+    def test_all_filters_remove_everything(self, hybrid_service):
+        """When filters are too restrictive, should return empty results."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["NonExistentBrand"],
+            page_size=50,
+        )
+
+        results = _make_algolia_batch("any", 10, brand="Boohoo")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["NonExistentBrand"]},
+            )
+
+        assert len(result.results) == 0
+
+    def test_multiple_values_or_within_field(self, hybrid_service):
+        """Multiple values for same filter field act as OR (any match)."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            patterns=["Floral", "Striped"],
+            page_size=50,
+        )
+
+        floral = _make_algolia_batch("fl", 3, pattern="Floral")
+        striped = _make_algolia_batch("st", 3, pattern="Striped")
+        solid = _make_algolia_batch("so", 3, pattern="Solid")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(floral + striped + solid, _make_algolia_facets(), 40)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"patterns": ["Floral", "Striped"]},
+            )
+
+        assert len(result.results) == 6
+        ids = [p.product_id for p in result.results]
+        assert not any("so-" in pid for pid in ids)
+
+
+# =============================================================================
+# 14. Sequential / chained refinements
+# =============================================================================
+
+class TestChainedRefinement:
+    """Test applying filters, then applying different filters on the refined session."""
+
+    def test_refine_then_refine_again(self, hybrid_service):
+        """First refinement → new session → second refinement on new session."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        # First refinement: brand filter
+        request1 = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        boohoo_red = _make_algolia_batch("br", 4, brand="Boohoo", primary_color="Red", colors=["red"], price=30.0)
+        boohoo_blue = _make_algolia_batch("bb", 4, brand="Boohoo", primary_color="Blue", colors=["blue"], price=50.0)
+        zara = _make_algolia_batch("za", 4, brand="Zara")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(boohoo_red + boohoo_blue + zara, _make_algolia_facets({"Boohoo": 100}), 100)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result1 = hybrid_service._filter_refine_search(
+                request=request1,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        # Should have Boohoo red + blue = 8
+        assert len(result1.results) == 8
+        new_sid = result1.search_session_id
+        assert new_sid is not None and new_sid != entry.session_id
+
+        # Second refinement on new session: add color filter
+        request2 = HybridSearchRequest(
+            query="dress",
+            search_session_id=new_sid,
+            brands=["Boohoo"],
+            colors=["Red"],
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(boohoo_red + boohoo_blue, _make_algolia_facets({"Boohoo": 80}), 80)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result2 = hybrid_service._filter_refine_search(
+                request=request2,
+                user_filters={"brands": ["Boohoo"], "colors": ["Red"]},
+            )
+
+        # Should narrow to only Boohoo Red = 4
+        assert len(result2.results) == 4
+        for p in result2.results:
+            assert "br-" in p.product_id
+        # Should get yet another new session ID
+        assert result2.search_session_id != new_sid
+
+    def test_chained_refinement_preserves_embeddings(self, hybrid_service):
+        """Embeddings from original should survive through multiple refinements."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        original_entry = _make_multi_entry(
+            intent="specific", query="summer dress",
+            semantic_queries=["breezy summer dress", "lightweight dress"],
+        )
+        original_embeddings = [e.copy() for e in original_entry.semantic_embeddings]
+        cache = SearchSessionCache.get_instance()
+        cache.store(original_entry)
+
+        request = HybridSearchRequest(
+            query="summer dress",
+            search_session_id=original_entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        results = _make_algolia_batch("r", 5, brand="Boohoo")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result1 = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        # Check new session has same embeddings
+        new_entry = cache.get(result1.search_session_id)
+        assert new_entry is not None
+        assert len(new_entry.semantic_embeddings) == len(original_embeddings)
+        for orig, new in zip(original_embeddings, new_entry.semantic_embeddings):
+            assert np.array_equal(orig, new)
+
+    def test_chained_algolia_filters_accumulate(self, hybrid_service):
+        """Each refinement should merge user filters with the stored (already merged) filters."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(
+            intent="specific", query="dress",
+            algolia_filters='in_stock:true AND (category_l1:"Dresses")',
+        )
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        captured_filters = {}
+
+        def mock_algolia_search(**kwargs):
+            captured_filters["first"] = kwargs.get("filters", "")
+            return (_make_algolia_batch("r", 5, brand="Boohoo"), _make_algolia_facets(), 50)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            side_effect=lambda **kw: mock_algolia_search(**kw)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result1 = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        # First refinement: original filters + brand
+        first_filters = captured_filters.get("first", "")
+        assert 'category_l1:"Dresses"' in first_filters
+        assert 'brand:"Boohoo"' in first_filters
+
+        # Now the new session should have the merged filters stored
+        new_entry = cache.get(result1.search_session_id)
+        assert new_entry is not None
+        assert 'brand:"Boohoo"' in new_entry.algolia_filters
+        assert 'category_l1:"Dresses"' in new_entry.algolia_filters
+
+
+# =============================================================================
+# 15. Semantic results with filter refinement
+# =============================================================================
+
+class TestSemanticResultsInRefinement:
+    """Verify semantic results are properly handled during refinement."""
+
+    def test_semantic_results_post_filtered(self, hybrid_service):
+        """Semantic results (which bypass Algolia filters) should still be post-filtered."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="red dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="red dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        # Algolia returns only Boohoo (filtered), but semantic returns mixed brands
+        algolia = _make_algolia_batch("alg", 5, brand="Boohoo")
+        semantic = (
+            _make_semantic_batch("sem-boo", 3, brand="Boohoo") +
+            _make_semantic_batch("sem-zara", 3, brand="Zara")
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(algolia, _make_algolia_facets({"Boohoo": 200}), 200)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=(semantic, None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        # Zara semantic results should be filtered out
+        for p in result.results:
+            assert "zara" not in p.product_id, f"Zara product leaked through: {p.product_id}"
+
+    def test_semantic_and_algolia_merge_via_rrf(self, hybrid_service):
+        """Both sources should contribute to final results after RRF merge."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="floral dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="floral dress",
+            search_session_id=entry.session_id,
+            patterns=["Floral"],
+            page_size=50,
+        )
+
+        algolia = _make_algolia_batch("alg", 5, pattern="Floral")
+        semantic = _make_semantic_batch("sem", 5, pattern="Floral")
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(algolia, _make_algolia_facets(), 100)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=(semantic, None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"patterns": ["Floral"]},
+            )
+
+        ids = [p.product_id for p in result.results]
+        has_algolia = any("alg-" in pid for pid in ids)
+        has_semantic = any("sem-" in pid for pid in ids)
+        assert has_algolia, "Algolia results should be in merged output"
+        assert has_semantic, "Semantic results should be in merged output"
+
+
+# =============================================================================
+# 16. Post-filter criteria propagation
+# =============================================================================
+
+class TestPostFilterCriteriaPropagation:
+    """Test that post_filter_criteria on new session entries is correctly built."""
+
+    def test_brand_filter_stored_in_criteria(self, hybrid_service):
+        """Brand filter should appear in new session's post_filter_criteria."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(_make_algolia_batch("r", 5, brand="Boohoo"), _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        new_entry = cache.get(result.search_session_id)
+        assert new_entry.post_filter_criteria is not None
+        assert new_entry.post_filter_criteria.get("brands") == ["Boohoo"]
+
+    def test_price_filter_stored_in_criteria(self, hybrid_service):
+        """Price filters should appear in new session's post_filter_criteria."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            min_price=20.0,
+            max_price=80.0,
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(_make_algolia_batch("r", 5, price=50.0), _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"min_price": 20.0, "max_price": 80.0},
+            )
+
+        new_entry = cache.get(result.search_session_id)
+        assert new_entry.post_filter_criteria["min_price"] == 20.0
+        assert new_entry.post_filter_criteria["max_price"] == 80.0
+
+    def test_inherits_original_criteria(self, hybrid_service):
+        """New session should inherit original criteria that user didn't override."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(
+            intent="specific", query="dress",
+            post_filter_criteria={"category_l1": ["Dresses"], "min_price": 10.0},
+        )
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["Boohoo"],
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(_make_algolia_batch("r", 5, brand="Boohoo"), _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["Boohoo"]},
+            )
+
+        new_entry = cache.get(result.search_session_id)
+        # Inherited from original
+        assert new_entry.post_filter_criteria.get("category_l1") == ["Dresses"]
+        assert new_entry.post_filter_criteria.get("min_price") == 10.0
+        # New from user
+        assert new_entry.post_filter_criteria.get("brands") == ["Boohoo"]
+
+    def test_user_overrides_original_criteria(self, hybrid_service):
+        """User's filter should override the same key from original criteria."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(
+            intent="specific", query="dress",
+            post_filter_criteria={"min_price": 10.0, "max_price": 200.0},
+        )
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            max_price=50.0,
+            page_size=50,
+        )
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(_make_algolia_batch("r", 5, price=40.0), _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"max_price": 50.0},
+            )
+
+        new_entry = cache.get(result.search_session_id)
+        # User override
+        assert new_entry.post_filter_criteria["max_price"] == 50.0
+        # Inherited (not overridden)
+        assert new_entry.post_filter_criteria["min_price"] == 10.0
+
+
+# =============================================================================
+# 17. Case insensitivity in post-filters
+# =============================================================================
+
+class TestCaseInsensitivity:
+    """Verify that post-filters are case-insensitive."""
+
+    def test_brand_case_insensitive(self, hybrid_service):
+        """Brand filter should match regardless of case."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            brands=["boohoo"],  # lowercase
+            page_size=50,
+        )
+
+        results = _make_algolia_batch("boo", 5, brand="Boohoo")  # titlecase
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"brands": ["boohoo"]},
+            )
+
+        assert len(result.results) == 5
+
+    def test_color_case_insensitive(self, hybrid_service):
+        """Color filter should match regardless of case."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="tops")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="tops",
+            search_session_id=entry.session_id,
+            colors=["RED"],  # uppercase
+            page_size=50,
+        )
+
+        results = _make_algolia_batch("r", 5, primary_color="Red", colors=["red"])
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"colors": ["RED"]},
+            )
+
+        assert len(result.results) == 5
+
+    def test_pattern_case_insensitive(self, hybrid_service):
+        """Pattern filter should match regardless of case."""
+        from search.models import HybridSearchRequest
+        from search.session_cache import SearchSessionCache
+
+        entry = _make_multi_entry(intent="specific", query="dress")
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        request = HybridSearchRequest(
+            query="dress",
+            search_session_id=entry.session_id,
+            patterns=["floral"],  # lowercase
+            page_size=50,
+        )
+
+        results = _make_algolia_batch("f", 5, pattern="Floral")  # titlecase
+
+        with patch.object(
+            hybrid_service, "_search_algolia",
+            return_value=(results, _make_algolia_facets(), 50)
+        ), patch.object(
+            hybrid_service, "_search_semantic_multi",
+            return_value=([], None)
+        ), patch.object(
+            hybrid_service, "_enrich_semantic_results",
+            side_effect=lambda r: r
+        ):
+            result = hybrid_service._filter_refine_search(
+                request=request,
+                user_filters={"patterns": ["floral"]},
+            )
+
+        assert len(result.results) == 5
+
+
+# =============================================================================
+# 18. Algolia filter clause correctness for non-trivial filters
+# =============================================================================
+
+class TestAlgoliaClauseCorrectness:
+    """Verify _build_user_filter_clauses produces correct Algolia syntax for edge cases."""
+
+    def test_brand_with_special_characters(self):
+        """Brands with & and apostrophes should be quoted correctly."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses(
+            {"brands": ["Ba&sh"]}
+        )
+        assert result == '(brand:"Ba&sh")'
+
+    def test_brand_with_apostrophe(self):
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses(
+            {"brands": ["Levi's"]}
+        )
+        assert result == '(brand:"Levi\'s")'
+
+    def test_multiple_exclusions_are_anded(self):
+        """Each exclusion value becomes a separate NOT clause, all ANDed."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses(
+            {"exclude_colors": ["Black", "Navy"]}
+        )
+        assert 'NOT primary_color:"Black"' in result
+        assert 'NOT primary_color:"Navy"' in result
+        assert " AND " in result
+
+    def test_mixed_inclusion_exclusion_same_dimension(self):
+        """Include some patterns + exclude others simultaneously."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses({
+            "patterns": ["Floral"],
+            "exclude_patterns": ["Animal Print"],
+        })
+        assert '(pattern:"Floral")' in result
+        assert 'NOT pattern:"Animal Print"' in result
+        assert " AND " in result
+
+    def test_price_range_plus_sale(self):
+        """Price range + on_sale_only produces correct compound clause."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses({
+            "min_price": 10.0,
+            "max_price": 50.0,
+            "on_sale_only": True,
+        })
+        assert "price >= 10.0" in result
+        assert "price <= 50.0" in result
+        assert "is_on_sale:true" in result
+
+    def test_all_category_levels_together(self):
+        """categories + category_l1 + category_l2 all produce separate clauses."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses({
+            "categories": ["tops"],
+            "category_l1": ["Tops"],
+            "category_l2": ["T-Shirt"],
+        })
+        assert 'broad_category:"tops"' in result
+        assert 'category_l1:"Tops"' in result
+        assert 'category_l2:"T-Shirt"' in result
+
+    def test_empty_list_ignored(self):
+        """Empty lists should not produce any clause."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses({
+            "brands": [],
+            "colors": [],
+        })
+        assert result == ""
+
+    def test_none_values_ignored(self):
+        """None values should not produce any clause."""
+        from search.hybrid_search import HybridSearchService
+        result = HybridSearchService._build_user_filter_clauses({
+            "brands": None,
+            "min_price": None,
+        })
+        assert result == ""
