@@ -1766,10 +1766,12 @@ class HybridSearchService:
         algolia_facets = None
 
         def _run_algolia_extend():
+            """Returns (results, facets, elapsed_ms, algolia_exhausted)."""
             if entry.skip_algolia:
-                return [], None, 0
+                return [], None, 0, True
             t0 = time.time()
             next_page = entry.next_algolia_page()
+            algolia_exhausted = False
             # Call the raw Algolia client with the correct page offset.
             # Unlike _search_algolia() which always uses page=0, we need
             # native Algolia pagination for extend-search.
@@ -1830,11 +1832,18 @@ class HybridSearchService:
                         ]
                         if len(values) >= 2:
                             fcts[facet_name] = values
+
+                # Check if Algolia has more pages beyond this one
+                nb_pages = resp.get("nbPages", 0)
+                if next_page + 1 >= nb_pages:
+                    algolia_exhausted = True
+
             except Exception as e:
                 logger.warning("Extend-search Algolia page=%d failed", next_page, error=str(e))
                 results, fcts = [], None
+                algolia_exhausted = True
 
-            return results, fcts, int((time.time() - t0) * 1000)
+            return results, fcts, int((time.time() - t0) * 1000), algolia_exhausted
 
         # -----------------------------------------------------------------
         # Semantic: reuse cached embeddings + exclude seen IDs
@@ -1894,11 +1903,12 @@ class HybridSearchService:
             future_semantic = executor.submit(_run_semantic_extend)
 
             try:
-                algolia_results, algolia_facets, algolia_ms = future_algolia.result()
+                algolia_results, algolia_facets, algolia_ms, algolia_exhausted = future_algolia.result()
                 timing["algolia_ms"] = algolia_ms
             except Exception as e:
                 logger.warning("Extend-search Algolia failed", error=str(e))
                 algolia_results, algolia_facets = [], None
+                algolia_exhausted = True
                 timing["algolia_ms"] = 0
 
             try:
@@ -1955,12 +1965,13 @@ class HybridSearchService:
         # -----------------------------------------------------------------
         page_results = merged[:entry.page_size]
 
-        # Determine has_more:
-        # - If we got fewer than page_size results, both sources are likely
-        #   exhausted — signal no more results.
-        # - If we got 0 results, definitely exhausted.
-        # - If we got >= page_size, there are probably more.
-        has_more = len(page_results) >= entry.page_size
+        # Determine has_more by checking exhaustion signals:
+        # 1. Did we get a full page of results? (basic check)
+        # 2. Is Algolia exhausted? (no more native pages via nbPages)
+        has_more = (
+            len(page_results) >= entry.page_size
+            and not algolia_exhausted
+        )
 
         products = [
             self._to_product_result(r, idx + 1)
@@ -1978,6 +1989,7 @@ class HybridSearchService:
 
         timing["total_ms"] = int((time.time() - t_start) * 1000)
         timing["seen_ids_total"] = len(entry.seen_product_ids)
+        timing["algolia_exhausted"] = algolia_exhausted
 
         logger.info(
             "Extend-search page served",
@@ -1985,6 +1997,7 @@ class HybridSearchService:
             page=page,
             results=len(products),
             has_more=has_more,
+            algolia_exhausted=algolia_exhausted,
             algolia_fresh=len(algolia_results),
             semantic_fresh=len(semantic_results),
             merged_after_dedup=len(merged),
