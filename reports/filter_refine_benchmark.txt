@@ -1,0 +1,78 @@
+====================================================================================================
+FILTER REFINEMENT BENCHMARK
+Server: http://localhost:8000
+Test cases: 7
+Page size: 50
+====================================================================================================
+
+[1/7] VAGUE + brand: "athletic get together outfits" + {'brands': ['Boohoo']}
+  Intent: vague | P1: 45 results in 14529ms | Refine: 14 results in 1937ms (filter_refine) | Speedup: 7.5x | Total unique: 30 across 2 pages
+
+[2/7] SPECIFIC + brand: "summer dress" + {'brands': ['Forever 21']}
+  Intent: specific | P1: 50 results in 11542ms | Refine: 50 results in 1959ms (filter_refine) | Speedup: 5.9x | Total unique: 58 across 2 pages
+
+[3/7] SPECIFIC + color: "midi dress" + {'colors': ['Black']}
+  Intent: exact | P1: 50 results in 4290ms | Refine: 50 results in 1392ms (filter_refine) | Speedup: 3.1x | Total unique: 500 across 10 pages
+
+[4/7] SPECIFIC + max_price: "casual dresses" + {'max_price': 30.0}
+  Intent: vague | P1: 34 results in 13176ms | Refine: 50 results in 2395ms (filter_refine) | Speedup: 5.5x | Total unique: 298 across 6 pages
+
+[5/7] SPECIFIC + pattern: "party dress" + {'patterns': ['Floral']}
+  Intent: specific | P1: 50 results in 14114ms | Refine: 50 results in 2825ms (filter_refine) | Speedup: 5.0x | Total unique: 500 across 10 pages
+
+[6/7] VAGUE + brand + price: "going out outfits" + {'brands': ['Boohoo'], 'max_price': 40.0}
+  Intent: vague | P1: 33 results in 10279ms | Refine: 50 results in 1747ms (filter_refine) | Speedup: 5.9x | Total unique: 199 across 4 pages
+
+[7/7] EXACT + on_sale: "dresses" + {'on_sale_only': True}
+  Intent: exact | P1: 50 results in 5805ms | Refine: 50 results in 1165ms (filter_refine) | Speedup: 5.0x | Total unique: 500 across 10 pages
+
+====================================================================================================
+RESULTS TABLE
+====================================================================================================
++-----------------------+----------+-------+-----------+---------+------------+----------------+--------------+-------+-------------+---------------+
+| Case                  | Intent   | P1 ms | Refine ms | Speedup | P1 Results | Refine Results | Total Unique | Pages | Avg Pg2+ ms | Mode          |
++-----------------------+----------+-------+-----------+---------+------------+----------------+--------------+-------+-------------+---------------+
+| VAGUE + brand         | vague    | 14529 | 1937      | 7.5x    | 45         | 14             | 30           | 2     | 14688       | filter_refine |
+| SPECIFIC + brand      | specific | 11542 | 1959      | 5.9x    | 50         | 50             | 58           | 2     | 11009       | filter_refine |
+| SPECIFIC + color      | exact    | 4290  | 1392      | 3.1x    | 50         | 50             | 500          | 10    | 1385        | filter_refine |
+| SPECIFIC + max_price  | vague    | 13176 | 2395      | 5.5x    | 34         | 50             | 298          | 6     | 3394        | filter_refine |
+| SPECIFIC + pattern    | specific | 14114 | 2825      | 5.0x    | 50         | 50             | 500          | 10    | 1048        | filter_refine |
+| VAGUE + brand + price | vague    | 10279 | 1747      | 5.9x    | 33         | 50             | 199          | 4     | 5188        | filter_refine |
+| EXACT + on_sale       | exact    | 5805  | 1165      | 5.0x    | 50         | 50             | 500          | 10    | 1115        | filter_refine |
++-----------------------+----------+-------+-----------+---------+------------+----------------+--------------+-------+-------------+---------------+
+
+====================================================================================================
+AGGREGATE STATS
+====================================================================================================
+  Total test cases:              7
+  Successful:                    7
+  Filter refine cache hits:      7
+  Full pipeline fallbacks:       0
+
+  Avg initial search (P1):       10534ms
+  Avg filter refine:             1917ms
+  Avg speedup:                   5.4x
+  Avg page 2+ response:          5404ms
+
+  Avg refine results (page 1):   44.9
+  Avg total unique (exhausted):  297.9
+  Avg pages to exhaustion:       6.3
+  Total unique across all cases: 2085
+
+  --- By filter type ---
++--------------------+---+---------------+-------------+------------+
+| Filter Type        | N | Avg Refine ms | Avg Speedup | Avg Unique |
++--------------------+---+---------------+-------------+------------+
+| brands             | 2 | 1948          | 6.7x        | 44         |
+| brands + max_price | 1 | 1747          | 5.9x        | 199        |
+| colors             | 1 | 1392          | 3.1x        | 500        |
+| max_price          | 1 | 2395          | 5.5x        | 298        |
+| on_sale_only       | 1 | 1165          | 5.0x        | 500        |
+| patterns           | 1 | 2825          | 5.0x        | 500        |
++--------------------+---+---------------+-------------+------------+
+
+  --- Extremes ---
+  Fastest refine:   1165ms — "dresses" + {'on_sale_only': True}
+  Slowest refine:   2825ms — "party dress" + {'patterns': ['Floral']}
+  Most results:     500 — "midi dress" + {'colors': ['Black']}
+  Fewest results:   30 — "athletic get together outfits" + {'brands': ['Boohoo']}
