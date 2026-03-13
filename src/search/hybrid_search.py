@@ -525,13 +525,16 @@ class HybridSearchService:
             )
 
         # -----------------------------------------------------------------
-        # SORT-MODE: handled via post-sort after hybrid merge+rerank.
-        # The full pipeline runs normally (planner + Algolia + semantic +
-        # RRF + reranker), then results are sorted by price/trending
-        # before pagination. This gives rich hybrid candidates instead
-        # of the Algolia-only path which over-filters on vague queries.
-        # _search_sorted() is kept as a legacy fallback but not routed to.
+        # SORTED MODE — deferred until after the planner runs so we know
+        # the intent.  Only EXACT+trending needs the Algolia replica;
+        # price sorts on SPECIFIC/VAGUE are handled by the normal pipeline
+        # with a post-sort step on the ranked pool.
         # -----------------------------------------------------------------
+        _is_sorted_query = (
+            request.sort_by != SortBy.RELEVANCE
+            and not request.search_session_id  # fresh search only
+            and not selected_filters           # not a refinement
+        )
 
         # -----------------------------------------------------------------
         # CACHED PAGINATION FAST PATH
@@ -545,7 +548,6 @@ class HybridSearchService:
                 cached.timing["cache_status"] = "hit"
                 return cached
             # Cache miss (expired or invalid) — fall through to full pipeline
-            from search.session_cache import SearchSessionCache
             _cache = SearchSessionCache.get_instance()
             timing["cache_status"] = _cache.last_get_status or "miss"
             logger.info(
@@ -639,6 +641,33 @@ class HybridSearchService:
 
             # Get RRF weights for the intent
             algolia_weight, semantic_weight = get_rrf_weights(intent_str)
+
+            # -----------------------------------------------------------
+            # SORTED MODE ROUTING (now that we know the intent).
+            # EXACT queries: use Algolia replica (brand queries need
+            #   lexical matching; Algolia replica preserves sort order).
+            # SPECIFIC / VAGUE: continue normal pipeline — the pool will
+            #   be post-sorted by price after reranking.  This gives
+            #   deeper pools (200+ items vs 6-40 from hard-filtered
+            #   Algolia replica) and uses FAISS semantic results.
+            # Trending: always Algolia replica (FAISS has no trending_score).
+            # -----------------------------------------------------------
+            if _is_sorted_query:
+                if intent == QueryIntent.EXACT or request.sort_by == SortBy.TRENDING:
+                    return self._build_sorted_pool(
+                        request=request,
+                        user_id=user_id,
+                        user_profile=user_profile,
+                        user_context=user_context,
+                        user_filters=user_filters,
+                        planner_context=planner_context,
+                        skip_planner=True,       # already ran
+                        pre_plan=search_plan,    # reuse plan
+                        t_start=t_start,
+                        timing=timing,
+                    )
+                # SPECIFIC / VAGUE + price sort: fall through to normal
+                # pipeline.  Post-sort applied after reranker (Step 7b).
 
             # Extract internal pipeline keys (not real request fields)
             name_exclusions = plan_updates.pop("_name_exclusions", [])
@@ -853,6 +882,22 @@ class HybridSearchService:
             # Use raw query for Algolia (clean meta-terms only, no extracted terms)
             algolia_query = self._clean_query_for_algolia(request.query)
 
+            # Sorted routing without planner: EXACT → Algolia replica,
+            # trending → Algolia replica, price sorts → normal pipeline.
+            if _is_sorted_query:
+                if intent == QueryIntent.EXACT or request.sort_by == SortBy.TRENDING:
+                    return self._build_sorted_pool(
+                        request=request,
+                        user_id=user_id,
+                        user_profile=user_profile,
+                        user_context=user_context,
+                        user_filters=user_filters,
+                        planner_context=planner_context,
+                        skip_planner=True,
+                        t_start=t_start,
+                        timing=timing,
+                    )
+
         # Allow request-level override of semantic weight.
         _SEMANTIC_BOOST_DEFAULT = 0.4
         if abs(request.semantic_boost - _SEMANTIC_BOOST_DEFAULT) > 1e-9:
@@ -1003,9 +1048,14 @@ class HybridSearchService:
         )
         has_filters = has_pipeline_filters or bool(user_filters)
         # Fetch extra semantic candidates when filters are active,
-        # since strict post-filtering will drop non-matching results
+        # since strict post-filtering will drop non-matching results.
+        # Always fetch at least _POOL_FETCH_SIZE so the session pool
+        # is deep enough for many pages of pagination.
         fetch_multiplier = 5 if has_filters else 3
-        fetch_size = request.page_size * fetch_multiplier
+        fetch_size = max(
+            request.page_size * fetch_multiplier,
+            self._POOL_FETCH_SIZE,
+        )
 
         # Pre-build the semantic search parameters (needed for both paths)
         semantic_results = []
@@ -1131,9 +1181,22 @@ class HybridSearchService:
         _empty_query = not algolia_query or not algolia_query.strip()
         _has_brand_filter = bool(pipeline_request.brands)
         _skip_algolia = _empty_query and not _has_brand_filter
+
+        # Force-skip Algolia for VAGUE intent — FAISS handles these best.
+        # Algolia returns low-quality results for vague queries (no category
+        # keywords to match on) which just waste 700-1600ms of latency and
+        # pollute RRF merge.  Brand-filtered vague queries still use Algolia.
+        if intent == QueryIntent.VAGUE and not _has_brand_filter:
+            _skip_algolia = True
+
         if _skip_algolia:
+            _skip_reason = (
+                "VAGUE intent — FAISS-only for better latency"
+                if intent == QueryIntent.VAGUE
+                else "empty query with no brand filter would return arbitrary results"
+            )
             logger.info(
-                "Skipping Algolia — empty query with no brand filter would return arbitrary results",
+                f"Skipping Algolia — {_skip_reason}",
                 intent=intent.value,
                 original_query=request.query,
             )
@@ -1461,11 +1524,15 @@ class HybridSearchService:
             except Exception:
                 pass  # Non-fatal — skip cluster boost if lookup fails
 
-        # Only enforce category proportional caps for VAGUE queries where
-        # we're mixing multiple categories.  For SPECIFIC/EXACT the user
-        # targeted a category (e.g., "midi skirt") — capping bottoms to
-        # 25% would artificially suppress the results they asked for.
-        _cat_cap_page_size = request.page_size if intent == QueryIntent.VAGUE else 0
+        # Reranker diversity is relaxed for pool building: we use a higher
+        # brand cap (_POOL_MAX_PER_BRAND=12 vs display default 4) and set
+        # category caps proportional to the full pool, not the display page.
+        # This builds a deeper pool (200-350 items) while still enforcing
+        # dedup, profile scoring, and basic diversity.
+        #
+        # For EXACT intent or user-set brands, brand_cap=0 disables
+        # diversity entirely (same as before).
+        _cat_cap_page_size = 0  # caps proportional to pool size, not page
         rerank_kwargs: Dict[str, Any] = dict(
             results=merged,
             user_profile=user_profile,
@@ -1477,6 +1544,9 @@ class HybridSearchService:
         )
         if brand_cap is not None:
             rerank_kwargs["max_per_brand"] = brand_cap
+        else:
+            # Pool building: higher brand cap than display (12 vs 4)
+            rerank_kwargs["max_per_brand"] = self._POOL_MAX_PER_BRAND
         if vibe_clusters:
             rerank_kwargs["vibe_brand_clusters"] = vibe_clusters
         merged = self._reranker.rerank(**rerank_kwargs)
@@ -1582,11 +1652,9 @@ class HybridSearchService:
                 selected_filters
             )
 
-        # Step 10: Cache plan state for extend-search pagination.
-        # Store the plan state (embeddings, filters, seen_ids, reranker config)
-        # so page 2+ can re-run Algolia (native page=N) + semantic (reuse
-        # cached embeddings + exclude seen_ids) in ~2-3s instead of re-running
-        # the full pipeline with LLM planner (~12-15s).
+        # Step 10: Build canonical session pool and cache it.
+        # The FULL ranked list (merged) becomes the session pool.
+        # Pages 2+ serve slices — no re-fetching, no re-ranking.
         _search_session_id: Optional[str] = None
         _cursor: Optional[str] = None
         if len(merged) > 0:
@@ -1594,53 +1662,26 @@ class HybridSearchService:
                 cache = SearchSessionCache.get_instance()
                 _search_session_id = cache.generate_session_id()
 
-                # Collect page-1 product IDs as the initial seen set
+                # Page 1 products are the first page_size items.
+                # Pool cursor starts after them.
+                _pool_cursor = min(request.page_size, len(merged))
                 _page1_ids: Set[str] = {
-                    r["product_id"] for r in merged
+                    r["product_id"] for r in merged[:_pool_cursor]
                     if r.get("product_id")
                 }
-
-                # Build the semantic_request_updates dict so extend-search
-                # can reconstruct the relaxed semantic request.
-                _semantic_request_updates: Optional[Dict[str, Any]] = None
-                if search_plan is not None or skip_planner:
-                    _semantic_request_updates = {
-                        "categories": None,
-                        "colors": None,
-                        "patterns": None,
-                        "occasions": None,
-                    }
 
                 cache.store(SearchSessionEntry(
                     session_id=_search_session_id,
                     query=request.query,
                     intent=intent.value,
                     sort_by=request.sort_by.value,
-                    # Algolia state
-                    algolia_query=algolia_query or "",
-                    algolia_filters=algolia_filters or "",
-                    algolia_optional_filters=algolia_optional_filters,
-                    # Semantic state
-                    semantic_queries=_queries_to_run,
-                    semantic_embeddings=_captured_embeddings[0],
-                    semantic_request_updates=_semantic_request_updates,
-                    # RRF weights
-                    algolia_weight=algolia_weight,
-                    semantic_weight=semantic_weight,
-                    # Reranker config
-                    rerank_kwargs={
-                        "user_profile": user_profile,
-                        "user_context": user_context,
-                        "session_scores": session_scores,
-                        "page_size": _cat_cap_page_size,
-                        **({"max_per_brand": brand_cap} if brand_cap is not None else {}),
-                        **({"vibe_brand_clusters": vibe_clusters} if vibe_clusters else {}),
-                    },
+                    session_mode="relevance",
+                    # Canonical ranked pool — the full reranked list
+                    ranked_pool=merged,
+                    pool_cursor=_pool_cursor,
                     # Pagination tracking
                     seen_product_ids=_page1_ids,
-                    algolia_page=0,  # page 1 used Algolia page 0
                     page_size=request.page_size,
-                    fetch_size=fetch_size,
                     # Response metadata (returned on all pages)
                     facets=facets,
                     follow_ups=follow_ups,
@@ -1648,25 +1689,16 @@ class HybridSearchService:
                     answered_dimensions=_answered_dims,
                     # Algolia catalog count
                     algolia_total_hits=algolia_nb_hits,
-                    # Post-filter criteria for endless semantic (page 2+)
-                    post_filter_criteria={
-                        k: getattr(pipeline_request, k, None)
-                        for k in (
-                            "category_l1", "category_l2", "brands",
-                            "exclude_brands", "min_price", "max_price",
-                        )
-                        if getattr(pipeline_request, k, None) is not None
-                    } or None,
-                    # Flags
-                    skip_algolia=_skip_algolia,
-                    use_attribute_search=_use_attribute_search,
-                    attribute_filters=attribute_filters,
+                    # Legacy / diagnostics
+                    algolia_query=algolia_query or "",
+                    algolia_filters=algolia_filters or "",
+                    semantic_queries=_queries_to_run,
+                    semantic_embeddings=_captured_embeddings[0],
+                    fetch_size=fetch_size,
                 ))
-                _cursor = encode_cursor(page=2)
-                # Extend-search fetches FRESH candidates from 96K products,
-                # so even if page 1 has fewer than page_size results, there
-                # are likely more to find. Override has_more to True.
-                has_more = True
+                # has_more: true if pool has items beyond page 1
+                has_more = _pool_cursor < len(merged)
+                _cursor = encode_cursor(page=2) if has_more else None
             except Exception as exc:
                 logger.warning("Failed to cache search session", error=str(exc))
 
@@ -1704,14 +1736,11 @@ class HybridSearchService:
     def _serve_cached_page(
         self, request: HybridSearchRequest
     ) -> Optional[HybridSearchResponse]:
-        """Extend search for page 2+ using cached plan state.
+        """Serve page 2+ by slicing from the canonical ranked pool.
 
-        Instead of re-running the full pipeline (~12-15s), reuses the
-        cached plan state from page 1:
-        - Algolia: native page=N pagination (same query/filters) ~200ms
-        - Semantic: reuse cached embeddings + exclude seen IDs ~1-2s
-        - RRF merge + rerank on fresh candidates ~500ms
-        - LLM planner: SKIP entirely (saves ~5-8s)
+        The pool was built on page 1 (hybrid or sorted) and cached.
+        Pages 2+ are simple index slices — no retrieval, no reranking.
+        Typical latency: <2ms.
 
         Returns a HybridSearchResponse if the cache hit succeeds, or None
         if the session is expired / missing / cursor is invalid (caller
@@ -1736,12 +1765,343 @@ class HybridSearchService:
             )
             return None
 
-        # EXACT intent: Algolia-native pagination (unchanged).
-        # SPECIFIC / VAGUE intent: endless semantic pump (pgvector only).
-        if entry.intent == "exact":
-            return self._extend_search(entry, page, sid)
-        else:
-            return self._endless_semantic_page(entry, page, sid)
+        # ── Slice from the canonical ranked pool ──────────────────
+        t_start = time.time()
+
+        page_results = entry.next_page_slice()
+        if not page_results:
+            # Pool exhausted — return empty last page
+            return HybridSearchResponse(
+                query=strip_tags(entry.query) or "",
+                intent=entry.intent,
+                sort_by=entry.sort_by,
+                results=[],
+                pagination=PaginationInfo(
+                    page=page,
+                    page_size=entry.page_size,
+                    has_more=False,
+                    total_results=entry.algolia_total_hits or entry.pool_depth,
+                ),
+                search_session_id=sid,
+                cursor=None,
+                timing={"pool_slice": True, "page": page, "total_ms": 0,
+                        "pool_depth": entry.pool_depth, "pool_remaining": 0,
+                        "cache_status": "hit"},
+                facets=entry.facets,
+                follow_ups=entry.follow_ups,
+                applied_filters=entry.applied_filters,
+                answered_dimensions=entry.answered_dimensions,
+            )
+
+        # Track seen IDs for dedup diagnostics
+        new_ids = [r["product_id"] for r in page_results if r.get("product_id")]
+        entry.add_seen_ids(new_ids)
+
+        # Build product response objects
+        pool_offset = entry.pool_cursor - len(page_results)
+        products = [
+            self._to_product_result(r, pool_offset + idx + 1)
+            for idx, r in enumerate(page_results)
+        ]
+
+        has_more = entry.pool_has_more
+        next_cursor = encode_cursor(page=page + 1) if has_more else None
+
+        total_ms = int((time.time() - t_start) * 1000)
+
+        timing: Dict[str, Any] = {
+            "pool_slice": True,
+            "page": page,
+            "total_ms": total_ms,
+            "pool_depth": entry.pool_depth,
+            "pool_remaining": entry.pool_remaining,
+            "cache_status": "hit",
+        }
+
+        # --- OUTPUT SANITIZATION ---
+        escape_timing_dict(timing)
+
+        logger.info(
+            "Pool page served",
+            page=page,
+            results=len(products),
+            pool_remaining=entry.pool_remaining,
+            pool_depth=entry.pool_depth,
+            total_ms=total_ms,
+            search_session_id=sid,
+        )
+
+        return HybridSearchResponse(
+            query=strip_tags(entry.query) or "",
+            intent=entry.intent,
+            sort_by=entry.sort_by,
+            results=products,
+            pagination=PaginationInfo(
+                page=page,
+                page_size=entry.page_size,
+                has_more=has_more,
+                total_results=entry.algolia_total_hits or entry.pool_depth,
+            ),
+            search_session_id=sid,
+            cursor=next_cursor,
+            timing=timing,
+            facets=entry.facets,
+            follow_ups=entry.follow_ups,
+            applied_filters=entry.applied_filters,
+            answered_dimensions=entry.answered_dimensions,
+        )
+
+    # =========================================================================
+    # Sorted Pool Builder (price / trending — Algolia replica only)
+    # =========================================================================
+
+    _SORTED_POOL_SIZE = 300  # max items to fetch from Algolia replica
+
+    def _build_sorted_pool(
+        self,
+        request: HybridSearchRequest,
+        user_id: Optional[str] = None,
+        user_profile: Optional[Dict[str, Any]] = None,
+        user_context: Optional[Any] = None,
+        user_filters: Optional[Dict[str, Any]] = None,
+        planner_context: Optional[Dict[str, Any]] = None,
+        skip_planner: bool = False,
+        pre_plan: Optional[Any] = None,
+        t_start: Optional[float] = None,
+        timing: Optional[Dict[str, Any]] = None,
+    ) -> HybridSearchResponse:
+        """Build a globally-sorted pool from an Algolia virtual replica.
+
+        For sort_by=price_asc/price_desc/trending, the user expects strict
+        monotonic sort order across pages.  Hybrid RRF ranking cannot
+        guarantee this, so we query the Algolia replica directly.
+
+        The replica's native sort order IS the canonical ranking.
+        We store the results as the session pool and paginate from it.
+        """
+        if t_start is None:
+            t_start = time.time()
+        if timing is None:
+            timing = {}
+
+        # -- Step 1: Run planner for filter extraction only ----------------
+        algolia_query = request.query
+        algolia_filters = ""
+        intent = QueryIntent.SPECIFIC
+        follow_ups = None
+        search_plan = None
+
+        if pre_plan is not None:
+            search_plan = pre_plan
+        elif not skip_planner:
+            try:
+                search_plan = self._planner.plan(
+                    query=request.query,
+                    user_context=planner_context,
+                )
+                timing["planner_ms"] = int(
+                    (time.time() - t_start) * 1000
+                )
+            except Exception as e:
+                logger.warning("Sorted pool: planner failed", error=str(e))
+
+        if search_plan is not None:
+            intent = QueryIntent(search_plan.intent)
+            if search_plan.algolia_query:
+                algolia_query = search_plan.algolia_query
+            if search_plan.parsed_follow_ups:
+                follow_ups = search_plan.parsed_follow_ups
+
+        # Build Algolia filter string from planner + request filters.
+        # Use plan_to_request_updates() which handles mode expansion,
+        # brand extraction, category mapping, etc.
+        pipeline_request = request
+        if search_plan is not None:
+            try:
+                (
+                    plan_updates, _expanded, _excludes, _matched,
+                    _alg_q, _sem_q, _intent_str, _sem_queries,
+                ) = self._planner.plan_to_request_updates(search_plan)
+                # Use the planner's algolia_query if we didn't already get one
+                if _alg_q and not algolia_query:
+                    algolia_query = _alg_q
+                # Remove internal keys before merging into the request
+                plan_updates.pop("_name_exclusions", None)
+                plan_updates.pop("_mode_excl_keys", None)
+                plan_updates.pop("_vibe_brand", None)
+                if plan_updates:
+                    pipeline_request = request.model_copy(update=plan_updates)
+            except Exception as e:
+                logger.warning("Sorted pool: plan_to_request_updates failed", error=str(e))
+        algolia_filters = self._build_algolia_filters(pipeline_request)
+
+        # User UI filters are applied as post-filters on the pool
+        # (same approach as the relevance pipeline).
+
+        # -- Step 2: Query the Algolia replica ----------------------------
+        replica_index = get_replica_index_name(
+            self.algolia.index_name, request.sort_by.value,
+        )
+        if not replica_index:
+            logger.warning(
+                "No replica for sort_by=%s, falling back to primary",
+                request.sort_by,
+            )
+            replica_index = self.algolia.index_name
+
+        t_alg = time.time()
+        try:
+            resp = self.algolia.search(
+                query=algolia_query,
+                filters=algolia_filters or None,
+                hits_per_page=self._SORTED_POOL_SIZE,
+                page=0,
+                facets=_FACET_FIELDS,
+                index_name=replica_index,
+            )
+        except Exception as e:
+            logger.error("Sorted pool: Algolia search failed", error=str(e))
+            resp = {"hits": [], "nbHits": 0}
+        timing["algolia_ms"] = int((time.time() - t_alg) * 1000)
+
+        # Parse results
+        pool: List[dict] = []
+        for hit in resp.get("hits", []):
+            pool.append({
+                "product_id": hit.get("objectID"),
+                "name": hit.get("name", ""),
+                "brand": hit.get("brand", ""),
+                "image_url": hit.get("image_url"),
+                "gallery_images": filter_gallery_images(
+                    hit.get("gallery_images") or []
+                ),
+                "price": float(hit.get("price", 0) or 0),
+                "original_price": hit.get("original_price"),
+                "is_on_sale": hit.get("is_on_sale", False),
+                "is_set": hit.get("is_set", False),
+                "set_role": hit.get("set_role"),
+                "category_l1": hit.get("category_l1"),
+                "category_l2": hit.get("category_l2"),
+                "broad_category": hit.get("broad_category"),
+                "article_type": hit.get("article_type"),
+                "primary_color": hit.get("primary_color"),
+                "color_family": hit.get("color_family"),
+                "pattern": hit.get("pattern"),
+                "apparent_fabric": hit.get("apparent_fabric"),
+                "fit_type": hit.get("fit_type"),
+                "formality": hit.get("formality"),
+                "silhouette": hit.get("silhouette"),
+                "length": hit.get("length"),
+                "neckline": hit.get("neckline"),
+                "sleeve_type": hit.get("sleeve_type"),
+                "rise": hit.get("rise"),
+                "style_tags": hit.get("style_tags") or [],
+                "occasions": hit.get("occasions") or [],
+                "seasons": hit.get("seasons") or [],
+                "source": "algolia_replica",
+            })
+
+        # Parse facets
+        facets = None
+        raw_facets = resp.get("facets")
+        if raw_facets:
+            facets = {}
+            for facet_name, value_counts in raw_facets.items():
+                values = [
+                    FacetValue(value=val, count=cnt)
+                    for val, cnt in sorted(
+                        value_counts.items(), key=lambda x: -x[1]
+                    )
+                    if cnt > 1
+                    and val
+                    and val.lower() not in ("null", "n/a", "none", "")
+                ]
+                if len(values) >= 2:
+                    facets[facet_name] = values
+
+        algolia_nb_hits = resp.get("nbHits", len(pool))
+
+        # -- Step 3: Deduplicate (light — no diversity caps) ---------------
+        pool = self._reranker._deduplicate(pool)
+
+        # -- Step 4: Paginate and cache ------------------------------------
+        page_results = pool[: request.page_size]
+        products = [
+            self._to_product_result(r, idx + 1)
+            for idx, r in enumerate(page_results)
+        ]
+
+        _pool_cursor = min(request.page_size, len(pool))
+        has_more = _pool_cursor < len(pool)
+
+        # Cache the sorted pool
+        _search_session_id: Optional[str] = None
+        _cursor: Optional[str] = None
+        if pool:
+            try:
+                cache_inst = SearchSessionCache.get_instance()
+                _search_session_id = cache_inst.generate_session_id()
+                cache_inst.store(SearchSessionEntry(
+                    session_id=_search_session_id,
+                    query=request.query,
+                    intent=intent.value,
+                    sort_by=request.sort_by.value,
+                    session_mode="sorted",
+                    ranked_pool=pool,
+                    pool_cursor=_pool_cursor,
+                    seen_product_ids={
+                        r["product_id"] for r in page_results
+                        if r.get("product_id")
+                    },
+                    page_size=request.page_size,
+                    facets=facets,
+                    follow_ups=follow_ups,
+                    algolia_total_hits=algolia_nb_hits,
+                    algolia_query=algolia_query,
+                    algolia_filters=algolia_filters,
+                ))
+                _cursor = encode_cursor(page=2) if has_more else None
+            except Exception as exc:
+                logger.warning("Failed to cache sorted pool", error=str(exc))
+
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+        timing["sorted_pool"] = True
+        timing["pool_depth"] = len(pool)
+        timing["replica_index"] = replica_index
+
+        # --- OUTPUT SANITIZATION ---
+        escape_timing_dict(timing)
+        escape_follow_ups(follow_ups)
+
+        logger.info(
+            "Sorted pool built",
+            sort_by=request.sort_by.value,
+            pool_depth=len(pool),
+            replica=replica_index,
+            total_ms=timing["total_ms"],
+        )
+
+        return HybridSearchResponse(
+            query=strip_tags(request.query) or "",
+            intent=intent.value,
+            sort_by=request.sort_by.value,
+            results=products,
+            pagination=PaginationInfo(
+                page=1,
+                page_size=request.page_size,
+                has_more=has_more,
+                total_results=algolia_nb_hits,
+            ),
+            search_session_id=_search_session_id,
+            cursor=_cursor,
+            timing=timing,
+            facets=facets,
+            follow_ups=follow_ups,
+        )
+
+    # =========================================================================
+    # DEPRECATED: Extend-Search Pagination (kept for legacy/refill)
+    # =========================================================================
 
     def _extend_search(
         self,
@@ -1783,6 +2143,14 @@ class HybridSearchService:
             # Unlike _search_algolia() which always uses page=0, we need
             # native Algolia pagination for extend-search.
             try:
+                # For sorted searches (price/trending), use the virtual
+                # replica so Algolia returns results in globally sorted
+                # order — preserving cross-page sort consistency.
+                _replica_idx = None
+                if entry.sort_by and entry.sort_by != SortBy.RELEVANCE.value:
+                    _replica_idx = get_replica_index_name(
+                        self.algolia.index_name, entry.sort_by,
+                    )
                 resp = self.algolia.search(
                     query=entry.algolia_query,
                     filters=entry.algolia_filters or None,
@@ -1790,6 +2158,7 @@ class HybridSearchService:
                     hits_per_page=entry.fetch_size,
                     page=next_page,
                     facets=_FACET_FIELDS,
+                    index_name=_replica_idx,
                 )
                 results = []
                 for hit in resp.get("hits", []):
@@ -1903,11 +2272,20 @@ class HybridSearchService:
             return results, int((time.time() - t0) * 1000)
 
         # -----------------------------------------------------------------
-        # Run Algolia + Semantic in parallel
+        # Run Algolia + Semantic in parallel.
+        # For sorted searches (price/trending), skip semantic entirely so
+        # the Algolia replica's global sort order is preserved across pages.
         # -----------------------------------------------------------------
+        _is_sorted_search = (
+            entry.sort_by and entry.sort_by != SortBy.RELEVANCE.value
+        )
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_algolia = executor.submit(_run_algolia_extend)
-            future_semantic = executor.submit(_run_semantic_extend)
+            future_semantic = (
+                None if _is_sorted_search
+                else executor.submit(_run_semantic_extend)
+            )
 
             try:
                 algolia_results, algolia_facets, algolia_ms, algolia_exhausted = future_algolia.result()
@@ -1918,13 +2296,18 @@ class HybridSearchService:
                 algolia_exhausted = True
                 timing["algolia_ms"] = 0
 
-            try:
-                semantic_results, semantic_ms = future_semantic.result()
-                timing["semantic_ms"] = semantic_ms
-            except Exception as e:
-                logger.warning("Extend-search semantic failed", error=str(e))
+            if future_semantic is not None:
+                try:
+                    semantic_results, semantic_ms = future_semantic.result()
+                    timing["semantic_ms"] = semantic_ms
+                except Exception as e:
+                    logger.warning("Extend-search semantic failed", error=str(e))
+                    semantic_results = []
+                    timing["semantic_ms"] = 0
+            else:
                 semantic_results = []
                 timing["semantic_ms"] = 0
+                timing["sorted_algolia_only"] = True
 
         # Enrich semantic results from Algolia (same as page 1)
         if semantic_results and not entry.use_attribute_search:
@@ -2036,7 +2419,20 @@ class HybridSearchService:
         )
 
     # =========================================================================
-    # Endless Semantic Search (page 2+ for SPECIFIC / VAGUE intent)
+    # Pool-based pagination constants
+    # =========================================================================
+
+    # Minimum per-source fetch size for pool building.  Regardless of
+    # page_size, we always fetch at least this many candidates from each
+    # source (Algolia + semantic) so the ranked pool is deep enough.
+    _POOL_FETCH_SIZE = 400
+
+    # Brand cap for pool building — more permissive than per-page display
+    # (default 4) so the pool has enough depth for many pages.
+    _POOL_MAX_PER_BRAND = 12
+
+    # =========================================================================
+    # Endless Semantic Search (DEPRECATED — kept for legacy/refill)
     # =========================================================================
 
     # Max rounds of pgvector fetch-filter-accumulate before giving up.
@@ -2254,6 +2650,14 @@ class HybridSearchService:
 
         # --- Deduplicate (near-dupe only, NO brand/category caps) ---
         deduped = self._reranker._deduplicate(accumulated)
+
+        # --- Post-sort by price/trending if requested ---
+        if entry.sort_by == SortBy.PRICE_ASC.value:
+            deduped.sort(key=lambda r: float(r.get("price", 0) or 0))
+        elif entry.sort_by == SortBy.PRICE_DESC.value:
+            deduped.sort(key=lambda r: float(r.get("price", 0) or 0), reverse=True)
+        elif entry.sort_by == SortBy.TRENDING.value:
+            deduped.sort(key=lambda r: float(r.get("trending_score", 0) or 0), reverse=True)
 
         # Take page_size results
         page_results = deduped[:entry.page_size]

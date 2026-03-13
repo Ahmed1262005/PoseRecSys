@@ -25,7 +25,7 @@ import time
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.logging import get_logger
 from core.sanitization import sanitize_query, sanitize_filter_values, sanitize_labels
@@ -172,6 +172,38 @@ class SearchPlan(BaseModel):
         description="Validated FollowUpQuestion objects (populated by QueryPlanner.plan())"
     )
 
+    # -- Validators -------------------------------------------------------
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_attributes(cls, data: Any) -> Any:
+        """Fix common LLM output mistakes before Pydantic validation.
+
+        1. Bare strings in ``attributes`` → wrap in a list.
+           e.g. ``"brand": "Nasty Gal"`` → ``"brand": ["Nasty Gal"]``
+        2. Brand found in ``attributes`` but not in top-level ``brand``
+           → move it to ``brand`` (the correct field).
+        """
+        if not isinstance(data, dict):
+            return data
+
+        attrs = data.get("attributes")
+        if isinstance(attrs, dict):
+            for key, val in list(attrs.items()):
+                # Coerce bare string → single-element list (skip bools)
+                if isinstance(val, str):
+                    attrs[key] = [val]
+
+            # If LLM put brand inside attributes, promote to top-level
+            if "brand" in attrs and not data.get("brand"):
+                brand_val = attrs.pop("brand")
+                if isinstance(brand_val, list) and brand_val:
+                    data["brand"] = brand_val[0]
+                elif isinstance(brand_val, str):
+                    data["brand"] = brand_val
+
+        return data
+
     model_config = ConfigDict(extra="ignore")
 
 
@@ -289,7 +321,7 @@ def _build_system_prompt() -> str:
 
 9. **We sell CLOTHING, not underwear.** Undergarment mentions mean clothing that works OVER them:
    "no underwear lines"→thick Bottoms, "no bra straps"→cover_straps mode, "strapless bra"→Off-Shoulder.
-   NEVER set category_l1 to "Intimates" — it does not exist.
+    NEVER set category_l1 to "Intimates", "Swimwear", "Loungewear", "Sleepwear", "Pajamas", "Jumpsuits", or "Rompers" — they do not exist.
 
 10. **Decompose trend/aesthetic references into visual attributes.**
     Users often search with cultural trend terms instead of product keywords. These terms describe
@@ -348,9 +380,12 @@ MODE RULES:
 
 Only the following keys are valid. Use EXACT values from the allowed lists:
 
-- **category_l1**: ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear", "Swimwear", "Accessories"]
+- **category_l1**: ONLY these 5 values exist: ["Tops", "Bottoms", "Dresses", "Outerwear", "Activewear"]
+  NO other category_l1 values exist. "Swimwear", "Accessories", "Intimates", "Loungewear", "Sleepwear", "Pajamas", "Jumpsuits", "Rompers" are NOT valid category_l1 values.
+  Jumpsuits → category_l1: ["Dresses"], category_l2: ["Jumpsuit"].  Rompers → category_l1: ["Dresses"], category_l2: ["Romper"].
   For vague/outfit queries, default to ["Tops", "Dresses"].
 - **category_l2**: Use BROAD values. For "jacket" → ["Jacket", "Jackets"]. For subtypes include both: ["Bomber Jacket", "Jacket", "Jackets"]
+  Known category_l2 values: Dress, Pant, Top, T-Shirt, Jean, Skirt, Short, Sweater, Jacket, Tank Top, Blouse, Shirt, Cardigan, Crop Top, Legging, Sweatshirt, Hoodie, Coat, Blazer, Vest, Bodysuit, Camisole, Jumpsuit, Jogger, Romper
 - **patterns**: ["Solid", "Floral", "Striped", "Plaid", "Polka Dot", "Animal Print", "Abstract", "Geometric", "Tie Dye", "Camo", "Colorblock", "Tropical"]
 - **colors**: ["Black", "White", "Red", "Blue", "Navy Blue", "Green", "Pink", "Yellow", "Purple", "Orange", "Brown", "Beige", "Cream", "Gray", "Burgundy", "Olive", "Taupe", "Off White", "Light Blue"]
 - **formality**: ["Formal", "Semi-Formal", "Business Casual", "Smart Casual", "Casual"]
@@ -629,11 +664,27 @@ When a user references a brand as a STYLE REFERENCE (not wanting to buy that spe
 
 **Exact brand patterns** — set `brand`, do NOT set `vibe_brand`:
 - "X dress", "X tops", just the brand name, "buy X", "shop X"
-- Misspelled, partial, or abbreviated brand names — ALWAYS resolve to the KNOWN BRANDS list:
-  "zar" → "Zara", "bohoo" → "Boohoo", "prin polly" → "Princess Polly",
-  "forver 21" → "Forever 21", "alo" → "Alo Yoga", "plt" → "PrettyLittleThing"
-- If the user's term does NOT match any brand on the KNOWN BRANDS list, it is NOT a brand
-  search. Do NOT set brand. Treat it as a product/style term in algolia_query instead.
+- Misspelled, partial, or abbreviated brand names — ALWAYS resolve to the KNOWN BRANDS list.
+  CRITICAL RULE: Before interpreting ANY word as a regular English word, FIRST check if it
+  could be a misspelling of a brand from the KNOWN BRANDS list. Users frequently misspell
+  brand names. If a word is within 1-3 character changes of a known brand, it IS that brand.
+  NEVER reinterpret a misspelled brand as a different English word.
+  Examples:
+  "bohoo" → "Boohoo", "boo hoo" → "Boohoo", "boho" (when followed by brand-typical terms like "dress", "tops") → "Boohoo"
+  "missguied" → "Missguided", "misguided" → "Missguided", "missguded" → "Missguided"
+  "bash" → "Ba&sh", "ba sh" → "Ba&sh" (French fashion brand, often typed without &)
+  "prin polly" → "Princess Polly", "princess poly" → "Princess Polly"
+  "forver 21" → "Forever 21", "forever21" → "Forever 21", "4ever21" → "Forever 21"
+  "zar" → "Zara", "zarra" → "Zara"
+  "alo" → "Alo Yoga", "plt" → "PrettyLittleThing", "fp" → "Free People"
+  "hm" → "H&M", "h and m" → "H&M", "cotton on" → "Cotton On"
+  "nastygal" → "Nasty Gal", "nasty girl" → "Nasty Gal"
+  "white fox" → "White Fox", "whitefox" → "White Fox"
+  "oh poly" → "Oh Polly", "ohpolly" → "Oh Polly"
+  "aritzia" → "Aritzia", "aritiza" → "Aritzia"
+  "abercombie" → "Abercrombie & Fitch", "abercrombi" → "Abercrombie & Fitch"
+- If the user's term does NOT match any brand on the KNOWN BRANDS list (even approximately),
+  it is NOT a brand search. Do NOT set brand. Treat it as a product/style term instead.
 - CRITICAL: A bare brand name (even misspelled/truncated) means the user wants to SHOP
   that brand. Set brand (not vibe_brand) and intent "exact". vibe_brand requires explicit
   comparative language ("like X", "X style", "X vibe", "similar to X", "X but...").
@@ -928,6 +979,19 @@ def _get_brand_list_addendum() -> str:
         "list matches, the term is NOT a brand — treat it as a product/style term "
         "instead.\n\n"
         f"{brand_list_str}"
+        "\n\n## COMMON MISSPELLINGS & CONFUSIONS\n"
+        "These are frequently confused. Always resolve to the correct brand:\n"
+        '- "bash", "ba sh", "baash" → Ba&sh (French fashion brand)\n'
+        '- "princess poly", "prin polly", "princesspolly" → Princess Polly (NOT Oh Polly)\n'
+        '- "oh poly", "ohpolly" → Oh Polly (NOT Princess Polly)\n'
+        '- "bohoo", "boo hoo", "booho" → Boohoo\n'
+        '- "missguied", "misguided", "missguded" → Missguided\n'
+        '- "whitefox", "white fox boutique" → White Fox\n'
+        '- "forever21", "4ever21", "forver 21" → Forever 21\n'
+        '- "hm", "h and m", "handm" → H&M\n'
+        '- "nastygal", "nasty girl" → Nasty Gal\n'
+        '- "abercombie", "abercrombi" → Abercrombie & Fitch\n'
+        '- "plt", "prettylittle" → PrettyLittleThing\n'
     )
     return _brand_list_cache
 
@@ -1053,6 +1117,88 @@ class QueryPlanner:
                 oldest_key = min(self._plan_cache, key=lambda k: self._plan_cache[k][1])
                 del self._plan_cache[oldest_key]
             self._plan_cache[key] = (plan, now)
+
+    # ------------------------------------------------------------------
+    # Brand name normalization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_brand_name(llm_brand: str) -> str:
+        """Map an LLM-output brand name to the canonical catalog spelling.
+
+        Tries, in order:
+        1. Exact lowercase match in catalog  (``"Boohoo"`` → ``"Boohoo"``)
+        2. Alphanumeric-only match           (``"Bash"`` → ``"Ba&sh"``)
+        3. Substring / contains match        (``"Abercrombie"`` → ``"Abercrombie & Fitch"``)
+
+        Falls back to the original string if nothing matches.
+        """
+        try:
+            from search.query_classifier import get_brand_originals, _get_brands
+            originals = get_brand_originals()  # {lowercase: OriginalCasing}
+            all_brands = _get_brands()         # set of lowercase brand names
+        except Exception:
+            return llm_brand
+
+        if not originals and not all_brands:
+            return llm_brand
+
+        lower = llm_brand.strip().lower()
+
+        # 1. Exact lowercase match (originals has proper casing)
+        if lower in originals:
+            return originals[lower]
+
+        # 1b. Exact match in all_brands (fallback brands without casing)
+        #     Use the LLM's casing since it's the best we have.
+        if lower in all_brands and lower not in originals:
+            # Title-case fallback brands for display
+            return llm_brand.strip()
+
+        # 2. Strip non-alphanumeric chars and compare
+        import re
+        llm_alnum = re.sub(r"[^a-z0-9]", "", lower)
+
+        # Check originals first (has proper casing)
+        for cat_lower, cat_original in originals.items():
+            cat_alnum = re.sub(r"[^a-z0-9]", "", cat_lower)
+            if llm_alnum == cat_alnum:
+                logger.info(
+                    "Brand normalized (alphanumeric match)",
+                    llm_brand=llm_brand,
+                    catalog_brand=cat_original,
+                )
+                return cat_original
+
+        # Check fallback brands too (no casing — use LLM casing)
+        for brand_lower in all_brands:
+            brand_alnum = re.sub(r"[^a-z0-9]", "", brand_lower)
+            if llm_alnum == brand_alnum and brand_lower not in originals:
+                logger.info(
+                    "Brand normalized (alphanumeric match, fallback)",
+                    llm_brand=llm_brand,
+                    catalog_brand=brand_lower,
+                )
+                return llm_brand.strip()
+
+        # 3. Substring match — LLM says "Abercrombie", catalog has
+        #    "abercrombie & fitch". Pick longest catalog brand that
+        #    starts with the LLM string (avoids false positives).
+        candidates = []
+        for cat_lower, cat_original in originals.items():
+            if cat_lower.startswith(lower) or lower.startswith(cat_lower):
+                candidates.append((cat_lower, cat_original))
+        if candidates:
+            # Pick the longest match (most specific)
+            best = max(candidates, key=lambda x: len(x[0]))
+            logger.info(
+                "Brand normalized (substring match)",
+                llm_brand=llm_brand,
+                catalog_brand=best[1],
+            )
+            return best[1]
+
+        return llm_brand
 
     _MAX_RETRIES = 2
     _RETRY_BACKOFF_SECONDS = [6, 12]  # Wait times for retry 1, 2
@@ -1895,6 +2041,190 @@ class QueryPlanner:
         "style_tags": "exclude_style_tags",
     }
 
+    # ---------------------------------------------------------------
+    # Strict validation: only these category_l1 values exist in the
+    # catalog.  Invalid values are remapped or dropped.
+    # ---------------------------------------------------------------
+    _VALID_CATEGORY_L1 = {"Tops", "Bottoms", "Dresses", "Outerwear", "Activewear"}
+
+    # Map commonly hallucinated category_l1 → valid L1 + L2 override
+    _CATEGORY_L1_REMAP: Dict[str, Tuple[str, Optional[str]]] = {
+        "Jumpsuits":              ("Dresses",    "Jumpsuit"),
+        "Rompers":                ("Dresses",    "Romper"),
+        "Swimwear":               ("Tops",       None),      # no swimwear — best effort
+        "Accessories":            ("Tops",       None),      # no accessories
+        "Intimates":              ("Tops",       None),
+        "Loungewear":             ("Activewear", None),
+        "Sleepwear":              ("Activewear", None),
+        "Pajamas":                ("Activewear", None),
+        "Pajamas & Loungewear":   ("Activewear", None),
+    }
+
+    # Garbage values that should be stripped from any filter field
+    _GARBAGE_VALUES = {
+        "not specified", "n/a", "N/A", "none", "None", "null",
+        "unknown", "Unknown", "other", "Other", "unspecified",
+        "", " ",
+    }
+
+    # ---------------------------------------------------------------
+    # Color → color_family mapping.  The planner outputs color names
+    # like "Red", "Sage Green", "Burgundy" but the catalog's `colors`
+    # field has 19K+ variants.  We map to the 13 canonical
+    # `color_family` values for reliable filtering, and let semantic
+    # search handle exact shade matching.
+    # ---------------------------------------------------------------
+    _COLOR_TO_FAMILY: Dict[str, str] = {
+        # Neutrals
+        "black": "Neutrals", "white": "Neutrals", "cream": "Neutrals",
+        "beige": "Neutrals", "ivory": "Neutrals", "off white": "Neutrals",
+        "gray": "Neutrals", "grey": "Neutrals", "charcoal": "Neutrals",
+        "taupe": "Neutrals", "khaki": "Neutrals", "stone": "Neutrals",
+        "bone": "Neutrals", "oatmeal": "Neutrals", "camel": "Neutrals",
+        "tan": "Neutrals", "sand": "Neutrals", "natural": "Neutrals",
+        "silver": "Neutrals",
+        # Blues
+        "blue": "Blues", "navy": "Blues", "navy blue": "Blues",
+        "light blue": "Blues", "baby blue": "Blues", "sky blue": "Blues",
+        "royal blue": "Blues", "cobalt": "Blues", "teal": "Blues",
+        "indigo": "Blues", "denim": "Blues", "powder blue": "Blues",
+        "cornflower": "Blues",
+        # Reds
+        "red": "Reds", "burgundy": "Reds", "wine": "Reds",
+        "maroon": "Reds", "crimson": "Reds", "scarlet": "Reds",
+        "cherry": "Reds", "ruby": "Reds",
+        # Pinks
+        "pink": "Pinks", "blush": "Pinks", "rose": "Pinks",
+        "dusty rose": "Pinks", "dusty pink": "Pinks", "hot pink": "Pinks",
+        "fuchsia": "Pinks", "magenta": "Pinks", "mauve": "Pinks",
+        "coral": "Pinks", "salmon": "Pinks", "light pink": "Pinks",
+        "pastel pink": "Pinks", "baby pink": "Pinks",
+        # Greens
+        "green": "Greens", "olive": "Greens", "sage": "Greens",
+        "sage green": "Greens", "forest green": "Greens", "emerald": "Greens",
+        "mint": "Greens", "mint green": "Greens", "army green": "Greens",
+        "hunter green": "Greens", "lime": "Greens", "kelly green": "Greens",
+        "dark green": "Greens",
+        # Browns
+        "brown": "Browns", "chocolate": "Browns", "espresso": "Browns",
+        "coffee": "Browns", "mocha": "Browns", "rust": "Browns",
+        "cognac": "Browns", "caramel": "Browns", "dark brown": "Browns",
+        "light brown": "Browns",
+        # Purples
+        "purple": "Purples", "lavender": "Purples", "lilac": "Purples",
+        "plum": "Purples", "violet": "Purples", "eggplant": "Purples",
+        "grape": "Purples",
+        # Yellows
+        "yellow": "Yellows", "mustard": "Yellows", "gold": "Yellows",
+        "lemon": "Yellows", "butter": "Yellows", "chartreuse": "Yellows",
+        # Oranges
+        "orange": "Oranges", "burnt orange": "Oranges", "peach": "Oranges",
+        "tangerine": "Oranges", "apricot": "Oranges", "terracotta": "Oranges",
+        # Metallics
+        "metallic": "Metallics", "gold metallic": "Metallics",
+        "silver metallic": "Metallics", "bronze": "Metallics",
+        "copper": "Metallics",
+        # Multicolor
+        "multicolor": "Multicolor", "multi": "Multicolor",
+        "rainbow": "Multicolor",
+    }
+
+    @classmethod
+    def _sanitize_filters(
+        cls,
+        merged_filters: Dict[str, List[str]],
+    ) -> Dict[str, List[str]]:
+        """Validate and fix filter values that would cause 0 results.
+
+        - Remaps invalid category_l1 to valid values (+ injects category_l2)
+        - Maps colors → color_family for reliable filtering
+        - Strips garbage values like "not specified", "N/A", etc.
+        - Returns the cleaned filter dict (mutates in place for efficiency).
+        """
+        # 1. Strip garbage values from all fields
+        for field in list(merged_filters.keys()):
+            vals = merged_filters[field]
+            if isinstance(vals, list):
+                cleaned = [v for v in vals if v not in cls._GARBAGE_VALUES]
+                if len(cleaned) < len(vals):
+                    dropped = [v for v in vals if v in cls._GARBAGE_VALUES]
+                    logger.info(
+                        "Stripped garbage filter values",
+                        field=field,
+                        dropped=dropped,
+                    )
+                if cleaned:
+                    merged_filters[field] = cleaned
+                else:
+                    del merged_filters[field]
+
+        # 2. Validate and remap category_l1
+        if "category_l1" in merged_filters:
+            raw_l1 = merged_filters["category_l1"]
+            valid_l1 = []
+            injected_l2 = []
+            for val in raw_l1:
+                if val in cls._VALID_CATEGORY_L1:
+                    valid_l1.append(val)
+                elif val in cls._CATEGORY_L1_REMAP:
+                    remap_l1, remap_l2 = cls._CATEGORY_L1_REMAP[val]
+                    if remap_l1 not in valid_l1:
+                        valid_l1.append(remap_l1)
+                    if remap_l2:
+                        injected_l2.append(remap_l2)
+                    logger.info(
+                        "Remapped invalid category_l1",
+                        original=val,
+                        remapped_l1=remap_l1,
+                        injected_l2=remap_l2,
+                    )
+                else:
+                    logger.warning(
+                        "Dropped unknown category_l1 value",
+                        value=val,
+                    )
+
+            if valid_l1:
+                merged_filters["category_l1"] = valid_l1
+            else:
+                # All values were invalid — remove filter entirely
+                del merged_filters["category_l1"]
+                logger.warning("All category_l1 values invalid, removed filter")
+
+            # Inject category_l2 from remapping
+            if injected_l2:
+                existing_l2 = merged_filters.get("category_l2", [])
+                for l2 in injected_l2:
+                    if l2 not in existing_l2:
+                        existing_l2.append(l2)
+                merged_filters["category_l2"] = existing_l2
+
+        # 3. Convert colors → color_family
+        #    The catalog `colors` field has 19K+ granular values that rarely
+        #    match planner output exactly.  `color_family` (Gemini-extracted)
+        #    has 13 clean values and is on every product.  Map planner colors
+        #    to color_family for reliable filtering; semantic search still
+        #    handles exact shade matching via the visual query.
+        if "colors" in merged_filters:
+            families: List[str] = []
+            for color in merged_filters["colors"]:
+                family = cls._COLOR_TO_FAMILY.get(color.lower())
+                if family and family not in families:
+                    families.append(family)
+            if families:
+                # Set color_family, drop colors (avoid double-filtering)
+                merged_filters["color_family"] = families
+                logger.info(
+                    "Mapped colors → color_family",
+                    original_colors=merged_filters["colors"],
+                    color_family=families,
+                )
+                del merged_filters["colors"]
+            # If no mapping found, keep colors as-is (some exact values
+            # like "Black", "White", "Navy Blue" do exist in the catalog)
+
+        return merged_filters
+
     def plan_to_request_updates(
         self, plan: SearchPlan
     ) -> Tuple[Dict[str, Any], Dict[str, List[str]], Dict[str, List[str]], List[str], str, str, str]:
@@ -1951,6 +2281,10 @@ class QueryPlanner:
                         existing_lower.add(v.lower())
             else:
                 merged_filters[field] = list(values)
+
+        # Validate and fix filter values (remap invalid category_l1,
+        # strip garbage values, etc.) before they reach the pipeline.
+        merged_filters = self._sanitize_filters(merged_filters)
 
         # Copy merged filters to request_updates
         for field, values in merged_filters.items():
@@ -2024,6 +2358,24 @@ class QueryPlanner:
         # -----------------------------------------------------------
         # Step 4: Brand / price / sale injection
         # -----------------------------------------------------------
+
+        # Normalize brand names against catalog (LLM may output "Bash"
+        # instead of "Ba&sh", or "Abercrombie" instead of "Abercrombie & Fitch").
+        _brand_name = plan.brand or plan.vibe_brand
+        if _brand_name:
+            _brand_name = self._normalize_brand_name(_brand_name)
+            if plan.brand:
+                plan.brand = _brand_name
+            else:
+                plan.vibe_brand = _brand_name
+
+        # Also normalize brands that ended up in request_updates
+        # (from attributes merging in Step 2).
+        if "brands" in request_updates:
+            request_updates["brands"] = [
+                self._normalize_brand_name(b) for b in request_updates["brands"]
+            ]
+
         if plan.vibe_brand:
             # Vibe brand → do NOT set hard brand filter.
             # Pass through as internal key for post-planner cluster boosting.

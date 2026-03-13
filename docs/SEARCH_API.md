@@ -14,11 +14,15 @@ Authorization: Bearer <supabase_jwt_token>
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/search/hybrid` | POST | Yes | Hybrid search with LLM query planning, follow-up questions, and extend-search pagination |
+| `/api/search/hybrid` | POST | Yes | **V1** — Hybrid search with LLM query planning, follow-up questions, and extend-search pagination |
+| `/api/search/v2/hybrid` | POST | Yes | **V2** — Hybrid search with heuristic bypass, Groq planner, pool-based pagination, brand fuzzy matching |
+| `/api/search/v2/health` | GET | No | V2 search health check |
 | `/api/search/autocomplete` | GET | Yes | Product + brand autocomplete |
 | `/api/search/click` | POST | Yes | Track click event |
 | `/api/search/conversion` | POST | Yes | Track conversion event |
 | `/api/search/health` | GET | No | Search module health check |
+
+> **Which endpoint to use?** V2 (`/api/search/v2/hybrid`) is the recommended endpoint for new integrations. It shares the same request/response schema as V1 but adds heuristic bypass (~0ms planner for simple queries), faster LLM planning via Groq, pool-based pagination (0ms page 2+), server-side brand fuzzy matching, and filter sanitization. V1 remains fully operational and unchanged.
 
 ---
 
@@ -58,7 +62,7 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
   "category_l2": ["Midi Dress"],
   "brands": ["Boohoo"],
   "colors": ["Red", "Burgundy"],
-  "color_family": ["Warm"],
+  "color_family": ["Reds"],
   "patterns": ["Solid"],
   "materials": ["Silk", "Satin"],
   "occasions": ["Date Night"],
@@ -124,7 +128,7 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
       "broad_category": "dresses",
       "article_type": "midi dress",
       "primary_color": "Red",
-      "color_family": "Warm",
+      "color_family": "Reds",
       "pattern": "Solid",
       "apparent_fabric": "Satin",
       "fit_type": "Fitted",
@@ -206,6 +210,25 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
 
 ## Sort Modes
 
+### V2 Sort Routing (intent-aware)
+
+V2 uses intent-aware sort routing — the pipeline used depends on both `sort_by` AND the query intent (EXACT, SPECIFIC, VAGUE):
+
+| Intent | `sort_by` | Pipeline | Page 1 Latency |
+|--------|-----------|----------|----------------|
+| Any | `relevance` | Full hybrid: planner → Keyword + FAISS → RRF → reranker | ~2-3s |
+| EXACT | `price_asc` / `price_desc` / `trending` | Algolia replica (strict sort) | ~300ms |
+| SPECIFIC / VAGUE | `trending` | Algolia replica (strict sort) | ~300ms |
+| SPECIFIC / VAGUE | `price_asc` / `price_desc` | Full hybrid pipeline → **post-sort by price** | ~2-3s |
+
+**Why SPECIFIC/VAGUE price sort uses the full pipeline:** The hybrid pipeline produces a deeper, more diverse pool (200-350 items) than a hard-filtered Algolia replica (often 6-40 items). Post-sorting the merged pool by price gives users more relevant results to browse.
+
+**Why trending always uses the replica:** FAISS has no `trending_score` attribute, so semantic results can't be sorted by trend. The Algolia replica handles this natively.
+
+**Page 2+ for all sort modes:** 0ms (pool slice from cache).
+
+### V1 Sort Modes (legacy)
+
 | Value | Pipeline | Speed | Description |
 |-------|----------|-------|-------------|
 | `relevance` | Full hybrid: LLM planner → Algolia + FashionCLIP → RRF → reranker | ~12-15s (page 1), ~2-3s (page 2+) | Default. Best result quality and diversity. |
@@ -213,19 +236,59 @@ Main search endpoint. Runs the full pipeline: LLM query planner → Algolia + Fa
 | `price_desc` | Full hybrid pipeline → **post-sort by price descending** | ~12-15s (page 1), ~2-3s (page 2+) | Most expensive first among relevant results. |
 | `trending` | Full hybrid pipeline → **post-sort by trending score** | ~12-15s (page 1), ~2-3s (page 2+) | Trending items first among relevant results. |
 
-All sort modes run the full hybrid pipeline (Algolia + semantic + RRF merge + reranker), then sort the merged results before pagination. This ensures rich, diverse candidates regardless of sort order.
-
 All filters work with all sort modes. Follow-up questions are generated for all sort modes.
 
 ---
 
-## Extend-Search Pagination
+## Pagination
+
+### V2: Pool-Based Pagination (recommended)
+
+Page 1 builds a deep ranked pool (200-350 items for relevance, up to 300 for sorted) and caches the entire list server-side. Page 2+ serves slices from the cached pool with **0ms latency** — no retrieval, no reranking, no network calls.
+
+**Pool sizes:**
+- Relevance: ~200-350 items (fetches 400+ candidates per source, brand cap of 12 per brand in pool)
+- Sorted (Algolia replica): up to 300 items
+
+**Client flow (same as V1):**
+
+```
+Page 1:
+  POST /api/search/v2/hybrid
+  {"query": "vacation outfits"}
+  → Response includes search_session_id + cursor + has_more=true
+  → Pool of ~250 items built and cached
+
+Page 2:
+  POST /api/search/v2/hybrid
+  {"query": "vacation outfits",
+   "search_session_id": "ss_abc123",
+   "cursor": "eyJwIjoyfQ=="}
+  → Instant slice from cached pool (0ms)
+
+Page 3+:
+  Same pattern, pass back search_session_id + cursor
+  → 0ms until pool exhausted
+
+End of results:
+  → has_more=false, cursor=null → stop requesting
+```
+
+**Key rules:**
+
+- Always pass back both `search_session_id` and `cursor` from the previous response.
+- `query` must still be provided (validated) but the cached pool is used.
+- Sessions expire after **30 minutes** of inactivity.
+- When `has_more=false` and `cursor=null`, there are no more results.
+- Facets, follow-ups, and applied_filters from page 1 are carried through to all subsequent pages.
+
+### V1: Extend-Search Pagination (legacy)
 
 Page 1 runs the full pipeline (LLM planner + Algolia + semantic + RRF + rerank). The plan state is cached server-side.
 
 Page 2+ reuses the cached plan: skips the LLM planner, runs Algolia (native page=N) + semantic (reuses cached FashionCLIP embeddings, excludes already-seen product IDs) + RRF merge + rerank on fresh candidates.
 
-### Client flow
+**Client flow (same interface):**
 
 ```
 Page 1:
@@ -238,24 +301,14 @@ Page 2:
   {"query": "vacation outfits",
    "search_session_id": "ss_abc123",
    "cursor": "eyJwIjoyfQ=="}
-  → Fresh candidates, zero overlap with page 1
-
-Page 3:
-  POST /api/search/hybrid
-  {"query": "vacation outfits",
-   "search_session_id": "ss_abc123",
-   "cursor": "eyJwIjozfQ=="}
-  → Fresh candidates, zero overlap with pages 1-2
-
-End of results:
-  → has_more=false, cursor=null → stop requesting
+  → Fresh candidates (~2-3s), zero overlap with page 1
 ```
 
-### Key rules
+**Key rules:**
 
 - Always pass back both `search_session_id` and `cursor` from the previous response.
 - `query` must still be provided (validated) but the cached plan is used.
-- Sessions expire after 10 minutes of inactivity.
+- Sessions expire after **30 minutes** of inactivity.
 - When `has_more=false` and `cursor=null`, there are no more results.
 
 ---
@@ -284,11 +337,11 @@ Filters are enforced at multiple stages:
 | Field | Type | Algolia Facet | Example Values | Notes |
 |-------|------|---------------|---------------|-------|
 | `categories` | `string[]` | `broad_category` | `tops`, `bottoms`, `dresses`, `outerwear` | Legacy broad categories |
-| `category_l1` | `string[]` | `category_l1` | `Tops`, `Bottoms`, `Dresses`, `Outerwear`, `Activewear`, `Swimwear`, `Accessories` | Gemini L1 categories (recommended) |
+| `category_l1` | `string[]` | `category_l1` | `Tops`, `Bottoms`, `Dresses`, `Outerwear`, `Activewear` | Gemini L1 categories (5 values only — recommended) |
 | `category_l2` | `string[]` | `category_l2` | `Blouse`, `Jeans`, `Midi Dress`, `Bomber Jacket` | Gemini L2 subcategories |
 | `brands` | `string[]` | `brand` | `Boohoo`, `Princess Polly`, `Forever 21`, `A.P.C`, `Ba&sh` | Case-sensitive exact match |
 | `colors` | `string[]` | `primary_color` | `Black`, `White`, `Red`, `Blue`, `Navy Blue`, `Green`, `Pink`, `Yellow`, `Purple`, `Orange`, `Brown`, `Beige`, `Cream`, `Gray`, `Burgundy`, `Olive`, `Taupe`, `Off White`, `Light Blue` | Primary product color |
-| `color_family` | `string[]` | `color_family` | `Warm`, `Cool`, `Neutral` | Color temperature grouping |
+| `color_family` | `string[]` | `color_family` | `Neutrals`, `Blues`, `Browns`, `Greens`, `Reds`, `Pinks`, `Purples`, `Multicolor`, `Yellows`, `Oranges`, `Metallics` | Gemini-extracted color family (13 values, recommended over `colors`) |
 | `patterns` | `string[]` | `pattern` | `Solid`, `Floral`, `Striped`, `Plaid`, `Polka Dot`, `Animal Print`, `Abstract`, `Geometric`, `Tie Dye`, `Camo`, `Colorblock`, `Tropical` | |
 | `materials` | `string[]` | `apparent_fabric` | `Cotton`, `Linen`, `Silk`, `Satin`, `Denim`, `Faux Leather`, `Wool`, `Velvet`, `Chiffon`, `Lace`, `Mesh`, `Knit`, `Jersey`, `Fleece`, `Sheer` | Gemini-detected fabric |
 | `occasions` | `string[]` | `occasions` | `Date Night`, `Party`, `Office`, `Work`, `Wedding Guest`, `Vacation`, `Workout`, `Everyday`, `Brunch`, `Night Out`, `Weekend`, `Lounging`, `Beach` | Multi-valued (product can have multiple) |
@@ -305,6 +358,28 @@ Filters are enforced at multiple stages:
 | `min_price` | `float` | numeric | `20.0` | Minimum price (inclusive). Must be >= 0. |
 | `max_price` | `float` | numeric | `100.0` | Maximum price (inclusive). Must be >= min_price. |
 | `on_sale_only` | `bool` | `is_on_sale` | `true` | Only return products where original_price > price. Default: `false`. |
+
+### `color_family` vs `colors` (important)
+
+The `colors` field has ~19,800 distinct values in the catalog (`"Sage Green"`, `"Washed Black"`, `"Chocolate Brown"`). Exact matching against these is unreliable — the LLM and users rarely type the exact shade name.
+
+**Use `color_family` instead.** It has 13 clean Gemini-extracted values with near-complete catalog coverage:
+
+| Value | Products | Maps from (examples) |
+|-------|----------|---------------------|
+| `Neutrals` | ~63,000 | black, white, gray, beige, cream, ivory, taupe, off-white, charcoal |
+| `Blues` | ~21,000 | blue, navy, cobalt, denim, teal, sky blue, indigo, slate |
+| `Browns` | ~12,000 | brown, tan, camel, chocolate, khaki, rust, cognac, chestnut |
+| `Greens` | ~7,000 | green, olive, sage, emerald, forest, mint, lime, teal-green |
+| `Reds` | ~7,000 | red, burgundy, wine, crimson, scarlet, maroon, cherry, cranberry |
+| `Pinks` | ~5,000 | pink, blush, rose, fuchsia, magenta, hot pink, coral, salmon |
+| `Purples` | ~2,000 | purple, lavender, plum, violet, lilac, mauve, eggplant |
+| `Multicolor` | ~2,000 | multicolor, tie-dye, rainbow, mixed |
+| `Yellows` | ~2,000 | yellow, mustard, gold (non-metallic), lemon, sunflower |
+| `Oranges` | ~1,000 | orange, terracotta, burnt orange, peach, coral-orange |
+| `Metallics` | ~700 | gold, silver, rose gold, bronze, copper (metallic finish) |
+
+V2 automatically converts `colors` to `color_family` server-side. V1 does not.
 
 ### Exclude Filters (13)
 
@@ -622,6 +697,128 @@ Client                                    Server
 6. **Session continuity.** Pass the same `session_id` for seen-item dedup. Use `search_session_id` + `cursor` for extend-search pagination.
 
 7. **Server handles list filters as OR.** `formality: ["Casual", "Smart Casual"]` returns products matching either value.
+
+---
+
+## POST `/api/search/v2/hybrid`
+
+V2 search endpoint. **Same request/response schema as V1** (`/api/search/hybrid`) with these additions:
+
+### V2 Improvements Over V1
+
+| Feature | V1 | V2 |
+|---------|----|----|
+| Planner | gpt-4.1-mini (~1.5-4s) | Groq Llama 4 Scout (~200-600ms) + heuristic bypass (~0ms) |
+| Semantic backend | pgvector (Supabase RPC) | Local FAISS IndexFlatIP (129K vectors, ~30-70ms) |
+| Pagination (page 2+) | Re-runs Algolia + semantic (~2-3s) | Pool slice from cache (0ms) |
+| Brand matching | Exact match only | 3-tier fuzzy: exact → alphanumeric → substring |
+| Filter sanitization | None (LLM output used as-is) | Server-side: validates category_l1, remaps colors→color_family, strips garbage |
+| VAGUE queries | Algolia + semantic | FAISS-only (Algolia skipped, saves 700-1600ms) |
+| Page 1 latency | ~12-15s | ~2-3s |
+
+### Heuristic Bypass
+
+Simple queries skip the LLM entirely for ~0ms planner latency:
+
+| Pattern | Example | What happens |
+|---------|---------|-------------|
+| Pure brand | `"boohoo"`, `"ba&sh"` | Intent=EXACT, brand filter set, no LLM |
+| Bare category | `"dresses"`, `"jeans"` | Intent=SPECIFIC, category filter set, no LLM |
+| Category + color | `"red dress"`, `"black jeans"` | Intent=SPECIFIC, category + color_family filter set, no LLM |
+
+Heuristic bypass only runs on fresh page-1 searches (no cursor, no search_session_id, no follow-up refinement). If no heuristic matches, the Groq LLM planner runs as fallback.
+
+### Brand Fuzzy Matching
+
+V2 loads all 165 catalog brands at startup and injects them into the planner prompt. After the planner runs, a 3-tier normalization corrects the LLM's brand output:
+
+1. **Exact match** — lowercase comparison against catalog (`"boohoo"` → `"Boohoo"`)
+2. **Alphanumeric match** — strips non-alphanumeric chars (`"bash"` → `"Ba&sh"`, `"hm"` → `"H&M"`)
+3. **Substring/prefix match** — partial name matching (`"abercrombie"` → `"Abercrombie & Fitch"`)
+
+This handles misspellings, missing special characters, and partial brand names automatically.
+
+### Filter Sanitization
+
+V2 validates and corrects all LLM-generated filters server-side:
+
+**Category L1 validation:**
+- Only 5 valid values: `Tops`, `Bottoms`, `Dresses`, `Outerwear`, `Activewear`
+- Invalid values are remapped: `Jumpsuits` → L1=`Dresses` + L2=`Jumpsuit`, `Rompers` → L1=`Dresses` + L2=`Romper`
+- Unrecognized values (e.g., `Pajamas`, `Swimwear`, `Accessories`) are stripped
+
+**Color → color_family conversion:**
+- The `colors` field has ~19,800 granular values in the catalog — exact matching is unreliable
+- V2 converts planner color output to `color_family` (13 clean values) via a 70+ entry mapping
+- Examples: `"burgundy"` → `Reds`, `"navy"` → `Blues`, `"sage"` → `Greens`, `"beige"` → `Neutrals`
+- Clients should use `color_family` instead of `colors` for filtering
+
+**Garbage stripping:**
+- Values like `"not specified"`, `"N/A"`, `"null"`, `"none"`, `"unknown"` are removed from all filter fields
+
+### VAGUE Intent Optimization
+
+When the query intent is VAGUE (no category keywords, no specific brand — e.g., `"quiet luxury"`, `"cute going out fit"`), V2 skips the keyword search entirely and runs FAISS-only. This saves 700-1600ms because keyword search returns low-quality results for vague queries.
+
+Exception: VAGUE queries with an explicit brand filter still use keyword search (the brand scoping makes keyword results useful).
+
+### V2 Response: `v2_meta` Field
+
+V2 responses include an additional `v2_meta` object for observability:
+
+```jsonc
+{
+  // ... standard response fields ...
+
+  "v2_meta": {
+    "search_version": "v2",
+    "planner_source": "heuristic",          // "heuristic" | "llm"
+    "planner_provider": "groq",             // "groq" | "openai"
+    "planner_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "plan_cached": false,                   // true if LLM result was served from cache
+    "semantic_backend": "faiss",            // "faiss" | "pgvector"
+    "faiss_vectors_loaded": 129951,         // number of vectors in FAISS index
+    "cache_status": "miss",                 // "hit" | "miss" | "unknown"
+    "heuristic_plan": {                     // null if LLM was used
+      "intent": "exact",
+      "algolia_query": "boohoo",
+      "semantic_queries": ["boohoo clothing"],
+      "brand": "Boohoo",
+      "attributes": {},
+      "confidence": 0.95
+    }
+  }
+}
+```
+
+### V2 Latency Profile
+
+| Scenario | Page 1 | Page 2+ |
+|----------|--------|---------|
+| Heuristic bypass (brand/category) | ~300-800ms | 0ms |
+| VAGUE query (FAISS-only) | ~500ms-1.5s | 0ms |
+| SPECIFIC query (keyword + FAISS) | ~2-3s | 0ms |
+| EXACT query (keyword primary) | ~1-2s | 0ms |
+| Sorted (Algolia replica) | ~300ms | 0ms |
+
+---
+
+## GET `/api/search/v2/health`
+
+No authentication required.
+
+### Response
+
+```jsonc
+{
+  "status": "ok",
+  "version": "v2",
+  "planner_provider": "groq",
+  "planner_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+  "planner_enabled": true,
+  "heuristic_bypass": true
+}
+```
 
 ---
 

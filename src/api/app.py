@@ -47,6 +47,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning("FashionCLIP warmup failed (will lazy-load)", error=str(e))
 
+    # Load brand names from Algolia so the query planner prompt includes
+    # the full catalog brand list (needed for fuzzy brand matching).
+    try:
+        from search.query_classifier import load_brands
+        brands = load_brands()
+        logger.info("Brand list loaded for query planner", count=len(brands))
+    except Exception as e:
+        logger.warning("Brand loading failed (planner will lack brand list)", error=str(e))
+
     # Load local FAISS index for fast semantic search (if enabled)
     if settings.use_local_faiss:
         try:

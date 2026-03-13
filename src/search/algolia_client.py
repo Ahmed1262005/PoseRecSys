@@ -219,6 +219,8 @@ class AlgoliaClient:
         attributes_to_retrieve: Optional[List[str]] = None,
         facets: Optional[List[str]] = None,
         index_name: Optional[str] = None,
+        highlight_pre_tag: Optional[str] = None,
+        highlight_post_tag: Optional[str] = None,
     ) -> dict:
         """
         Search the index (or a replica).
@@ -260,6 +262,10 @@ class AlgoliaClient:
             params["attributesToRetrieve"] = attributes_to_retrieve
         if facets:
             params["facets"] = facets
+        if highlight_pre_tag is not None:
+            params["highlightPreTag"] = highlight_pre_tag
+        if highlight_post_tag is not None:
+            params["highlightPostTag"] = highlight_post_tag
 
         resp = self._client.search_single_index(
             index_name=index_name or self.index_name,
@@ -272,6 +278,8 @@ class AlgoliaClient:
         facet_name: str,
         facet_query: str,
         max_facet_hits: int = 10,
+        highlight_pre_tag: Optional[str] = None,
+        highlight_post_tag: Optional[str] = None,
     ) -> dict:
         """
         Search within facet values (e.g. brand autocomplete).
@@ -282,17 +290,25 @@ class AlgoliaClient:
             facet_name: Facet attribute name (e.g. 'brand').
             facet_query: Text to search within facet values.
             max_facet_hits: Maximum number of facet hits.
+            highlight_pre_tag: Override highlight opening tag (default: Algolia default).
+            highlight_post_tag: Override highlight closing tag (default: Algolia default).
 
         Returns:
             Dict with 'facetHits' list (each has value, highlighted, count).
         """
+        request_params: Dict[str, Any] = {
+            "facetQuery": facet_query,
+            "maxFacetHits": max_facet_hits,
+        }
+        if highlight_pre_tag is not None:
+            request_params["highlightPreTag"] = highlight_pre_tag
+        if highlight_post_tag is not None:
+            request_params["highlightPostTag"] = highlight_post_tag
+
         resp = self._client.search_for_facet_values(
             index_name=self.index_name,
             facet_name=facet_name,
-            search_for_facet_values_request={
-                "facetQuery": facet_query,
-                "maxFacetHits": max_facet_hits,
-            },
+            search_for_facet_values_request=request_params,
         )
         return resp.to_dict()
 

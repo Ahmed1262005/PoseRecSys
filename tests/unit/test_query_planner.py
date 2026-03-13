@@ -351,7 +351,9 @@ class TestPlanToRequestUpdates:
         updates, _, _, _, _, _, _, _ = planner.plan_to_request_updates(plan)
 
         assert "patterns" not in updates
-        assert "colors" in updates
+        # colors: ["Red"] is sanitized to color_family: ["Reds"]
+        assert "color_family" in updates
+        assert "Reds" in updates["color_family"]
 
     def test_typo_correction_in_attributes(self):
         """Typos in attribute keys should be corrected."""

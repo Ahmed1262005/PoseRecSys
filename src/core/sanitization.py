@@ -323,8 +323,9 @@ def _escape_dict_values(d: Dict[str, Any]) -> Dict[str, Any]:
 def escape_autocomplete_highlight(highlighted: Optional[str]) -> Optional[str]:
     """Sanitize Algolia highlight markup, allowing only <em> tags.
 
-    Algolia wraps matched terms in <em>...</em>. We preserve those but
-    strip any other HTML tags that might have been injected.
+    Algolia wraps matched terms in <em>...</em> or <mark>...</mark>
+    depending on the API version / configuration.  We normalise both
+    to <em> and strip every other HTML tag.
     """
     if highlighted is None:
         return None
@@ -332,7 +333,10 @@ def escape_autocomplete_highlight(highlighted: Optional[str]) -> Optional[str]:
     # First, HTML-escape everything
     escaped = html.escape(highlighted, quote=True)
 
-    # Then restore only <em> and </em> tags
+    # Restore <em> / </em>
     escaped = escaped.replace("&lt;em&gt;", "<em>").replace("&lt;/em&gt;", "</em>")
+
+    # Normalise <mark> / </mark> → <em> / </em>
+    escaped = escaped.replace("&lt;mark&gt;", "<em>").replace("&lt;/mark&gt;", "</em>")
 
     return escaped

@@ -9,7 +9,6 @@ import threading
 from typing import Optional
 
 from core.logging import get_logger
-from core.sanitization import escape_autocomplete_highlight, sanitize_url, strip_tags
 from search.algolia_client import AlgoliaClient, get_algolia_client
 from search.models import (
     AutocompleteResponse,
@@ -70,6 +69,8 @@ class AutocompleteService:
                 attributes_to_retrieve=[
                     "objectID", "name", "brand", "image_url", "price",
                 ],
+                highlight_pre_tag="<em>",
+                highlight_post_tag="</em>",
             )
 
             for hit in product_resp.get("hits", []):
@@ -80,11 +81,11 @@ class AutocompleteService:
                 )
                 products.append(AutocompleteProductSuggestion(
                     id=hit.get("objectID", ""),
-                    name=strip_tags(hit.get("name", "")) or "",
-                    brand=strip_tags(hit.get("brand", "")) or "",
-                    image_url=sanitize_url(hit.get("image_url")),
+                    name=hit.get("name", ""),
+                    brand=hit.get("brand", ""),
+                    image_url=hit.get("image_url"),
                     price=hit.get("price"),
-                    highlighted_name=escape_autocomplete_highlight(highlighted_name),
+                    highlighted_name=highlighted_name,
                 ))
         except Exception as e:
             logger.error("Autocomplete product search failed", error=str(e))
@@ -96,12 +97,14 @@ class AutocompleteService:
                 facet_name="brand",
                 facet_query=query,
                 max_facet_hits=brand_limit,
+                highlight_pre_tag="<em>",
+                highlight_post_tag="</em>",
             )
 
             for facet in brand_resp.get("facetHits", []):
                 brands.append(AutocompleteBrandSuggestion(
-                    name=strip_tags(facet.get("value", "")) or "",
-                    highlighted=escape_autocomplete_highlight(facet.get("highlighted")),
+                    name=facet.get("value", ""),
+                    highlighted=facet.get("highlighted"),
                 ))
         except Exception as e:
             logger.error("Autocomplete brand search failed", error=str(e))
@@ -109,7 +112,7 @@ class AutocompleteService:
         return AutocompleteResponse(
             products=products,
             brands=brands,
-            query=strip_tags(query) or "",
+            query=query,
         )
 
 

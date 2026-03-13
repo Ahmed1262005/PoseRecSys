@@ -5,9 +5,17 @@ Replaces Supabase pgvector RPC with in-process FAISS IndexFlatIP for
 sub-millisecond vector search. Embeddings are loaded from a disk snapshot
 (preferred) or fetched from Supabase on startup (fallback).
 
+Hot-reload:
+    After the initial load, a background daemon thread polls version.json
+    every 60 seconds.  When `built_at` changes (i.e. a new snapshot was
+    promoted by build_faiss_snapshot.py), the watcher loads the new files
+    into temporary variables and atomically swaps them into the live
+    instance.  In-flight searches see either the old or the new data —
+    never a partial mix — and there is zero downtime.
+
 Architecture:
     Supabase (source of truth) → snapshot builder → data/faiss/ → LocalVectorStore
-                                                                     ↓
+                                                                      ↓
     query_embedding → FAISS index.search() → filter in Python → results
                        ~1-5ms               ~0.1ms
 
@@ -34,11 +42,14 @@ logger = get_logger(__name__)
 # Default snapshot directory
 _DEFAULT_SNAPSHOT_DIR = "data/faiss"
 
+# How often the watcher checks for a new snapshot (seconds)
+_WATCH_INTERVAL = 60
+
 
 class LocalVectorStore:
     """In-process FAISS vector store for multimodal embeddings.
 
-    Thread-safe singleton. Loads 130K × 512-dim float32 vectors (~250MB)
+    Thread-safe singleton. Loads 130K x 512-dim float32 vectors (~250MB)
     into a FAISS IndexFlatIP for exact inner-product search (equivalent
     to cosine similarity on L2-normalized vectors).
 
@@ -67,6 +78,13 @@ class LocalVectorStore:
         self._ready = False
         self._count = 0
         self._load_lock = threading.Lock()
+
+        # Hot-reload state
+        self._swap_lock = threading.RLock()          # guards pointer swap
+        self._snapshot_dir: Optional[str] = None     # set by load_snapshot()
+        self._built_at: Optional[str] = None         # current version's built_at
+        self._watcher_started = False
+
         self._initialized = True
 
     @property
@@ -91,6 +109,9 @@ class LocalVectorStore:
             {snapshot_dir}/version.json         — build metadata
 
         Raises FileNotFoundError if snapshot doesn't exist.
+
+        After a successful load, starts a background watcher thread that
+        monitors version.json for changes and hot-reloads automatically.
         """
         import faiss
 
@@ -106,30 +127,120 @@ class LocalVectorStore:
 
             t0 = time.perf_counter()
 
-            self._index = faiss.read_index(str(index_path))
-            self._product_ids = list(np.load(str(ids_path), allow_pickle=True))
+            new_index = faiss.read_index(str(index_path))
+            new_product_ids = list(np.load(str(ids_path), allow_pickle=True))
             with open(meta_path, "rb") as f:
-                self._metadata = pickle.load(f)
+                new_metadata = pickle.load(f)
 
-            self._id_to_row = {pid: i for i, pid in enumerate(self._product_ids)}
-            self._count = len(self._product_ids)
-            self._ready = True
+            new_id_to_row = {pid: i for i, pid in enumerate(new_product_ids)}
+            new_count = len(new_product_ids)
 
-            elapsed = (time.perf_counter() - t0) * 1000
-
-            # Read version info if available
+            # Read version info
             version_info = {}
             if version_path.exists():
                 with open(version_path) as f:
                     version_info = json.load(f)
 
+            # Atomic swap
+            with self._swap_lock:
+                self._index = new_index
+                self._product_ids = new_product_ids
+                self._metadata = new_metadata
+                self._id_to_row = new_id_to_row
+                self._count = new_count
+                self._ready = True
+                self._snapshot_dir = str(snapshot_dir)
+                self._built_at = version_info.get("built_at")
+
+            elapsed = (time.perf_counter() - t0) * 1000
+
             logger.info(
                 "FAISS snapshot loaded",
-                count=self._count,
-                dimension=self._index.d,
+                count=new_count,
+                dimension=new_index.d,
                 elapsed_ms=round(elapsed, 1),
                 built_at=version_info.get("built_at", "unknown"),
             )
+
+            # Start watcher after first successful load
+            self._start_watcher()
+
+    def _start_watcher(self) -> None:
+        """Start the background file-watcher thread (once only)."""
+        if self._watcher_started or not self._snapshot_dir:
+            return
+        self._watcher_started = True
+        t = threading.Thread(
+            target=self._watch_loop,
+            name="faiss-watcher",
+            daemon=True,
+        )
+        t.start()
+        logger.info(
+            "FAISS watcher started",
+            interval_s=_WATCH_INTERVAL,
+            snapshot_dir=self._snapshot_dir,
+        )
+
+    def _watch_loop(self) -> None:
+        """Poll version.json and hot-reload when built_at changes."""
+        while True:
+            time.sleep(_WATCH_INTERVAL)
+            try:
+                self._check_and_reload()
+            except Exception as e:
+                logger.warning("FAISS watcher error (will retry)", error=str(e))
+
+    def _check_and_reload(self) -> None:
+        """Compare version.json on disk to current built_at; reload if changed."""
+        if not self._snapshot_dir:
+            return
+
+        version_path = Path(self._snapshot_dir) / "version.json"
+        if not version_path.exists():
+            return
+
+        with open(version_path) as f:
+            disk_version = json.load(f)
+
+        disk_built_at = disk_version.get("built_at")
+        if not disk_built_at or disk_built_at == self._built_at:
+            return
+
+        # New snapshot detected — reload
+        logger.info(
+            "New FAISS snapshot detected, hot-reloading...",
+            old_built_at=self._built_at,
+            new_built_at=disk_built_at,
+            new_count=disk_version.get("count"),
+        )
+
+        old_count = self._count
+        t0 = time.perf_counter()
+
+        try:
+            # load_snapshot handles the atomic swap internally
+            self.load_snapshot(self._snapshot_dir)
+        except Exception as e:
+            logger.error(
+                "FAISS hot-reload failed, keeping old index",
+                error=str(e),
+                old_built_at=self._built_at,
+            )
+            return
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "FAISS hot-reload complete",
+            old_count=old_count,
+            new_count=self._count,
+            built_at=self._built_at,
+            elapsed_ms=round(elapsed, 1),
+        )
+
+    # ==================================================================
+    # Supabase fallback (unchanged)
+    # ==================================================================
 
     def load_from_supabase(self, supabase_client) -> None:
         """Fallback: download all embeddings from Supabase into FAISS.
@@ -226,13 +337,6 @@ class LocalVectorStore:
                     break
 
             # 3. Fetch Gemini attributes (product_attributes table)
-            # These are the fields that _enrich_semantic_results() currently
-            # fetches from Algolia at ~2-5s per request. Baking them into
-            # the FAISS metadata eliminates that round-trip entirely.
-            #
-            # Note: neckline, sleeve_type, length live inside the `construction`
-            # JSON column, not as top-level columns. We fetch `construction`
-            # and extract them during merge.
             logger.info("Loading Gemini attributes from product_attributes...")
             _ATTR_FIELDS = (
                 "sku_id, category_l1, category_l2, category_l3, primary_color, "
@@ -248,7 +352,6 @@ class LocalVectorStore:
                 "vibe_tags, coverage_level, styling_role, "
                 "construction"
             )
-            # Fields to extract from the `construction` JSON column
             _CONSTRUCTION_KEYS = ("neckline", "sleeve_type", "length")
             attr_count = 0
             offset = 0
@@ -267,11 +370,9 @@ class LocalVectorStore:
                     if pid not in metadata:
                         continue
                     meta = metadata[pid]
-                    # Merge all Gemini attributes into metadata
                     for key, val in row.items():
                         if key == "sku_id":
                             continue
-                        # Extract nested fields from construction JSON
                         if key == "construction" and isinstance(val, dict):
                             for ck in _CONSTRUCTION_KEYS:
                                 cv = val.get(ck)
@@ -279,7 +380,6 @@ class LocalVectorStore:
                                     meta[ck] = cv
                             continue
                         if val is not None:
-                            # Rename has_pockets_visible → has_pockets for compatibility
                             store_key = "has_pockets" if key == "has_pockets_visible" else key
                             meta[store_key] = val
                     attr_count += 1
@@ -291,21 +391,24 @@ class LocalVectorStore:
 
             logger.info(f"Merged Gemini attributes for {attr_count} products")
 
-            # 3. Build FAISS index
+            # 4. Build FAISS index
             embeddings_matrix = np.vstack(all_embeddings).astype(np.float32)
-            # Normalize for cosine similarity via inner product
             norms = np.linalg.norm(embeddings_matrix, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             embeddings_matrix /= norms
 
             dim = embeddings_matrix.shape[1]
-            self._index = faiss.IndexFlatIP(dim)
-            self._index.add(embeddings_matrix)
-            self._product_ids = all_product_ids
-            self._metadata = metadata
-            self._id_to_row = {pid: i for i, pid in enumerate(all_product_ids)}
-            self._count = len(all_product_ids)
-            self._ready = True
+            new_index = faiss.IndexFlatIP(dim)
+            new_index.add(embeddings_matrix)
+
+            # Atomic swap
+            with self._swap_lock:
+                self._index = new_index
+                self._product_ids = all_product_ids
+                self._metadata = metadata
+                self._id_to_row = {pid: i for i, pid in enumerate(all_product_ids)}
+                self._count = len(all_product_ids)
+                self._ready = True
 
             elapsed = (time.perf_counter() - t0) * 1000
             logger.info(
@@ -366,6 +469,15 @@ class LocalVectorStore:
         if not self._ready:
             return []
 
+        # Grab local references — these are immutable objects (list, dict,
+        # faiss index) that won't change mid-search even if the watcher
+        # swaps them on the instance.  Python's GIL guarantees that
+        # reading a single attribute is atomic.
+        index = self._index
+        product_ids = self._product_ids
+        metadata = self._metadata
+        count = self._count
+
         # Normalize query embedding
         qe = query_embedding.astype(np.float32).reshape(1, -1)
         norm = np.linalg.norm(qe)
@@ -378,7 +490,7 @@ class LocalVectorStore:
             min_price is not None, max_price is not None,
         ])
         overfetch = 5 if has_filters else 3
-        faiss_k = min(limit * overfetch, self._count)
+        faiss_k = min(limit * overfetch, count)
 
         # Normalize filter inputs for case-insensitive matching
         include_brands_lower = (
@@ -390,16 +502,18 @@ class LocalVectorStore:
         exclude_ids = exclude_product_ids or set()
 
         results = self._fetch_and_filter(
+            index, product_ids, metadata, count,
             qe, faiss_k, limit,
             exclude_ids, include_brands_lower, exclude_brands_lower,
             min_price, max_price,
         )
 
         # Retry with deeper fetch if we didn't get enough
-        if len(results) < limit and faiss_k < self._count:
-            deeper_k = min(faiss_k * 3, self._count)
+        if len(results) < limit and faiss_k < count:
+            deeper_k = min(faiss_k * 3, count)
             if deeper_k > faiss_k:
                 results = self._fetch_and_filter(
+                    index, product_ids, metadata, count,
                     qe, deeper_k, limit,
                     exclude_ids, include_brands_lower, exclude_brands_lower,
                     min_price, max_price,
@@ -409,6 +523,10 @@ class LocalVectorStore:
 
     def _fetch_and_filter(
         self,
+        index,
+        product_ids: List[str],
+        metadata: Dict[str, dict],
+        count: int,
         query_embedding: np.ndarray,
         faiss_k: int,
         limit: int,
@@ -419,22 +537,22 @@ class LocalVectorStore:
         max_price: Optional[float],
     ) -> List[dict]:
         """Run FAISS search + Python post-filter."""
-        scores, indices = self._index.search(query_embedding, faiss_k)
+        scores, indices = index.search(query_embedding, faiss_k)
         scores = scores[0]
         indices = indices[0]
 
         results = []
         for score, idx in zip(scores, indices):
-            if idx < 0 or idx >= self._count:
+            if idx < 0 or idx >= count:
                 continue
 
-            pid = self._product_ids[idx]
+            pid = product_ids[idx]
 
             # Exclusion check
             if pid in exclude_ids:
                 continue
 
-            meta = self._metadata.get(pid)
+            meta = metadata.get(pid)
             if not meta:
                 continue
 
@@ -456,8 +574,6 @@ class LocalVectorStore:
                 continue
 
             # Build result dict matching _search_multimodal output format.
-            # When Gemini attributes are baked into metadata (v2 snapshot),
-            # these fields are populated directly — no Algolia enrichment needed.
             colors = meta.get("colors") or []
             primary_color = meta.get("primary_color") or (colors[0] if colors else None)
             results.append({

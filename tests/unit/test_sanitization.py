@@ -430,3 +430,23 @@ class TestEscapeAutocompleteHighlight:
         result = escape_autocomplete_highlight("<em>Ba</em>&sh")
         assert "<em>Ba</em>" in result
         assert "&amp;sh" in result
+
+    def test_mark_tags_converted_to_em(self):
+        """Algolia <mark> highlight tags should be normalised to <em>."""
+        result = escape_autocomplete_highlight("<mark>Black</mark> Midi Dress")
+        assert result == "<em>Black</em> Midi Dress"
+
+    def test_mark_tags_with_other_html_stripped(self):
+        """<mark> tags are normalised; other HTML is still escaped."""
+        result = escape_autocomplete_highlight(
+            '<mark>Black</mark> <script>alert(1)</script> Dress'
+        )
+        assert "<em>Black</em>" in result
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+
+    def test_mark_brand_ampersand(self):
+        """<mark> around brand with & should work like <em>."""
+        result = escape_autocomplete_highlight("<mark>Ba</mark>&sh")
+        assert "<em>Ba</em>" in result
+        assert "&amp;sh" in result

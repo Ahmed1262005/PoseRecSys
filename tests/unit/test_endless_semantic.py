@@ -645,14 +645,36 @@ class TestEndlessSemanticPage:
 # =============================================================================
 
 class TestServeCachedPageRouting:
-    """Tests that _serve_cached_page routes exact to _extend_search, others to _endless_semantic_page."""
+    """Tests that _serve_cached_page serves slices from the canonical ranked pool.
 
-    def test_exact_routes_to_extend_search(self, hybrid_service):
-        """EXACT intent goes through _extend_search (unchanged)."""
+    After the pool-based pagination refactor, _serve_cached_page is a simple
+    pool slicer — it does NOT dispatch to _extend_search or
+    _endless_semantic_page (those are deprecated).  All intents use the same
+    path: slice from ranked_pool.
+    """
+
+    def _make_pool_products(self, n: int, prefix: str = "prod") -> List[dict]:
+        """Create n minimal product dicts for the ranked pool."""
+        return [
+            {
+                "product_id": f"{prefix}_{i}",
+                "name": f"Product {i}",
+                "brand": "TestBrand",
+                "image_url": f"https://img.example.com/{prefix}_{i}.jpg",
+                "price": 10.0 + i,
+            }
+            for i in range(n)
+        ]
+
+    def test_exact_serves_pool_slice(self, hybrid_service):
+        """EXACT intent page 2+ serves from the ranked pool (no _extend_search)."""
         from search.session_cache import SearchSessionCache, encode_cursor
-        from search.models import HybridSearchRequest
 
-        entry = _make_entry(intent="exact", query="tops")
+        pool = self._make_pool_products(20, "exact")
+        entry = _make_entry(
+            intent="exact", query="Boohoo", page_size=5,
+            ranked_pool=pool, pool_cursor=5,
+        )
         cache = SearchSessionCache.get_instance()
         cache.store(entry)
 
@@ -661,22 +683,28 @@ class TestServeCachedPageRouting:
         request.search_session_id = entry.session_id
         request.cursor = cursor
 
-        with patch.object(hybrid_service, "_extend_search", return_value="extend_result") as mock_extend:
-            with patch.object(hybrid_service, "_endless_semantic_page") as mock_endless:
-                result = hybrid_service._serve_cached_page(request)
+        result = hybrid_service._serve_cached_page(request)
 
-        assert mock_extend.call_count == 1
-        assert mock_endless.call_count == 0
-        assert result == "extend_result"
+        assert result is not None
+        assert len(result.results) == 5
+        # Should be items 5-9 (second page)
+        assert result.results[0].product_id == "exact_5"
+        assert result.results[4].product_id == "exact_9"
+        assert result.pagination.has_more is True
+        # Neither deprecated method should be called
+        assert not hasattr(result, "_extend_search_called")
 
-        # Cleanup
         cache.delete(entry.session_id)
 
-    def test_specific_routes_to_endless(self, hybrid_service):
-        """SPECIFIC intent goes through _endless_semantic_page."""
+    def test_specific_serves_pool_slice(self, hybrid_service):
+        """SPECIFIC intent page 2+ serves from the ranked pool (no _endless_semantic_page)."""
         from search.session_cache import SearchSessionCache, encode_cursor
 
-        entry = _make_entry(intent="specific", query="black midi dress")
+        pool = self._make_pool_products(15, "spec")
+        entry = _make_entry(
+            intent="specific", query="black midi dress", page_size=5,
+            ranked_pool=pool, pool_cursor=5,
+        )
         cache = SearchSessionCache.get_instance()
         cache.store(entry)
 
@@ -685,21 +713,24 @@ class TestServeCachedPageRouting:
         request.search_session_id = entry.session_id
         request.cursor = cursor
 
-        with patch.object(hybrid_service, "_extend_search") as mock_extend:
-            with patch.object(hybrid_service, "_endless_semantic_page", return_value="endless_result") as mock_endless:
-                result = hybrid_service._serve_cached_page(request)
+        result = hybrid_service._serve_cached_page(request)
 
-        assert mock_extend.call_count == 0
-        assert mock_endless.call_count == 1
-        assert result == "endless_result"
+        assert result is not None
+        assert len(result.results) == 5
+        assert result.results[0].product_id == "spec_5"
+        assert result.pagination.has_more is True
 
         cache.delete(entry.session_id)
 
-    def test_vague_routes_to_endless(self, hybrid_service):
-        """VAGUE intent goes through _endless_semantic_page."""
+    def test_vague_serves_pool_slice(self, hybrid_service):
+        """VAGUE intent page 2+ serves from the ranked pool."""
         from search.session_cache import SearchSessionCache, encode_cursor
 
-        entry = _make_entry(intent="vague", query="summer vibes")
+        pool = self._make_pool_products(12, "vague")
+        entry = _make_entry(
+            intent="vague", query="summer vibes", page_size=5,
+            ranked_pool=pool, pool_cursor=5,
+        )
         cache = SearchSessionCache.get_instance()
         cache.store(entry)
 
@@ -708,12 +739,38 @@ class TestServeCachedPageRouting:
         request.search_session_id = entry.session_id
         request.cursor = cursor
 
-        with patch.object(hybrid_service, "_extend_search") as mock_extend:
-            with patch.object(hybrid_service, "_endless_semantic_page", return_value="endless_result") as mock_endless:
-                result = hybrid_service._serve_cached_page(request)
+        result = hybrid_service._serve_cached_page(request)
 
-        assert mock_extend.call_count == 0
-        assert mock_endless.call_count == 1
+        assert result is not None
+        assert len(result.results) == 5
+        assert result.results[0].product_id == "vague_5"
+        # 12 items, cursor was at 5, served 5 more → cursor at 10, 2 remaining
+        assert result.pagination.has_more is True
+
+        cache.delete(entry.session_id)
+
+    def test_pool_exhaustion(self, hybrid_service):
+        """When pool is exhausted, returns empty results with has_more=False."""
+        from search.session_cache import SearchSessionCache, encode_cursor
+
+        pool = self._make_pool_products(8, "exhaust")
+        entry = _make_entry(
+            intent="specific", query="red dress", page_size=5,
+            ranked_pool=pool, pool_cursor=8,  # already at end
+        )
+        cache = SearchSessionCache.get_instance()
+        cache.store(entry)
+
+        cursor = encode_cursor(page=3)
+        request = MagicMock()
+        request.search_session_id = entry.session_id
+        request.cursor = cursor
+
+        result = hybrid_service._serve_cached_page(request)
+
+        assert result is not None
+        assert len(result.results) == 0
+        assert result.pagination.has_more is False
 
         cache.delete(entry.session_id)
 

@@ -1,23 +1,22 @@
 """
-Search session cache for "extend search" pagination.
-
-Instead of caching stale results, caches the *plan state* from page 1:
-- LLM planner outputs (intent, filters, algolia_query, semantic queries)
-- Pre-computed FashionCLIP embeddings (numpy arrays)
-- Algolia filter strings, RRF weights, reranker config
-- Seen product IDs (grows each page)
-
-Page 2+ reuses the cached plan to extend the search:
-- Algolia: native page=N pagination (same query/filters)
-- Semantic: reuse cached embeddings + exclude seen IDs → fresh pgvector results
-- RRF merge + rerank on fresh candidates
-
-This gives ~2-3s page 2+ instead of 12-15s (re-running full pipeline).
+Search session cache for canonical pool-based pagination.
 
 Architecture:
-- Thread-safe in-memory dict (production: swap for Redis).
-- 10-minute TTL per session.
-- Background cleanup every 2 minutes.
+- Page 1 builds a deep ranked pool (200-350 items) via the full hybrid
+  pipeline (planner → Algolia → semantic → RRF → rerank).
+- The pool is stored as an ordered list of product dicts.
+- Pages 2+ serve slices from the pool — no retrieval, no reranking.
+- Sorted queries (price/trending) build the pool from an Algolia
+  virtual replica, so global sort order is preserved natively.
+
+Session state:
+- ranked_pool: ordered product dicts, ready to serve
+- pool_cursor: index of next unserved item (advances each page)
+- session_mode: "relevance" or "sorted"
+- Metadata from page 1: facets, follow-ups, applied_filters, etc.
+
+Thread-safe in-memory dict (production: swap for Redis).
+30-minute TTL per session. Background cleanup every 2 minutes.
 """
 
 from __future__ import annotations
@@ -67,57 +66,78 @@ def decode_cursor(cursor: str) -> dict:
 
 @dataclass
 class SearchSessionEntry:
-    """Cached plan state from page 1 for extend-search pagination."""
+    """Cached session state for canonical pool-based pagination.
+
+    Page 1 builds the ranked_pool via the full pipeline (or Algolia
+    replica for sorted mode).  Pages 2+ serve slices from the pool.
+    """
 
     session_id: str
     query: str
     intent: str                         # "exact" / "specific" / "vague"
     sort_by: str
 
-    # Algolia state (for native pagination)
-    algolia_query: str = ""
-    algolia_filters: str = ""
-    algolia_optional_filters: Optional[List[str]] = None
+    # ── Canonical ranked pool ──────────────────────────────────────
+    # Ordered list of product dicts, ready to serve.  Built once on
+    # page 1, never mutated.  Pages are slices of this list.
+    ranked_pool: List[dict] = field(default_factory=list)
+    pool_cursor: int = 0                # index of next unserved item
+    session_mode: str = "relevance"     # "relevance" | "sorted"
 
-    # Semantic state (for extend search with exclude_ids)
-    semantic_queries: Optional[List[str]] = None
-    semantic_embeddings: Optional[List[np.ndarray]] = None  # pre-computed
-    semantic_request_updates: Optional[Dict[str, Any]] = None  # relaxed filter overrides
-
-    # RRF weights
-    algolia_weight: float = 0.5
-    semantic_weight: float = 0.5
-
-    # Reranker config carried from page 1
-    rerank_kwargs: Optional[Dict[str, Any]] = None
-
-    # Pagination tracking
+    # ── Pagination ─────────────────────────────────────────────────
     seen_product_ids: Set[str] = field(default_factory=set)
-    algolia_page: int = 0               # last Algolia page fetched (0-indexed, page 1 uses 0)
     page_size: int = 50
-    fetch_size: int = 150               # per-source fetch size
 
-    # Response metadata from page 1 (returned on all pages)
+    # ── Response metadata from page 1 (returned on all pages) ─────
     facets: Optional[Dict[str, Any]] = None
     follow_ups: Optional[List[Any]] = None
     applied_filters: Optional[Dict[str, Any]] = None
     answered_dimensions: Optional[List[str]] = None
 
-    # Algolia catalog count (nbHits) — surfaced as total_results on all pages
+    # Algolia catalog count (nbHits) — surfaced as total_results
     algolia_total_hits: int = 0
 
-    # Post-filter criteria for endless semantic search (page 2+).
-    # Structural filters from the planner that semantic results must satisfy.
+    # ── Legacy / diagnostics (kept for refill & debugging) ────────
+    algolia_query: str = ""
+    algolia_filters: str = ""
+    algolia_optional_filters: Optional[List[str]] = None
+    semantic_queries: Optional[List[str]] = None
+    semantic_embeddings: Optional[List[np.ndarray]] = None
+    semantic_request_updates: Optional[Dict[str, Any]] = None
+    algolia_weight: float = 0.5
+    semantic_weight: float = 0.5
+    rerank_kwargs: Optional[Dict[str, Any]] = None
+    algolia_page: int = 0
+    fetch_size: int = 150
     post_filter_criteria: Optional[Dict[str, Any]] = None
-
-    # Flags
-    skip_algolia: bool = False          # empty query + no brand filter
-    use_attribute_search: bool = False  # attribute-filtered semantic path
-
-    # Attribute search state (if applicable)
-    attribute_filters: Optional[Any] = None  # AttributeFilters object
+    skip_algolia: bool = False
+    use_attribute_search: bool = False
+    attribute_filters: Optional[Any] = None
 
     created_at: float = field(default_factory=time.time)
+
+    # ── Pool helpers ───────────────────────────────────────────────
+
+    def next_page_slice(self, size: Optional[int] = None) -> List[dict]:
+        """Return the next *size* items from the pool and advance cursor."""
+        n = size or self.page_size
+        start = self.pool_cursor
+        end = start + n
+        page = self.ranked_pool[start:end]
+        self.pool_cursor = end
+        return page
+
+    @property
+    def pool_has_more(self) -> bool:
+        return self.pool_cursor < len(self.ranked_pool)
+
+    @property
+    def pool_remaining(self) -> int:
+        return max(0, len(self.ranked_pool) - self.pool_cursor)
+
+    @property
+    def pool_depth(self) -> int:
+        return len(self.ranked_pool)
 
     def add_seen_ids(self, product_ids: List[str]) -> None:
         """Add product IDs to the seen set."""
@@ -175,12 +195,13 @@ class SearchSessionCache:
             self._store[entry.session_id] = entry
             self._maybe_cleanup()
         logger.info(
-            "Cached search session (plan state)",
+            "Cached search session",
             session_id=entry.session_id,
             intent=entry.intent,
+            mode=entry.session_mode,
+            pool_depth=entry.pool_depth,
+            pool_cursor=entry.pool_cursor,
             seen_ids=len(entry.seen_product_ids),
-            has_embeddings=entry.semantic_embeddings is not None,
-            semantic_queries=len(entry.semantic_queries or []),
         )
 
     def get(self, session_id: str) -> Optional[SearchSessionEntry]:

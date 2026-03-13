@@ -5,6 +5,10 @@ Build FAISS snapshot from Supabase.
 Downloads all multimodal embeddings + product metadata + Gemini attributes
 from Supabase, builds a FAISS IndexFlatIP, and saves to data/faiss/.
 
+The build is atomic: writes to a staging directory first, validates the
+output, then swaps staging → live in a single rename.  The running server
+detects the new version.json timestamp and hot-reloads automatically.
+
 Usage:
     PYTHONPATH=src python scripts/build_faiss_snapshot.py
 
@@ -13,11 +17,17 @@ Output:
     data/faiss/product_ids.npy   — row→product_id mapping
     data/faiss/metadata.pkl      — product metadata dict
     data/faiss/version.json      — build metadata
+
+Scheduling (cron, every 6 hours):
+    0 */6 * * * cd /mnt/d/ecommerce/recommendationSystem && \\
+        PYTHONPATH=src .venv/bin/python scripts/build_faiss_snapshot.py \\
+        >> /var/log/faiss_rebuild.log 2>&1
 """
 
 import json
 import os
 import pickle
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -28,10 +38,14 @@ load_dotenv()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-SNAPSHOT_DIR = "data/faiss"
+LIVE_DIR = "data/faiss"
+STAGING_DIR = "data/faiss_staging"
+OLD_DIR = "data/faiss_old"
+
 BATCH_SIZE = 500          # smaller batches for reliability over slow links
 MAX_RETRIES = 3
 RETRY_DELAY = 5           # seconds
+MIN_VECTORS = 50_000      # safety: abort if fewer vectors than this
 
 
 def _create_client():
@@ -202,8 +216,11 @@ def fetch_gemini_attributes(client, metadata):
     return metadata
 
 
-def build_and_save(all_embeddings, all_product_ids, metadata):
-    """Build FAISS index and save snapshot."""
+def build_to_staging(all_embeddings, all_product_ids, metadata):
+    """Build FAISS index and write to the staging directory.
+
+    Returns the version dict on success, or raises on failure.
+    """
     import faiss
 
     print("Step 4/4: Building FAISS index...")
@@ -217,46 +234,131 @@ def build_and_save(all_embeddings, all_product_ids, metadata):
     index = faiss.IndexFlatIP(dim)
     index.add(embeddings_matrix)
 
-    p = Path(SNAPSHOT_DIR)
-    p.mkdir(parents=True, exist_ok=True)
+    # Write to staging dir (not live)
+    p = Path(STAGING_DIR)
+    if p.exists():
+        shutil.rmtree(p)
+    p.mkdir(parents=True)
 
     faiss.write_index(index, str(p / "index.faiss"))
     np.save(str(p / "product_ids.npy"), np.array(all_product_ids, dtype=object))
     with open(p / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(p / "version.json", "w") as f:
-        json.dump({
-            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "count": len(all_product_ids),
-            "embedding_version": 1,
-            "dimension": dim,
-            "has_gemini_attributes": True,
-        }, f, indent=2)
 
-    print(f"  Index: {len(all_product_ids):,} vectors, {dim}-dim")
+    version = {
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "count": len(all_product_ids),
+        "embedding_version": 1,
+        "dimension": dim,
+        "has_gemini_attributes": True,
+    }
+    with open(p / "version.json", "w") as f:
+        json.dump(version, f, indent=2)
+
+    print(f"  Staging: {len(all_product_ids):,} vectors, {dim}-dim → {STAGING_DIR}/")
+    return version
+
+
+def validate_staging(version):
+    """Sanity-check the staging snapshot before promoting to live.
+
+    Returns True if valid, False otherwise.
+    """
+    p = Path(STAGING_DIR)
+    required = ["index.faiss", "product_ids.npy", "metadata.pkl", "version.json"]
+
+    for fname in required:
+        fpath = p / fname
+        if not fpath.exists():
+            print(f"  VALIDATION FAILED: missing {fpath}")
+            return False
+        if fpath.stat().st_size == 0:
+            print(f"  VALIDATION FAILED: empty file {fpath}")
+            return False
+
+    count = version.get("count", 0)
+    dim = version.get("dimension", 0)
+
+    if count < MIN_VECTORS:
+        print(f"  VALIDATION FAILED: only {count:,} vectors (minimum: {MIN_VECTORS:,})")
+        return False
+
+    if dim != 512:
+        print(f"  VALIDATION FAILED: dimension={dim} (expected 512)")
+        return False
+
+    print(f"  Validation passed: {count:,} vectors, {dim}-dim")
+    return True
+
+
+def promote_staging():
+    """Atomically swap staging → live.
+
+    1. Rename live → old  (if live exists)
+    2. Rename staging → live
+    3. Delete old
+    """
+    live = Path(LIVE_DIR)
+    staging = Path(STAGING_DIR)
+    old = Path(OLD_DIR)
+
+    # Clean up any leftover old dir from a previous run
+    if old.exists():
+        shutil.rmtree(old)
+
+    # Move current live aside
+    if live.exists():
+        live.rename(old)
+
+    # Promote staging to live
+    staging.rename(live)
+
+    # Clean up old
+    if old.exists():
+        shutil.rmtree(old)
+
+    print(f"  Promoted: {STAGING_DIR}/ → {LIVE_DIR}/")
 
 
 def main():
-    print("Building FAISS snapshot from Supabase...")
-    print(f"  Supabase URL: {os.environ.get('SUPABASE_URL', 'NOT SET')[:50]}...")
+    print("=" * 60)
+    print("FAISS Snapshot Build")
+    print(f"  Time:       {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+    print(f"  Supabase:   {os.environ.get('SUPABASE_URL', 'NOT SET')[:50]}...")
     print(f"  Batch size: {BATCH_SIZE}, retries: {MAX_RETRIES}")
+    print(f"  Staging:    {STAGING_DIR}/")
+    print(f"  Live:       {LIVE_DIR}/")
+    print("=" * 60)
     print()
 
     t0 = time.perf_counter()
     client = _create_client()
 
+    # ---- Fetch data from Supabase ----
     all_embeddings, all_product_ids = fetch_embeddings(client)
     if not all_embeddings:
-        print("No embeddings found. Aborting.")
+        print("ERROR: No embeddings found. Aborting.")
         sys.exit(1)
 
     metadata = fetch_product_metadata(client)
     metadata = fetch_gemini_attributes(client, metadata)
 
-    build_and_save(all_embeddings, all_product_ids, metadata)
+    # ---- Build to staging ----
+    version = build_to_staging(all_embeddings, all_product_ids, metadata)
+
+    # ---- Validate ----
+    if not validate_staging(version):
+        print("\nABORTED: Validation failed. Live index untouched.")
+        # Leave staging dir for debugging
+        sys.exit(1)
+
+    # ---- Atomic swap: staging → live ----
+    promote_staging()
 
     elapsed = time.perf_counter() - t0
-    print(f"\nDone! Snapshot saved to {SNAPSHOT_DIR}/ in {elapsed:.1f}s")
+    print(f"\nDone in {elapsed:.1f}s")
+    print(f"  Vectors: {version['count']:,}")
+    print(f"  Built at: {version['built_at']}")
 
     # Quick verification
     sample_pid = all_product_ids[0]
@@ -268,6 +370,8 @@ def main():
               f"neckline={meta.get('neckline')}, "
               f"sleeve_type={meta.get('sleeve_type')}, "
               f"formality={meta.get('formality')}")
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
