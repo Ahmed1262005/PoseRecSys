@@ -1066,8 +1066,8 @@ class TestVibeBrand:
         assert "vibe_brand" in prompt
         assert "Brand-as-Vibe Queries" in prompt
         assert "like X" in prompt.lower() or '"like X"' in prompt
-        assert "Style cluster landscape" in prompt
-        assert "Massimo Dutti" in prompt  # example in tier landscape
+        assert "Style tiers" in prompt
+        assert "VALUE" in prompt and "PREMIUM" in prompt  # tier landscape present
 
 
 class TestVibeBrandFilters:

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.logging import get_logger
+from core.sanitization import sanitize_query, sanitize_filter_values, sanitize_labels
 from config.settings import get_settings
 from search.models import QueryIntent, FollowUpQuestion, FollowUpOption
 from search.mode_config import expand_modes, get_mode_menu_text
@@ -187,18 +188,13 @@ def _build_system_prompt() -> str:
 
 ## SECTION 1: FASHION REASONING PRINCIPLES
 
-1. **Coverage depends on the body part.** There are two kinds of coverage:
-   - **Skin coverage** (arms, chest, back, legs, stomach, shoulders): Needs opaque fabric.
-     Sheer/mesh/lace don't count — you can SEE THROUGH them, so the body part is NOT covered.
-     A lace-sleeve top does NOT hide arms. A mesh panel does NOT cover the back.
-     A mesh dress does NOT cover shoulders. If the user says "covers [body part]", they mean
-     you cannot see skin through the fabric.
-     For these, use cover_arms/cover_chest/cover_back/cover_legs/cover_stomach + opaque modes.
-     "Covers shoulders" = skin coverage = cover_straps + opaque modes.
-   - **Strap/structural coverage** (bra straps only): About garment STRUCTURE, not fabric.
-     A chiffon blouse with high neckline and cap+ sleeves DOES hide bra straps.
-     ONLY use cover_straps WITHOUT opaque for "hides bra straps" / "doesn't show bra straps".
-   USE MODES for coverage requests — do NOT manually list exclusion values.
+1. **Coverage depends on the body part.** Two kinds:
+   - **Skin coverage** (arms, chest, back, legs, stomach, shoulders): Needs OPAQUE fabric.
+     Sheer/mesh/lace do NOT count as coverage. Use cover_arms/cover_chest/cover_back/etc. + opaque modes.
+     "Covers shoulders" = cover_straps + opaque.
+   - **Strap coverage** (bra straps only): About garment STRUCTURE, not fabric.
+     Use cover_straps WITHOUT opaque for "hides bra straps".
+   USE MODES for coverage — do NOT manually list exclusion values.
 
 2. **Vibe language maps to modes + formality.** Users describe what they want with mood words.
    Pick the appropriate occasion/aesthetic/formality MODE rather than manually listing values:
@@ -235,35 +231,17 @@ def _build_system_prompt() -> str:
    - When in doubt, default to category_l1: ["Tops", "Dresses"]. Never leave category_l1 empty
      for vague queries — bottoms will pollute the results.
 
-5. **Think critically about the occasion.** When a query mentions a specific occasion, apply
-   real-world fashion knowledge about what is APPROPRIATE for that event:
+5. **Think critically about the occasion.** Apply real-world fashion knowledge:
 
-   **Garment type defaults by occasion** — override the generic "Tops, Dresses" default:
-   - Wedding / wedding guest / gala / cocktail party / formal event → category_l1: ["Dresses"] ONLY.
-     These are dress-first occasions. Nobody searches "wedding outfit" expecting tank tops.
-     Only include Tops/Outerwear if the user explicitly asks ("top for a wedding", "jacket for a gala").
-   - Date night / dinner / evening out → category_l1: ["Dresses"] ONLY (same reasoning).
-   - Job interview / business meeting → category_l1: ["Tops", "Dresses", "Bottoms"].
-     Separates (blouse + pants) are equally appropriate as a dress.
-   - Brunch / casual outing / vacation → category_l1: ["Tops", "Dresses"] (the default is fine).
+   **Category by occasion** (override default "Tops, Dresses"):
+   - Wedding/gala/cocktail/formal/date night/dinner → ["Dresses"] ONLY (unless user asks for separates)
+   - Job interview/business → ["Tops", "Dresses", "Bottoms"]
+   - Brunch/casual/vacation → ["Tops", "Dresses"] (default)
 
-   **Color/style etiquette by occasion** — add to avoid{{}} when socially appropriate:
-   - Wedding guest → avoid: {{"colors": ["White", "Ivory", "Cream"]}}.
-     White is reserved for the bride. This is a strong cultural norm.
-   - Funeral / memorial → avoid: {{"colors": ["Red", "Hot Pink", "Neon"]}}.
-     Bright/loud colors are inappropriate. Prefer dark, muted tones.
-   - Job interview → avoid: {{"style_tags": ["Sexy", "Glamorous", "Edgy"]}}.
-     Keep it professional and understated.
+   **Color etiquette** — add to avoid{{}}:
+   - Wedding guest → avoid white/ivory/cream. Funeral → avoid bright colors. Interview → avoid sexy/edgy.
 
-   **Formality calibration** — match the event's expected dress code:
-   - Wedding / gala → formal or semi-formal mode. NOT smart_casual (too casual).
-   - Cocktail party → semi-formal or glamorous mode.
-   - Date night → smart_casual or glamorous (depends on vibe).
-   - Office → work mode. NOT casual.
-
-   The key insight: when someone searches an occasion, they want APPROPRIATE results for that
-   specific event. Generic "Tops + Dresses" with no color avoids is lazy. Apply your fashion
-   knowledge to every occasion query.
+   **Formality**: Wedding/gala → formal mode. Cocktail → semi-formal/glamorous. Date → smart_casual. Office → work.
 
 6. **When the user requests a specific attribute value, also avoid the contradicting values.**
    Requesting "long sleeves" means they do NOT want sleeveless, short, cap, or spaghetti strap results.
@@ -303,30 +281,15 @@ def _build_system_prompt() -> str:
     - If the user says "no slit", put "closed hemline" in semantic_query (see Principle 8) — do NOT
       add "no slit" to detail_terms (detail_terms is for POSITIVE features to verify, not negations)
 
-8. **semantic_query must be POSITIVE descriptions only — NEVER use negation.**
-   FashionCLIP is a vision-language embedding model. It does NOT understand negation.
-   "not backless" encodes close to "backless" and PULLS IN backless items.
-   "not sheer" encodes close to "sheer" and PULLS IN sheer items.
-   ALWAYS rephrase negatives as positive descriptions of what the user DOES want:
-   - BAD: "not backless, not open-back" → GOOD: "closed back, full back coverage"
-   - BAD: "not sheer, not see-through" → GOOD: "opaque solid fabric"
-   - BAD: "not sleeveless" → GOOD: "with long sleeves"
-   - BAD: "no slit" → GOOD: "closed hemline"
-   - BAD: "not tight or clingy" → GOOD: "relaxed loose drape"
-   - BAD: "without cutouts" → GOOD: "solid continuous fabric"
-   Negation is handled by exclusion filters and modes — the semantic_query's ONLY job is to
-   describe the positive visual appearance that FashionCLIP should match.
+8. **semantic_query must be POSITIVE only — NEVER use negation.**
+   FashionCLIP encodes "not backless" close to "backless" and PULLS IN wrong items.
+   Rephrase: "not backless"→"closed back", "not sheer"→"opaque fabric", "not sleeveless"→"long sleeves",
+   "no slit"→"closed hemline", "not tight"→"relaxed drape", "no cutouts"→"solid fabric".
+   Negation is handled by avoid filters and modes, NOT by the semantic query.
 
-9. **We sell CLOTHING, not underwear.** This is a women's fashion clothing store.
-   We do NOT sell intimates, underwear, bras, lingerie, or shapewear.
-   When a user mentions undergarments, they are ALWAYS talking about clothing that
-   HIDES or works well OVER those undergarments:
-   - "doesn't show underwear lines" → thick/structured Bottoms or Dresses (NOT intimates)
-   - "doesn't show bra straps" → Tops/Dresses with cover_straps mode
-   - "no VPL" (visible panty lines) → Bottoms/Dresses with thicker/structured fabric
-   - "works with a strapless bra" → Tops/Dresses with Strapless/Off-Shoulder neckline
-   - "hides bra" → Tops/Dresses with opaque mode
-    NEVER set category_l1 to "Intimates" — it does not exist in our catalog.
+9. **We sell CLOTHING, not underwear.** Undergarment mentions mean clothing that works OVER them:
+   "no underwear lines"→thick Bottoms, "no bra straps"→cover_straps mode, "strapless bra"→Off-Shoulder.
+   NEVER set category_l1 to "Intimates" — it does not exist.
 
 10. **Decompose trend/aesthetic references into visual attributes.**
     Users often search with cultural trend terms instead of product keywords. These terms describe
@@ -334,45 +297,16 @@ def _build_system_prompt() -> str:
     for filters AND rich descriptive semantic_queries. The algolia_query should contain ONLY the
     garment type keyword (e.g., "coat", "dress", "top").
 
-    Common trend/aesthetic terms and their visual decomposition:
+     Common trend/aesthetic terms — decompose into visual attributes:
+     - "mob wife" → Animal Print, Faux Leather/Velvet, Oversized, Black/Burgundy, Glamorous+Edgy
+     - "old money"/"quiet luxury" → Wool/Silk, Beige/Navy/Cream, Classic+Minimalist, Smart Casual
+     - "clean girl" → Solid, White/Beige/Black, Cotton/Knit, Minimalist+Modern, Fitted
+     - "coquette"/"balletcore" → Floral, Pink/White/Cream, Lace/Satin/Chiffon, Romantic, Sweetheart
+     - "dark feminine"/"dark academia" → Black/Burgundy/Brown, Wool/Velvet, Edgy+Vintage, Plaid
+     - "coastal grandmother" → White/Beige/Navy, Linen/Cotton, Classic+Minimalist, Relaxed
 
-    - **"mob wife" / "mob boss wife" / "mafia wife"** → The iconic mob wife aesthetic:
-      patterns: ["Animal Print"], materials: ["Faux Leather", "Wool", "Velvet"],
-      fit_type: ["Oversized"], colors: ["Black", "Brown", "Cream", "Burgundy"],
-      style_tags: ["Glamorous", "Edgy"]. Semantic queries should describe oversized faux fur coats,
-      leopard print, dramatic silhouettes, dark luxurious fabrics, gold hardware, bold statement pieces.
-
-    - **"old money" / "quiet luxury" / "stealth wealth"** → Understated elegance:
-      materials: ["Wool", "Cotton", "Silk"], colors: ["Beige", "Navy Blue", "White", "Cream", "Gray"],
-      style_tags: ["Classic", "Minimalist", "Preppy"], formality: ["Smart Casual", "Business Casual"].
-      Semantic queries should describe tailored cashmere, neutral tones, structured blazers, clean lines.
-
-    - **"clean girl" / "that girl"** → Effortless minimal style:
-      patterns: ["Solid"], colors: ["White", "Beige", "Black", "Brown"],
-      materials: ["Cotton", "Knit", "Jersey"], style_tags: ["Minimalist", "Modern"],
-      fit_type: ["Fitted", "Slim"]. Semantic queries should describe sleek basics, neutral tones,
-      minimal jewelry-friendly silhouettes.
-
-    - **"coquette" / "feminine" / "balletcore"** → Delicate romantic style:
-      patterns: ["Solid", "Floral"], colors: ["Pink", "White", "Cream", "Light Blue"],
-      materials: ["Lace", "Satin", "Chiffon", "Silk"], style_tags: ["Romantic"],
-      neckline: ["Sweetheart", "Square", "V-Neck"]. Semantic queries should describe bows, ribbons,
-      soft pastels, delicate fabrics, ballet-inspired silhouettes.
-
-    - **"dark feminine" / "dark academia"** → Moody intellectual aesthetic:
-      colors: ["Black", "Burgundy", "Brown", "Navy Blue", "Olive"],
-      materials: ["Wool", "Knit", "Faux Leather", "Velvet"], style_tags: ["Edgy", "Vintage"],
-      patterns: ["Plaid", "Solid"]. Semantic queries should describe structured dark fabrics,
-      layered academic looks, gothic romantic elements.
-
-    - **"coastal grandmother" / "coastal chic"** → Relaxed elegant seaside style:
-      colors: ["White", "Beige", "Light Blue", "Navy Blue", "Cream"],
-      materials: ["Linen", "Cotton", "Knit"], style_tags: ["Classic", "Minimalist"],
-      fit_type: ["Relaxed", "Regular"]. Semantic queries should describe linen trousers,
-      cable-knit sweaters, breezy white shirts, neutral seaside elegance.
-
-    For ANY trend term not listed above, apply the same principle: think about what that
-    aesthetic LOOKS like visually, then decompose it into concrete patterns, materials, colors,
+     For ANY trend term not listed above, apply the same principle: think about what that
+     aesthetic LOOKS like visually, then decompose it into concrete patterns, materials, colors,
     fit_type, and style_tags. Put the rich visual description in semantic_queries.
 
 ## SECTION 2: OUTPUT FORMAT
@@ -394,6 +328,7 @@ Return a JSON object with these fields:
 - min_price: number | null
 - on_sale_only: boolean
 - is_set: boolean | null (true = user wants matching sets/co-ords only; null = no preference)
+- follow_ups: array (REQUIRED — 0-3 follow-up questions per Section 9. Use [] if query is specific enough. NEVER omit this field.)
 - confidence: number (0.0-1.0)
 
 ## SECTION 3: MODE MENU
@@ -566,7 +501,7 @@ RULES:
   the same garment type with slightly different wording — that defeats the purpose.
 - Keep each query under 77 tokens (FashionCLIP model limit)
 
-Example for "work outfit" (vague — 4 queries, each a DIFFERENT garment):
+Example for "work outfit" (vague — 4 queries, each a DIFFERENT garment type):
 ```json
 "semantic_queries": [
   "structured tailored blazer in solid neutral tones, professional office wear",
@@ -586,20 +521,12 @@ Example for "vacation outfits for Europe" (vague — 4 queries spanning garment 
 ]
 ```
 
-Example for "cute summer dress" (specific — 3 queries, all dresses but different silhouettes):
+Example for "cute summer dress" (specific — 3 queries, same type but different silhouettes):
 ```json
 "semantic_queries": [
   "flowy floral print midi sundress in soft pastel colors, lightweight fabric",
   "fitted ribbed knit mini dress in bright solid color, casual summer style",
   "tiered ruffle cotton maxi dress with smocked bodice, bohemian summer"
-]
-```
-
-Example for "red midi dress" (specific — fewer needed):
-```json
-"semantic_queries": [
-  "a red satin midi dress with a fitted bodice and flowing skirt",
-  "a red knit bodycon midi dress with long sleeves, elegant and fitted"
 ]
 ```
 
@@ -612,20 +539,12 @@ Example for "mob wife coat" (trend/aesthetic — see Principle 10):
 ]
 ```
 
-**DETAIL-FOCUSED QUERIES — when the user mentions a non-filterable product detail:**
-When the query's KEY distinguishing feature is a specific product detail that has NO structured
-filter (e.g., "zipped pockets", "hidden buttons", "ruched seams", "tie waist", "drawstring hem",
-"patch pockets", "pearl buttons"), the semantic queries must OVERLAP on that detail instead of
-diversifying the garment type. The detail IS the search — varying jacket subtypes misses the point.
-
-Rules for detail queries:
-- ALL 3-4 semantic queries MUST mention the specific detail
-- Vary the PHRASING and VISUAL ANGLE of the detail, NOT the garment type
-- Describe exactly what the detail LOOKS like from different perspectives
-- Include close-up descriptions ("visible zipper pulls on front pockets") alongside full-garment
-  descriptions ("jacket with zippered cargo pockets")
-- The more specific and overlapping the descriptions, the better — products matched by 3+ of
-  these queries are far more likely to actually have the detail
+**DETAIL-FOCUSED QUERIES — when a non-filterable product detail IS the search:**
+When the query's KEY feature is a specific detail with NO structured filter (e.g., "zipped pockets",
+"pearl buttons", "ruched sides", "tie waist"), ALL semantic queries must OVERLAP on that detail.
+Vary the PHRASING and VISUAL ANGLE of the detail, NOT the garment type. Include close-up and
+full-garment descriptions. The more overlapping, the better — products matched by 3+ queries
+are far more likely to actually have the detail.
 
 Example for "jacket with zipped pockets":
 ```json
@@ -643,15 +562,6 @@ Example for "dress with ruched sides":
   "dress with gathered ruched fabric along the sides, textured side seam draping",
   "bodycon dress with side ruching creating figure-flattering gathered texture",
   "fitted dress featuring ruched side panels, cinched draped fabric at the waist"
-]
-```
-
-Example for "blouse with pearl buttons":
-```json
-"semantic_queries": [
-  "blouse with decorative pearl buttons down the front placket, elegant button detail",
-  "feminine top featuring small pearl button closures, classic pearl-buttoned shirt",
-  "button-up blouse with visible round pearl buttons, refined polished detailing"
 ]
 ```
 
@@ -676,24 +586,6 @@ Example for "Like Zara but better quality":
   "modes": ["smart_casual", "quiet_luxury"],
   "attributes": {{"category_l1": ["Tops", "Dresses", "Outerwear"]}},
   "confidence": 0.85
-}}
-```
-
-Example for "Boho maxi dress like Anthropologie":
-```json
-{{
-  "intent": "specific",
-  "vibe_brand": "Anthropologie",
-  "brand": null,
-  "algolia_query": "boho maxi dress",
-  "semantic_queries": [
-    "flowing bohemian maxi dress with earthy layered textures and artisan details",
-    "printed boho maxi dress with tiered skirt, vintage-inspired romantic patterns",
-    "relaxed oversized maxi dress with embroidery or crochet details, festival style"
-  ],
-  "modes": ["boho"],
-  "attributes": {{"category_l1": ["Dresses"], "length": ["Maxi"]}},
-  "confidence": 0.9
 }}
 ```
 
@@ -746,45 +638,20 @@ When a user references a brand as a STYLE REFERENCE (not wanting to buy that spe
   that brand. Set brand (not vibe_brand) and intent "exact". vibe_brand requires explicit
   comparative language ("like X", "X style", "X vibe", "similar to X", "X but...").
 
-**How to decompose a brand's aesthetic:**
-Use your fashion knowledge to identify the brand's style DNA, then translate it into
-concrete search attributes:
-
-1. Identify the brand's silhouette language → modes and attributes (e.g., Anthropologie = boho mode, Theory = smart_casual)
-2. Identify the brand's color world → inform semantic queries (e.g., Zara = neutral/muted, Free People = earthy/warm)
-3. Identify the brand's formality level → appropriate formality mode
-4. Identify the brand's typical occasions → relevant occasion modes
-5. Generate semantic_queries that capture the brand's visual DNA (e.g., for "like Anthropologie": "flowing bohemian maxi dress earthy layered textures")
-6. Correct misspelled/partial brand names to the official spelling from the KNOWN BRANDS list
-   in BOTH brand and vibe_brand (e.g., "Antropologie" → "Anthropologie", "alo" → "Alo Yoga").
-   For exact brand queries, set algolia_query to the NON-BRAND product terms only (the brand
-   is already in the brand filter). E.g., "alo crewneck" → brand: "Alo Yoga", algolia_query: "crewneck".
-   For pure brand queries with no product terms (e.g., just "alo yoga"), set algolia_query to "".
+**Decomposing a brand's aesthetic:** Translate the brand's style DNA (silhouette + color palette +
+formality + construction quality) into modes, attributes, and semantic_queries. Correct misspelled/
+partial brand names to official KNOWN BRANDS list spelling. For exact brand queries, set algolia_query
+to NON-BRAND product terms only (e.g., "alo crewneck" → brand: "Alo Yoga", algolia_query: "crewneck").
+Pure brand queries with no product terms → algolia_query: "".
 
 **Quality/price modifiers** — use the brand's price tier as reference:
-- "better quality than X" / "elevated X" → same style DNA, set min_price ABOVE the brand's tier.
-  Do NOT set max_price — the user wants to go UP in quality, so leave the price open-ended.
-  (e.g., "better than Zara [$15-80]" → min_price: 40, max_price: null)
-- "cheaper than X" / "affordable X" / "X for less" → same style DNA, set max_price BELOW the brand's tier.
-  Do NOT set min_price — the user wants affordable options.
-  (e.g., "cheaper Aritzia [$100-400]" → max_price: 80, min_price: null)
+- "better quality than X" → same style, min_price ABOVE brand's tier, NO max_price
+- "cheaper than X" / "X for less" → same style, max_price BELOW brand's tier, NO min_price
 - "X dupe" → same style DNA, lower max_price, no brand filter
 
-**Style cluster landscape** (for reasoning about brand tiers and aesthetic DNA):
-
-VALUE ($8-80): basics/capsule | fast-trend/party | teen-casual | mall-trend
-MID ($30-200): boho/indie/layered | trendy-feminine/going-out | mainstream | y2k/edgy
-MID-PREMIUM ($60-400): modern-classic/tailored | feminine-eco-chic | resort-minimal | artsy-resort
-PREMIUM ($100-600): premium-denim | athleisure/wellness | quiet-lux/minimal | contemporary-designer | outdoor
-LUXURY ($150-3000): occasion/eventwear | quiet-luxury/investment
-
-Brands sharing aesthetic DNA span tiers. Use your fashion knowledge to identify the right
-tier and style family. For example: Zara (value/basics) → COS, Massimo Dutti, & Other Stories
-(mid-premium, same clean/versatile DNA); Anthropologie (mid/boho) → Free People (same cluster),
-Sezane (feminine eco-chic upgrade); Boohoo (value/party) → Princess Polly (mid, same going-out DNA).
-
-Think of brand DNA as: silhouette language + color palette + formality + construction quality.
-"Better quality" means same silhouette language and palette at a higher construction tier.
+**Style tiers** (for price reasoning): VALUE $8-80 | MID $30-200 | MID-PREMIUM $60-400 | PREMIUM $100-600 | LUXURY $150-3000.
+Brand DNA = silhouette language + color palette + formality + construction quality.
+"Better quality" = same silhouette/palette at a higher construction tier.
 
 ## SECTION 8: DECISION RULES
 
@@ -844,26 +711,13 @@ should appear. These follow-ups must be multiple-choice (2-4 options each) and m
 quickly.
 
 ### Critical rules
-1) Never ask about price, budget, age, or size. We already have these.
-2) Do not ask about weather directly in most cases. We know user location and can infer
-   season/temperature bands internally.
-   - Only ask weather-like questions if the query is explicitly TRAVEL-related
-     (e.g., "vacation in Europe", "NYC winter outfits").
-   - If you must ask, phrase it as "layering tolerance" / "warmth preference", not "what's the weather?"
-3) Optimize for LOOK: what items should look like, not logistics.
-   Primary look levers: category (dress vs separates), formality/dress code, vibe/aesthetic,
-   coverage/modesty, silhouette/fit, color palette/pattern, fabric vibe, and occasion context.
-4) Ask ONLY questions that change the result set meaningfully. Each question must map to
-   concrete retrieval filters. Avoid "nice-to-know" questions.
-5) Maximum 3 questions. Minimum 0. If the query is already specific enough
-   (e.g., "black satin midi dress with long sleeves"), return 0 questions.
-6) Questions must be mutually non-redundant.
-7) MCQ options must be:
-   - 2-4 options
-   - Mutually exclusive (minimal overlap)
-   - Include "No preference" only when it won't harm retrieval
-8) Avoid sensitive or awkward personal questions (body type, religion, etc.).
-   Coverage is allowed as a neutral preference.
+1) Never ask about price, budget, age, size, or weather (we have/infer these).
+   Exception: ask "layering tolerance" for explicit TRAVEL queries only.
+2) Optimize for LOOK: category, formality, vibe, coverage, silhouette, color, fabric, occasion.
+3) Each question must map to concrete filters. No "nice-to-know" questions.
+4) 0-3 questions. If query is already specific, return 0.
+5) 2-4 mutually exclusive options per question. "No preference" only when harmless.
+6) No sensitive/personal questions (body type, religion). Coverage is neutral.
 
 ### Output format
 
@@ -929,15 +783,9 @@ Priority order:
 If user already provided: category + key attributes (silhouette/coverage/color/fabric),
 return: "follow_ups": []
 
-### Quality guardrails
-- Avoid options that our inventory can't satisfy. If uncertain, choose broader options.
-- Avoid overly granular questions early (e.g., "square neck vs sweetheart") unless query is
-  already narrow and user is close to decision.
-- Keep questions short and human.
-
 ### Examples
 
-Example 1: query = "Brunch outfit" (Occasion/outfit — Type A)
+Example 1: query = "Brunch outfit" (Occasion/outfit — Type A, 3 questions: category → setting → vibe)
 ```json
 "follow_ups": [
   {{
@@ -972,152 +820,24 @@ Example 1: query = "Brunch outfit" (Occasion/outfit — Type A)
   }}
 ]
 ```
+Apply the same pattern for other Type A queries (first date, wedding guest): category → formality/setting → vibe/coverage.
+For Type C (travel): setting/activity → category → layering.
 
-Example 2: query = "Help me find an outfit for a first date" (Occasion — Type A)
-```json
-"follow_ups": [
-  {{
-    "dimension": "category",
-    "question": "Do you want a dress look or separates?",
-    "options": [
-      {{"label": "Dress", "filters": {{"product_types": ["dress"]}}}},
-      {{"label": "Top + bottom", "filters": {{"product_types": ["top", "bottom"]}}}},
-      {{"label": "Matching set", "filters": {{"product_types": ["set"]}}}},
-      {{"label": "Jumpsuit", "filters": {{"product_types": ["jumpsuit"]}}}}
-    ]
-  }},
-  {{
-    "dimension": "setting",
-    "question": "What kind of date is it?",
-    "options": [
-      {{"label": "Coffee / daytime", "filters": {{"dress_code": "casual"}}}},
-      {{"label": "Dinner (nice)", "filters": {{"dress_code": "smart_casual"}}}},
-      {{"label": "Drinks (night)", "filters": {{"dress_code": "cocktail"}}}},
-      {{"label": "Activity date", "filters": {{"dress_code": "casual", "silhouette": {{"fit": "relaxed"}}}}}}
-    ]
-  }},
-  {{
-    "dimension": "coverage",
-    "question": "How bold do you want the look to feel?",
-    "options": [
-      {{"label": "More covered", "filters": {{"coverage": {{"neckline": "high", "sleeves": "long", "hem": "midi"}}}}}},
-      {{"label": "Balanced", "filters": {{"coverage": {{"neckline": "mid", "sleeves": "short", "hem": "midi"}}}}}},
-      {{"label": "More open", "filters": {{"coverage": {{"neckline": "low", "sleeves": "sleeveless_ok", "hem": "mini_ok"}}}}}},
-      {{"label": "No preference", "filters": {{}}}}
-    ]
-  }}
-]
-```
-
-Example 3: query = "wedding guest outfit" (Occasion — Type A)
-```json
-"follow_ups": [
-  {{
-    "dimension": "formality",
-    "question": "What's the dress code?",
-    "options": [
-      {{"label": "Black tie", "filters": {{"dress_code": "black_tie"}}}},
-      {{"label": "Formal", "filters": {{"dress_code": "formal"}}}},
-      {{"label": "Cocktail", "filters": {{"dress_code": "cocktail"}}}},
-      {{"label": "Semi-formal", "filters": {{"dress_code": "smart_casual"}}}}
-    ]
-  }},
-  {{
-    "dimension": "category",
-    "question": "What kind of outfit do you want?",
-    "options": [
-      {{"label": "Dress", "filters": {{"product_types": ["dress"]}}}},
-      {{"label": "Jumpsuit", "filters": {{"product_types": ["jumpsuit"]}}}},
-      {{"label": "Set (top + skirt)", "filters": {{"product_types": ["set"]}}}},
-      {{"label": "Suiting", "filters": {{"product_types": ["outerwear", "bottom"], "vibe": ["minimal", "classic"]}}}}
-    ]
-  }},
-  {{
-    "dimension": "vibe",
-    "question": "Which look fits you most?",
-    "options": [
-      {{"label": "Classic elegant", "filters": {{"vibe": ["classic", "minimal"], "color_palette": ["neutrals", "dark"]}}}},
-      {{"label": "Romantic feminine", "filters": {{"vibe": ["romantic"], "pattern": ["floral"], "color_palette": ["pastels"]}}}},
-      {{"label": "Modern minimal", "filters": {{"vibe": ["minimal"], "pattern": ["solid"]}}}},
-      {{"label": "Bold statement", "filters": {{"vibe": ["trendy"], "color_palette": ["jewel_tones", "brights"]}}}}
-    ]
-  }}
-]
-```
-
-Example 4: query = "Vacation outfits for Europe" (Travel — Type C)
-```json
-"follow_ups": [
-  {{
-    "dimension": "setting",
-    "question": "What's the main plan?",
-    "options": [
-      {{"label": "City walking", "filters": {{"dress_code": "casual", "silhouette": {{"fit": "relaxed"}}}}}},
-      {{"label": "Nice dinners", "filters": {{"dress_code": "smart_casual"}}}},
-      {{"label": "Beach / coastal", "filters": {{"dress_code": "casual", "fabric_vibe": ["linen", "cotton"]}}}},
-      {{"label": "Mixed itinerary", "filters": {{"dress_code": "smart_casual"}}}}
-    ]
-  }},
-  {{
-    "dimension": "category",
-    "question": "What do you want more of?",
-    "options": [
-      {{"label": "Dresses", "filters": {{"product_types": ["dress"]}}}},
-      {{"label": "Sets", "filters": {{"product_types": ["set"]}}}},
-      {{"label": "Tops + bottoms", "filters": {{"product_types": ["top", "bottom"]}}}},
-      {{"label": "Outer layers", "filters": {{"product_types": ["outerwear"]}}}}
-    ]
-  }},
-  {{
-    "dimension": "layering",
-    "question": "How much layering do you want?",
-    "options": [
-      {{"label": "Light layers", "filters": {{"layering": ["light_layering"]}}}},
-      {{"label": "Medium layers", "filters": {{"layering": ["medium_layering"]}}}},
-      {{"label": "Warm layers", "filters": {{"layering": ["warm_layering"]}}}},
-      {{"label": "No preference", "filters": {{}}}}
-    ]
-  }}
-]
-```
-
-Example 5: query = "black satin midi dress with long sleeves" (Already specific — Type D)
+Example 2: query = "black satin midi dress with long sleeves" (Already specific — Type D)
 ```json
 "follow_ups": []
 ```
 
-### Negative examples (DO NOT DO THIS)
-- "What's your budget?" → we already have it
-- "What size are you?" → we already have it
-- "How old are you?" → we already have it, and it's sensitive
-- "What's the weather like?" → we infer from location; only ask layering for travel
-- Asking 4+ questions
-- Options that overlap (e.g., "cute" vs "pretty")
-- Options with no filter mapping (e.g., "surprise me" with no effect)
+**DO NOT** ask about: price/budget/size/age (we have them), weather (we infer it — only layering for travel).
+**DO NOT**: ask 4+ questions, use overlapping options ("cute" vs "pretty"), or options with no filter mapping.
 
 ## SECTION 10: PERSONALIZED FOLLOW-UPS (when user context is provided)
 
-When a "User context:" prefix is present, personalize follow-ups as follows:
-
-1. **Reorder options** so the most likely choice for this user is FIRST.
-   - Prefer behavior-based evidence (clicks/saves/history) over demographics.
-   - If no strong evidence exists, use "most popular first" defaults.
-
-2. **Coverage ordering:**
-   - If modesty=covered, put coverage-friendly options first.
-   - If modesty=balanced, keep default ordering.
-
-3. **Match vibe/style ordering** to user preferences.
-   - If user commonly prefers minimalist, reorder vibe options to put "Minimal" first.
-   - If user prefers boho, reorder to put "Bohemian" / "Romantic" first.
-
-4. **Match fit ordering** to user preferences.
-   - If user prefers oversized/relaxed styles, reorder fit options accordingly.
-   - If user prefers fitted, put "Fitted" / "Slim" first.
-
-5. **Do NOT remove options** — only reorder them.
-6. **Skip follow-up questions** already answered by user context or the query.
-7. **If no user context is provided**, generate follow-ups in the default order (most popular first).
+When "User context:" is present, personalize follow-ups:
+- **Reorder options** so the most likely choice for this user is FIRST (prefer behavioral evidence over demographics).
+- Match coverage/vibe/fit ordering to user preferences (modesty=covered → coverage-friendly first, etc.).
+- Do NOT remove options — only reorder. Skip questions already answered by context or query.
+- No user context → default order (most popular first).
 
 ## SECTION 11: REFINEMENT MODE
 
@@ -1160,7 +880,8 @@ fresh. The user already searched, saw follow-up questions, and selected answers.
 6. **algolia_query** should include product-name keywords that reflect the refinement. Remove
    filler words. If all terms are in filters, return empty string "".
 
-Return ONLY valid JSON. No markdown, no explanation, no code blocks."""
+Return ONLY valid JSON. No markdown, no explanation, no code blocks.
+IMPORTANT: The "follow_ups" key is REQUIRED in your JSON output. For vague/occasion queries, generate 1-3 follow-ups. For specific queries, return "follow_ups": []. NEVER omit the key."""
 
 
 # Build the prompt once at module load time
@@ -1218,8 +939,15 @@ def _get_brand_list_addendum() -> str:
 class QueryPlanner:
     """LLM-based query planner — supports OpenAI and Gemini (via OpenAI-compat endpoint)."""
 
-    # Gemini OpenAI-compatible endpoint
+    # OpenAI-compatible endpoints for non-OpenAI providers
     _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    _GROQ_BASE_URL = "https://api.groq.com/openai/v1/"
+    _GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+    _GROQ_DEFAULT_TIMEOUT = 15.0  # Groq is fast — 15s is generous
+
+    # Short-lived plan cache: same query within TTL → same plan (deterministic refresh)
+    _PLAN_CACHE_TTL = 120    # 2 minutes
+    _PLAN_CACHE_MAX = 64     # max entries (LRU eviction)
 
     def __init__(self):
         self._client = None
@@ -1229,16 +957,27 @@ class QueryPlanner:
         self._model = settings.query_planner_model
         self._timeout = settings.query_planner_timeout_seconds
 
-        # Pick API key based on provider
+        # Pick API key and default model based on provider
         if self._provider == "gemini":
             self._api_key = getattr(settings, "google_api_key", "")
-            # Default model for gemini if user didn't override
             if self._model == "gpt-4.1-mini":
                 self._model = "gemini-2.0-flash"
+        elif self._provider == "groq":
+            self._api_key = getattr(settings, "groq_api_key", "")
+            if self._model == "gpt-4.1-mini":
+                self._model = self._GROQ_DEFAULT_MODEL
+            # Groq is fast — use tighter timeout unless explicitly overridden
+            if self._timeout == 90.0:
+                self._timeout = self._GROQ_DEFAULT_TIMEOUT
         else:
             self._api_key = settings.openai_api_key
 
         self._enabled = settings.query_planner_enabled and bool(self._api_key)
+        self._heuristic_bypass = getattr(settings, "query_planner_heuristic_bypass", True)
+
+        # Plan cache: {cache_key: (SearchPlan, timestamp)}
+        self._plan_cache: Dict[str, Tuple[SearchPlan, float]] = {}
+        self._plan_cache_lock = threading.Lock()
 
     @property
     def provider(self) -> str:
@@ -1246,7 +985,7 @@ class QueryPlanner:
 
     @property
     def client(self):
-        """Lazy-load OpenAI client (works for both OpenAI and Gemini endpoints)."""
+        """Lazy-load OpenAI client (works for OpenAI, Gemini, and Groq endpoints)."""
         if self._client is None:
             with self._client_lock:
                 if self._client is None:
@@ -1257,12 +996,63 @@ class QueryPlanner:
                     }
                     if self._provider == "gemini":
                         client_kwargs["base_url"] = self._GEMINI_BASE_URL
+                    elif self._provider == "groq":
+                        client_kwargs["base_url"] = self._GROQ_BASE_URL
                     self._client = OpenAI(**client_kwargs)
         return self._client
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    # ------------------------------------------------------------------
+    # Plan cache helpers
+    # ------------------------------------------------------------------
+
+    def _plan_cache_key(
+        self,
+        query: str,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Build a deterministic cache key from query + context."""
+        import hashlib
+        parts = [query.strip().lower()]
+        if user_context:
+            # Include context fields that affect plan output
+            for k in sorted(user_context.keys()):
+                v = user_context[k]
+                parts.append(f"{k}={v}")
+        raw = "|".join(parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+    def _plan_cache_get(self, key: str) -> Optional[SearchPlan]:
+        """Return a cached plan if it exists and hasn't expired."""
+        with self._plan_cache_lock:
+            entry = self._plan_cache.get(key)
+            if entry is None:
+                return None
+            plan, ts = entry
+            if time.time() - ts > self._PLAN_CACHE_TTL:
+                del self._plan_cache[key]
+                return None
+            return plan
+
+    def _plan_cache_put(self, key: str, plan: SearchPlan) -> None:
+        """Store a plan in the cache, evicting oldest if at capacity."""
+        with self._plan_cache_lock:
+            # Evict expired entries first
+            now = time.time()
+            expired = [
+                k for k, (_, ts) in self._plan_cache.items()
+                if now - ts > self._PLAN_CACHE_TTL
+            ]
+            for k in expired:
+                del self._plan_cache[k]
+            # LRU eviction: if still at capacity, remove oldest
+            while len(self._plan_cache) >= self._PLAN_CACHE_MAX:
+                oldest_key = min(self._plan_cache, key=lambda k: self._plan_cache[k][1])
+                del self._plan_cache[oldest_key]
+            self._plan_cache[key] = (plan, now)
 
     _MAX_RETRIES = 2
     _RETRY_BACKOFF_SECONDS = [6, 12]  # Wait times for retry 1, 2
@@ -1376,6 +1166,9 @@ class QueryPlanner:
         LLM sees the original query plus the user's follow-up selections and
         generates updated semantic queries, modes, avoids, and new follow-ups.
 
+        All user-controlled inputs are sanitized before interpolation to
+        prevent prompt injection (role-boundary markers, control chars).
+
         Args:
             query: The raw search query.
             user_context: Optional dict with keys: age_group, brand_clusters,
@@ -1389,26 +1182,31 @@ class QueryPlanner:
         Returns:
             User message string.
         """
+        # --- INPUT SANITIZATION (prompt injection defense) ---
+        safe_query = sanitize_query(query)
+        safe_filters = sanitize_filter_values(selected_filters)
+        safe_labels = sanitize_labels(selection_labels)
+
         context_line = QueryPlanner._format_context_line(user_context)
 
         # ------------------------------------------------------------------
         # REFINEMENT mode — when follow-up selections are provided, format
         # the message so Section 11 of the system prompt activates.
         # ------------------------------------------------------------------
-        if selected_filters:
-            answered_dimensions = QueryPlanner._infer_answered_dimensions(selected_filters)
+        if safe_filters:
+            answered_dimensions = QueryPlanner._infer_answered_dimensions(safe_filters)
 
             parts = []
             if context_line:
                 parts.append(context_line)
 
             parts.append("[REFINEMENT]")
-            parts.append(f'Original query: "{query}"')
+            parts.append(f'Original query: "{safe_query}"')
 
-            if selection_labels:
-                parts.append(f"User selected: {', '.join(selection_labels)}")
+            if safe_labels:
+                parts.append(f"User selected: {', '.join(safe_labels)}")
 
-            filters_json = json.dumps(selected_filters, indent=2)
+            filters_json = json.dumps(safe_filters, indent=2)
             parts.append(f"Selected filters:\n{filters_json}")
 
             answered = ", ".join(answered_dimensions) if answered_dimensions else "none"
@@ -1418,12 +1216,128 @@ class QueryPlanner:
             return "\n\n".join(parts)
 
         # ------------------------------------------------------------------
-        # Normal mode — optional context prefix + raw query.
+        # Normal mode — optional context prefix + sanitized query.
         # ------------------------------------------------------------------
         if context_line:
-            return f"{context_line}\n\n{query}"
+            return f"{context_line}\n\n{safe_query}"
 
-        return query
+        return safe_query
+
+    # ==================================================================
+    # Heuristic bypass — skip LLM for simple, unambiguous queries
+    # ==================================================================
+
+    def try_heuristic_plan(self, query: str) -> Optional[SearchPlan]:
+        """Attempt to produce a SearchPlan without calling the LLM.
+
+        Returns a ``SearchPlan`` for queries that can be deterministically
+        classified:
+
+        1. **Pure brand** — query is exactly a known brand name.
+           → intent=exact, brand filter set, 1 semantic query.
+        2. **Bare category** — query is a single category keyword with no
+           styling/attribute words (e.g. "dresses", "tops", "jeans").
+           → intent=exact, algolia_query=query, 1 semantic query.
+        3. **Category + color** — exactly one category + one color, nothing
+           else (e.g. "black dress", "red skirt").
+           → intent=specific, color filter, 2 semantic queries.
+
+        Returns ``None`` for anything more complex — the full LLM planner
+        should handle those.
+        """
+        if not self._heuristic_bypass:
+            return None
+
+        import html
+        from search.query_classifier import (
+            _get_brands, get_brand_originals,
+            _CATEGORY_KEYWORDS, _ATTRIBUTE_KEYWORDS,
+            _CATEGORY_PATTERN, _ATTRIBUTE_PATTERN, _VAGUE_PATTERN,
+        )
+
+        raw = html.unescape(query).strip()
+        if not raw:
+            return None
+
+        normalized = raw.lower().strip()
+
+        # --- 1. Pure brand match ---
+        brands = _get_brands()
+        brand_originals = get_brand_originals()
+        if normalized in brands:
+            original = brand_originals.get(normalized, raw)
+            return SearchPlan(
+                intent="exact",
+                algolia_query=original,
+                semantic_query=f"{original} fashion clothing",
+                semantic_queries=[f"{original} fashion clothing"],
+                brand=original,
+                confidence=0.95,
+            )
+
+        # Tokenize for category/attribute matching
+        words = normalized.split()
+        if not words or len(words) > 4:
+            # Too long for simple heuristics
+            return None
+
+        # Check for vague keywords — if any, bail to LLM
+        if _VAGUE_PATTERN.search(normalized):
+            return None
+
+        # Find category and attribute matches
+        cat_matches = _CATEGORY_PATTERN.findall(normalized)
+        attr_matches = _ATTRIBUTE_PATTERN.findall(normalized)
+
+        # Identify colors specifically (subset of attributes)
+        _COLORS = {
+            "black", "white", "red", "blue", "green", "pink", "yellow",
+            "purple", "navy", "beige", "tan", "brown", "grey", "gray",
+            "ivory", "cream", "burgundy", "wine", "orange", "coral",
+            "teal", "olive", "mauve",
+        }
+        color_matches = [m.lower() for m in attr_matches if m.lower() in _COLORS]
+        non_color_attrs = [m for m in attr_matches if m.lower() not in _COLORS]
+
+        # --- 2. Bare category (no attributes, no colors) ---
+        if len(cat_matches) == 1 and not attr_matches:
+            # Check nothing else meaningful in the query
+            cat_word = cat_matches[0].lower()
+            remaining = normalized.replace(cat_word, "").strip()
+            if not remaining:
+                return SearchPlan(
+                    intent="exact",
+                    algolia_query=raw,
+                    semantic_query=f"{raw} women's fashion",
+                    semantic_queries=[f"{raw} women's fashion"],
+                    confidence=0.90,
+                )
+
+        # --- 3. Category + color only ---
+        if (len(cat_matches) == 1 and len(color_matches) >= 1
+                and not non_color_attrs):
+            cat_word = cat_matches[0].lower()
+            color_str = " ".join(color_matches)
+            # Verify the query is ONLY category + colors (no extra words)
+            check = normalized
+            for c in color_matches:
+                check = check.replace(c, "", 1)
+            check = check.replace(cat_word, "", 1).strip()
+            if not check:
+                return SearchPlan(
+                    intent="specific",
+                    algolia_query=raw,
+                    semantic_query=f"{color_str} {cat_word} women's fashion",
+                    semantic_queries=[
+                        f"{color_str} {cat_word}, clean and minimal styling",
+                        f"{color_str} {cat_word}, trendy and fashion-forward",
+                    ],
+                    attributes={"colors": color_matches},
+                    confidence=0.90,
+                )
+
+        # Not a simple query — let LLM handle it
+        return None
 
     def plan(
         self,
@@ -1459,6 +1373,22 @@ class QueryPlanner:
             logger.debug("Query planner disabled (no API key or feature flag off)",
                          provider=self._provider, model=self._model)
             return None
+
+        # --- Plan cache: return cached plan for identical query+filters ---
+        # Only cache non-refinement page-1 calls (no selected_filters).
+        is_refinement = bool(selected_filters)
+        cache_key: Optional[str] = None
+        if not is_refinement:
+            cache_key = self._plan_cache_key(query, user_context)
+            cached = self._plan_cache_get(cache_key)
+            if cached is not None:
+                logger.info(
+                    "Plan cache hit — reusing cached plan",
+                    query=query,
+                    cache_key=cache_key[:40],
+                    intent=cached.intent,
+                )
+                return cached
 
         t_start = time.time()
         last_error = None
@@ -1596,6 +1526,11 @@ class QueryPlanner:
                     latency_ms=latency_ms,
                     **({"selection_labels": selection_labels} if is_refinement else {}),
                 )
+
+                # Cache the plan for short-lived deterministic refresh
+                if cache_key is not None:
+                    self._plan_cache_put(cache_key, plan)
+
                 return plan
 
             except json.JSONDecodeError as e:
@@ -1687,7 +1622,13 @@ class QueryPlanner:
 
         Prefixed with [REFINEMENT] so the system prompt's Section 11 activates.
         Includes the original query, selected filters, and which dimensions are answered.
+        All user-controlled inputs are sanitized to prevent prompt injection.
         """
+        # --- INPUT SANITIZATION (prompt injection defense) ---
+        safe_query = sanitize_query(original_query)
+        safe_filters = sanitize_filter_values(selected_filters)
+        safe_labels = sanitize_labels(selection_labels)
+
         parts = []
 
         # User context (same format as initial planner)
@@ -1717,13 +1658,13 @@ class QueryPlanner:
 
         # Refinement header
         parts.append("[REFINEMENT]")
-        parts.append(f'Original query: "{original_query}"')
+        parts.append(f'Original query: "{safe_query}"')
 
         # Selected filters with labels for context
-        if selection_labels:
-            parts.append(f"User selected: {', '.join(selection_labels)}")
+        if safe_labels:
+            parts.append(f"User selected: {', '.join(safe_labels)}")
 
-        filters_json = json.dumps(selected_filters, indent=2)
+        filters_json = json.dumps(safe_filters, indent=2)
         parts.append(f"Selected filters:\n{filters_json}")
 
         answered = ", ".join(answered_dimensions) if answered_dimensions else "none"

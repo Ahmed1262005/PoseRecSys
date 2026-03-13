@@ -9,6 +9,7 @@ import threading
 from typing import Optional
 
 from core.logging import get_logger
+from core.sanitization import escape_autocomplete_highlight, sanitize_url, strip_tags
 from search.algolia_client import AlgoliaClient, get_algolia_client
 from search.models import (
     AutocompleteResponse,
@@ -79,11 +80,11 @@ class AutocompleteService:
                 )
                 products.append(AutocompleteProductSuggestion(
                     id=hit.get("objectID", ""),
-                    name=hit.get("name", ""),
-                    brand=hit.get("brand", ""),
-                    image_url=hit.get("image_url"),
+                    name=strip_tags(hit.get("name", "")) or "",
+                    brand=strip_tags(hit.get("brand", "")) or "",
+                    image_url=sanitize_url(hit.get("image_url")),
                     price=hit.get("price"),
-                    highlighted_name=highlighted_name,
+                    highlighted_name=escape_autocomplete_highlight(highlighted_name),
                 ))
         except Exception as e:
             logger.error("Autocomplete product search failed", error=str(e))
@@ -99,8 +100,8 @@ class AutocompleteService:
 
             for facet in brand_resp.get("facetHits", []):
                 brands.append(AutocompleteBrandSuggestion(
-                    name=facet.get("value", ""),
-                    highlighted=facet.get("highlighted"),
+                    name=strip_tags(facet.get("value", "")) or "",
+                    highlighted=escape_autocomplete_highlight(facet.get("highlighted")),
                 ))
         except Exception as e:
             logger.error("Autocomplete brand search failed", error=str(e))
@@ -108,7 +109,7 @@ class AutocompleteService:
         return AutocompleteResponse(
             products=products,
             brands=brands,
-            query=query,
+            query=strip_tags(query) or "",
         )
 
 

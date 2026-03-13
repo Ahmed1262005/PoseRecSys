@@ -270,6 +270,13 @@ class HybridSearchResponse(BaseModel):
         "(e.g., ['color', 'vibe']). Used to prevent re-asking the same "
         "questions in subsequent follow-up rounds.",
     )
+    v2_meta: Optional[Dict[str, Any]] = Field(
+        None,
+        description="V2 pipeline metadata (only present on /api/search/v2/* responses). "
+        "Includes: search_version, planner_source (heuristic|llm), planner_provider, "
+        "planner_model, semantic_backend (faiss|pgvector), faiss_vectors_loaded, "
+        "heuristic_plan (the plan if heuristic matched, null otherwise).",
+    )
 
 
 class AutocompleteProductSuggestion(BaseModel):

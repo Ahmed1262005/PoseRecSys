@@ -136,7 +136,7 @@ class SearchSessionEntry:
 # Session cache
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TTL = 600        # 10 minutes
+_DEFAULT_TTL = 1800       # 30 minutes
 _CLEANUP_INTERVAL = 120   # 2 minutes
 
 
@@ -151,6 +151,7 @@ class SearchSessionCache:
         self._lock = threading.RLock()
         self._store: Dict[str, SearchSessionEntry] = {}
         self._last_cleanup = time.time()
+        self.last_get_status: str = ""  # "hit", "miss_not_found", "miss_expired"
 
     # -- Singleton -----------------------------------------------------------
 
@@ -183,15 +184,32 @@ class SearchSessionCache:
         )
 
     def get(self, session_id: str) -> Optional[SearchSessionEntry]:
-        """Retrieve a cached session (None if missing or expired)."""
+        """Retrieve a cached session (None if missing or expired).
+
+        Returns a (entry, status) style result via the entry itself.
+        The ``last_get_status`` attribute is set for diagnostics.
+        """
         with self._lock:
             entry = self._store.get(session_id)
             if entry is None:
+                self.last_get_status = "miss_not_found"
+                logger.info(
+                    "Search session not found in cache",
+                    session_id=session_id,
+                    cache_size=len(self._store),
+                )
                 return None
             if entry.is_expired(self._ttl):
                 del self._store[session_id]
-                logger.info("Search session expired", session_id=session_id)
+                self.last_get_status = "miss_expired"
+                logger.info(
+                    "Search session expired",
+                    session_id=session_id,
+                    age_s=round(time.time() - entry.created_at),
+                    ttl_s=self._ttl,
+                )
                 return None
+            self.last_get_status = "hit"
             return entry
 
     def delete(self, session_id: str) -> bool:

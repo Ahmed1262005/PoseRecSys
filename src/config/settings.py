@@ -260,13 +260,14 @@ class Settings(BaseSettings):
     # ==========================================================================
     query_planner_provider: str = Field(
         default="openai",
-        description="LLM provider for query planner: 'openai' or 'gemini'"
+        description="LLM provider for query planner: 'openai', 'gemini', or 'groq'"
     )
     openai_api_key: str = Field(default="", description="OpenAI API key for LLM query planner")
     google_api_key: str = Field(default="", description="Google API key for Gemini models")
+    groq_api_key: str = Field(default="", description="Groq API key for Llama models")
     query_planner_model: str = Field(
         default="gpt-4.1-mini",
-        description="Model name for query planning (e.g. gpt-4.1-mini, gemini-2.0-flash)"
+        description="Model name for query planning (e.g. gpt-4.1-mini, gemini-2.0-flash, meta-llama/llama-4-scout-17b-16e-instruct)"
     )
     query_planner_enabled: bool = Field(
         default=True,
@@ -275,6 +276,23 @@ class Settings(BaseSettings):
     query_planner_timeout_seconds: float = Field(
         default=90.0,
         description="Timeout for LLM query planner call (seconds)"
+    )
+    query_planner_heuristic_bypass: bool = Field(
+        default=True,
+        description="Enable heuristic planner bypass for simple queries (brand-only, bare category, category+color)"
+    )
+
+    # ==========================================================================
+    # Local FAISS Vector Store
+    # ==========================================================================
+    use_local_faiss: bool = Field(
+        default=False,
+        description="Use local FAISS index for semantic search instead of Supabase pgvector. "
+        "Requires data/faiss/ snapshot (built via scripts/build_faiss_snapshot.py)."
+    )
+    faiss_snapshot_dir: str = Field(
+        default="/mnt/d/ecommerce/recommendationSystem/data/faiss",
+        description="Directory containing FAISS snapshot files (index.faiss, product_ids.npy, metadata.pkl)"
     )
 
     # ==========================================================================

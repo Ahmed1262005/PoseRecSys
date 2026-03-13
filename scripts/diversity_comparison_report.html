@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diversity Comparison Report — 2026-03-10 17:40</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0d1117; color: #c9d1d9; padding: 20px; max-width: 1800px; margin: 0 auto; }
+  h1 { color: #58a6ff; margin-bottom: 8px; }
+  h2 { color: #d2a8ff; margin: 16px 0 8px 0; font-size: 18px; }
+  .meta { color: #8b949e; margin-bottom: 16px; font-size: 14px; }
+
+  /* Summary stats */
+  .summary { display: flex; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+                padding: 16px; min-width: 200px; text-align: center; }
+  .stat-value { font-size: 28px; font-weight: 700; }
+  .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  .stat-good { color: #7ee787; }
+  .stat-neutral { color: #d29922; }
+  .stat-bad { color: #f85149; }
+
+  /* Comparison outfit */
+  .comparison { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+                 margin-bottom: 28px; overflow: hidden; }
+  .comp-header { background: #1c2333; padding: 14px 18px; display: flex;
+                   align-items: center; gap: 16px; border-bottom: 1px solid #30363d; }
+  .comp-num { background: #238636; color: white; font-weight: 700; font-size: 16px;
+               border-radius: 8px; padding: 4px 12px; }
+  .comp-meta { font-size: 13px; color: #8b949e; }
+  .comp-meta b { color: #58a6ff; }
+
+  .comp-body { display: flex; gap: 0; }
+  .source-col { width: 180px; min-width: 180px; background: #1a1f2e;
+                 border-right: 2px solid #238636; padding: 12px; text-align: center; }
+  .source-col img { width: 150px; height: 210px; object-fit: cover; border-radius: 8px;
+                     border: 2px solid #238636; }
+  .source-label { color: #238636; font-weight: 700; font-size: 11px;
+                   text-transform: uppercase; margin-bottom: 4px; }
+  .source-name { font-size: 11px; color: #c9d1d9; margin-top: 4px;
+                  max-height: 28px; overflow: hidden; }
+  .source-brand { font-size: 10px; color: #8b949e; }
+  .source-price { font-size: 12px; color: #58a6ff; font-weight: 600; }
+
+  /* Side-by-side columns */
+  .sides { flex: 1; display: flex; gap: 0; }
+  .side { flex: 1; padding: 10px; }
+  .side-before { border-right: 1px dashed #30363d; }
+  .side-label { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                 padding: 4px 10px; border-radius: 4px; margin-bottom: 8px;
+                 display: inline-block; }
+  .side-label-before { background: #30363d; color: #c9d1d9; }
+  .side-label-after { background: #1f3d2a; color: #7ee787; }
+
+  .cat-section { margin-bottom: 12px; }
+  .cat-header { font-size: 11px; font-weight: 700; color: #d2a8ff;
+                 text-transform: uppercase; margin-bottom: 4px;
+                 border-bottom: 1px solid #30363d; padding-bottom: 3px;
+                 display: flex; justify-content: space-between; }
+  .l2-dist { font-size: 10px; color: #8b949e; font-weight: 400; }
+
+  .items-row { display: flex; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
+  .item-card { width: 120px; min-width: 120px; text-align: center; }
+  .item-card img { width: 110px; height: 155px; object-fit: cover; border-radius: 6px;
+                    border: 1px solid #30363d; }
+  .item-rank { display: inline-block; background: #30363d; color: #c9d1d9;
+               border-radius: 3px; padding: 1px 5px; font-size: 10px; font-weight: 700;
+               margin-bottom: 3px; }
+  .item-name { font-size: 9px; color: #c9d1d9; max-height: 24px; overflow: hidden;
+               line-height: 1.2; margin-top: 3px; }
+  .item-brand { font-size: 9px; color: #8b949e; }
+  .item-l2 { font-size: 9px; color: #d2a8ff; font-weight: 600; }
+  .item-score { font-size: 9px; color: #7ee787; font-family: monospace; }
+  .item-detail { font-size: 9px; color: #8b949e; font-family: monospace; }
+</style>
+</head>
+<body>
+<h1>Diversity Comparison Report</h1>
+<p class="meta">Generated 2026-03-10 17:40 | 5 outfits | Total: 5s</p>
+<p class="meta">
+  <b>BEFORE:</b> Pure MMR — lambda=0.08, floor=0.08, 5-dim signature (color/fabric/pattern/silhouette/brand), no L2 awareness
+  <br><b>AFTER (v3.5):</b> L2-stratified round-robin (Phase 1: best item per unique L2 subcategory) + stronger MMR (Phase 2: lambda=0.25, floor=0.18, 6-dim signature with category_l2 weighted 2x)
+</p>
+
+<div class="summary">
+  <div class="stat-card">
+    <div class="stat-value stat-neutral">1.7</div>
+    <div class="stat-label">Avg unique L2 types (BEFORE)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value stat-good">3.4</div>
+    <div class="stat-label">Avg unique L2 types (AFTER)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value stat-good">+1.8</div>
+    <div class="stat-label">L2 diversity improvement</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value stat-good">-0.013</div>
+    <div class="stat-label">Avg TATTOO score delta</div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#1</span>
+    <div class="comp-meta">
+      <b>Tie Neck Blouse</b> — Old Navy
+      — $10
+      | before: 0.8s, after: 0.6s
+    </div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/d256c330-5845-49c3-9636-1cdc232dc18f/original_0_0434a943.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Tie Neck Blouse</div>
+      <div class="source-brand">Old Navy</div>
+      <div class="source-price">$10</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label side-label-before">BEFORE (current)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 1 types — 4×Skirt</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/lagence/l&#x27;agence_20350c8599f9/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Lilou Vegan Leather Skirt</div>
+            <div class="item-brand">L&#x27;AGENCE</div>
+            <div class="item-score">T=0.829</div>
+            <div class="item-detail">Browns · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/e34a9568-4929-4ac8-bc48-b5585a4760ab/original_0_7fa90060.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Anna Sui Jaquard Mini Skirt</div>
+            <div class="item-brand">Free People</div>
+            <div class="item-score">T=0.819</div>
+            <div class="item-detail">Neutrals · ?</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/52768e03-0e59-4f2f-8b62-5ce79d246d2b/original_0_75c28f72.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Edition Mini Skirt</div>
+            <div class="item-brand">Mavi Jeans</div>
+            <div class="item-score">T=0.807</div>
+            <div class="item-detail">Neutrals · wool</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/21b4c845-e187-442f-a2b0-37df1d423f02/original_0_dc32f19e.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Lace Insert Satin Mini Skirt</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.813</div>
+            <div class="item-detail">Browns · satin</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 2 types — 3×Blazer, 1×Jacket</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/fed8358e-a928-47eb-9ea2-68ca79406fdf/original_0_c1f302d8.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Canvas Crop Utility Jacket</div>
+            <div class="item-brand">Old Navy</div>
+            <div class="item-score">T=0.856</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/44ebe761-145d-4354-83f6-c94d825e2d6f/original_0_44ead187.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Basic Woven Relaxed Fit Crop Blazer</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.849</div>
+            <div class="item-detail">Greens · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/urban-outfitters/urban_outfitters_9f44f4e0391f/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Motel Notus Wrap Blazer</div>
+            <div class="item-brand">Urban Outfitters</div>
+            <div class="item-score">T=0.824</div>
+            <div class="item-detail">Neutrals · ?</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/17b98730-e5e9-4a34-84b1-29298cd482b1/original_0_454e4768.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Tie Front Detail Fitted Blazer</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.832</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+        </div></div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label side-label-after">AFTER (proposed)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 4 types — 1×Skirt, 1×Jean, 1×Short, 1×Pant</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/lagence/l&#x27;agence_20350c8599f9/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Lilou Vegan Leather Skirt</div>
+            <div class="item-brand">L&#x27;AGENCE</div>
+            <div class="item-score">T=0.829</div>
+            <div class="item-detail">Browns · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/3af6f6bd-5f02-446e-838c-cf01197ad5d9/original_0_ac6af02c.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Seine Mid Rise Skinny Jeans 32 Inch</div>
+            <div class="item-brand">Universal Standard</div>
+            <div class="item-score">T=0.821</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/ann-taylor/ann_taylor_e9f90b96f7c9/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">Petite Pleated Long Short</div>
+            <div class="item-brand">Ann Taylor</div>
+            <div class="item-score">T=0.811</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/staud/staud_da2176134358/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">KAT PANT BLACK</div>
+            <div class="item-brand">Staud</div>
+            <div class="item-score">T=0.805</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 4 types — 1×Jacket, 1×Blazer, 1×Coat, 1×Windbreaker</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/fed8358e-a928-47eb-9ea2-68ca79406fdf/original_0_c1f302d8.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Canvas Crop Utility Jacket</div>
+            <div class="item-brand">Old Navy</div>
+            <div class="item-score">T=0.856</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/44ebe761-145d-4354-83f6-c94d825e2d6f/original_0_44ead187.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Basic Woven Relaxed Fit Crop Blazer</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.849</div>
+            <div class="item-detail">Greens · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/94021415-7af6-419a-b252-6109196d0cff/original_0_53785eea.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Coat</div>
+            <div class="item-name">Short Trench Coat</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.783</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aje/aje_fb3acd1f47f4/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Windbreaker</div>
+            <div class="item-name">Pleated Windbreaker Shirt 406</div>
+            <div class="item-brand">Aje</div>
+            <div class="item-score">T=0.764</div>
+            <div class="item-detail">Oranges · synthetic_woven</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#2</span>
+    <div class="comp-meta">
+      <b>Striped Crop Shirt With Drawstrings Back Tie Detai</b> — Missguided
+      — $19
+      | before: 0.4s, after: 0.5s
+    </div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/89085263-1c91-43d1-9737-a9bcedeb2813/original_0_ff62c2f7.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Striped Crop Shirt With Drawstrings Back</div>
+      <div class="source-brand">Missguided</div>
+      <div class="source-price">$19</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label side-label-before">BEFORE (current)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 2 types — 3×Skirt, 1×Jean</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_d6aa5b30dd54/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Bootcut High Jeans</div>
+            <div class="item-brand">H&amp;M</div>
+            <div class="item-score">T=0.920</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/84fcb836-f630-4267-83bd-d984b8d4efb7/original_0_0ce0cbef.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Petite Leather Look High Waisted Mi</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.891</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/5b446ec0-bf47-4613-8350-2aa8b0bc6ab3/original_0_cef8bd50.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Santana Sarong Skort</div>
+            <div class="item-brand">Free People</div>
+            <div class="item-score">T=0.885</div>
+            <div class="item-detail">Purples · linen</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_ac5cf1a0233d/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Linen-Blend Wrap Skirt</div>
+            <div class="item-brand">H&amp;M</div>
+            <div class="item-score">T=0.876</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 1 types — 4×Jacket</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_0ad29d478c51/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Scoop Neck Cropped Button-Front Fit</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.942</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/9db9a249-b835-4890-bfe3-fb64cc73c390/original_0_487d838c.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Western Denim Jacket Pale Blue</div>
+            <div class="item-brand">Princess Polly</div>
+            <div class="item-score">T=0.927</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_9c206c0b4273/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Grey Denim Jacket With Peplum Hem</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.923</div>
+            <div class="item-detail">Neutrals · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/american-eagle/american_eagle_7bbc7e9877e4/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">AE Fleece Shacket</div>
+            <div class="item-brand">American Eagle</div>
+            <div class="item-score">T=0.895</div>
+            <div class="item-detail">Greens · synthetic_woven</div>
+          </div>
+        </div></div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label side-label-after">AFTER (proposed)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 4 types — 1×Jean, 1×Skirt, 1×Short, 1×Pant</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_d6aa5b30dd54/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Bootcut High Jeans</div>
+            <div class="item-brand">H&amp;M</div>
+            <div class="item-score">T=0.920</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/84fcb836-f630-4267-83bd-d984b8d4efb7/original_0_0ce0cbef.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Petite Leather Look High Waisted Mi</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.891</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/587b7065-4be9-4981-85ce-d5f5562a4fb7/original_0_a12c2b04.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">Textured Lightweight Cotton Elastic</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.874</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/4278c6f0-3b52-41ed-bb87-11683409a1f5/original_0_6fd5c545.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">Archer Pants Pinstripe Black</div>
+            <div class="item-brand">Princess Polly</div>
+            <div class="item-score">T=0.795</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 2 types — 3×Jacket, 1×Shacket</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_0ad29d478c51/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Scoop Neck Cropped Button-Front Fit</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.942</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_feae21124e30/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Shacket</div>
+            <div class="item-name">Sequin Striped Denim Shacket</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score">T=0.773</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/american-eagle/american_eagle_7bbc7e9877e4/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">AE Fleece Shacket</div>
+            <div class="item-brand">American Eagle</div>
+            <div class="item-score">T=0.895</div>
+            <div class="item-detail">Greens · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/9db9a249-b835-4890-bfe3-fb64cc73c390/original_0_487d838c.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Western Denim Jacket Pale Blue</div>
+            <div class="item-brand">Princess Polly</div>
+            <div class="item-score">T=0.927</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#3</span>
+    <div class="comp-meta">
+      <b>World Tour Logo Baby Tee</b> — True Religion
+      — $20
+      | before: 0.4s, after: 0.5s
+    </div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/true-religion/true_religion_b61478746e80/gallery_1.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">World Tour Logo Baby Tee</div>
+      <div class="source-brand">True Religion</div>
+      <div class="source-price">$20</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label side-label-before">BEFORE (current)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 3 types — 2×Skirt, 1×Short, 1×Jean</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/ca311216-f770-45fd-88a1-3e293fea1efd/original_0_534187b9.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Chillders Denim Mini Skirt Mid Wash</div>
+            <div class="item-brand">Princess Polly</div>
+            <div class="item-score">T=0.904</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/5231cd70-344c-4f63-a581-489b906d40d8/original_0_d5290e2a.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">Washed Black Denim Shorts</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.885</div>
+            <div class="item-detail">Neutrals · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_2adf4e9e4405/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Kansas City Chiefs Mini Skort</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score">T=0.877</div>
+            <div class="item-detail">Reds · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/dc1c9652-a482-42b4-958d-f2c51a6d6ef6/original_0_a14073b4.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Super Stretch Jeans</div>
+            <div class="item-brand">Gap</div>
+            <div class="item-score">T=0.865</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 1 types — 4×Jacket</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_c67edc6b4566/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Cropped Bomber Jacket</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score">T=0.894</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_65d8f9fce5e0/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Distinctive Crop Blazer Denim Jacke</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.879</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_ef5eaf8e1111/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Cropped Denim Jacket With Crystal B</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.885</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/62b4178e-3df2-40d0-b9ce-dbdbc476f2b8/original_0_cb15b557.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Pocket Detail Crop Denim Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.858</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+        </div></div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label side-label-after">AFTER (proposed)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 4 types — 1×Skirt, 1×Short, 1×Jean, 1×Pant</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/ca311216-f770-45fd-88a1-3e293fea1efd/original_0_534187b9.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Chillders Denim Mini Skirt Mid Wash</div>
+            <div class="item-brand">Princess Polly</div>
+            <div class="item-score">T=0.904</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/5231cd70-344c-4f63-a581-489b906d40d8/original_0_d5290e2a.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">Washed Black Denim Shorts</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.885</div>
+            <div class="item-detail">Neutrals · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_fbd01b212558/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Distressed High-Rise Straight Jeans</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score">T=0.879</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/cotton-on/cotton_on_c65a7d6ea1b4/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">Dreamy Soft Flare Pant</div>
+            <div class="item-brand">Cotton On</div>
+            <div class="item-score">T=0.843</div>
+            <div class="item-detail">Reds · knit</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 1 types — 4×Jacket</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_c67edc6b4566/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Cropped Bomber Jacket</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score">T=0.894</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/old-navy/old_navy_ecaa9f2f9a11/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Old Navy x Disney Oversized Minnie </div>
+            <div class="item-brand">Old Navy</div>
+            <div class="item-score">T=0.850</div>
+            <div class="item-detail">Blues · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_65d8f9fce5e0/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Distinctive Crop Blazer Denim Jacke</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.879</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_ef5eaf8e1111/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Cropped Denim Jacket With Crystal B</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score">T=0.885</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#4</span>
+    <div class="comp-meta">
+      <b>Draped Cowl Neck Top</b> — Ann Taylor
+      — $54
+      | before: 0.4s, after: 0.5s
+    </div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/e466d934-fc25-42b8-8560-d357c406e3d0/original_0_fc28a89d.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Draped Cowl Neck Top</div>
+      <div class="source-brand">Ann Taylor</div>
+      <div class="source-price">$54</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label side-label-before">BEFORE (current)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 2 types — 3×Skirt, 1×Pant</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/j.crew/j.crew_47b84eb618bb/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Mini trouser skirt in duchesse sati</div>
+            <div class="item-brand">J.Crew</div>
+            <div class="item-score">T=0.861</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/white-house-black-market/white_house_black_market_495ace5b75fa/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">Petite WHBM® Elle Slim Ankle in Gin</div>
+            <div class="item-brand">White House Black Market</div>
+            <div class="item-score">T=0.856</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/reformation/reformation_5e6c71ca5483/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Bella Satin Skirt</div>
+            <div class="item-brand">Reformation</div>
+            <div class="item-score">T=0.855</div>
+            <div class="item-detail">Neutrals · satin</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/rouje/rouje_3bc51418d59e/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Jupe APOLLINA UNI COBALT</div>
+            <div class="item-brand">Rouje</div>
+            <div class="item-score">T=0.832</div>
+            <div class="item-detail">Blues · silk</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 1 types — 4×Blazer</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/1bd51926-769b-4c8f-8928-5f33a8059570/original_0_78615a2e.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Show Me Your Mumu Major Blazer</div>
+            <div class="item-brand">Free People</div>
+            <div class="item-score">T=0.876</div>
+            <div class="item-detail">Pinks · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/everlane/everlane_b90bb16298a8/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">The Sleeveless Blazer in Buttersmoo</div>
+            <div class="item-brand">Everlane</div>
+            <div class="item-score">T=0.860</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_3fa726f647f8/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Women&#x27;s Fitted Blazers</div>
+            <div class="item-brand">H&amp;M</div>
+            <div class="item-score">T=0.858</div>
+            <div class="item-detail">Browns · linen</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/bbe8b193-a749-4b47-b747-9dfcf70aca47/original_0_86eec785.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Buckle Detail Tailored Blazer</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.860</div>
+            <div class="item-detail">Browns · synthetic_woven</div>
+          </div>
+        </div></div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label side-label-after">AFTER (proposed)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 4 types — 1×Skirt, 1×Pant, 1×Jean, 1×Short</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/j.crew/j.crew_47b84eb618bb/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Mini trouser skirt in duchesse sati</div>
+            <div class="item-brand">J.Crew</div>
+            <div class="item-score">T=0.861</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/white-house-black-market/white_house_black_market_495ace5b75fa/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">Petite WHBM® Elle Slim Ankle in Gin</div>
+            <div class="item-brand">White House Black Market</div>
+            <div class="item-score">T=0.856</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_cc28f7fcb1fe/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">Ava Ultra High Rise Wide Leg Jeans</div>
+            <div class="item-brand">H&amp;M</div>
+            <div class="item-score">T=0.834</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/232dd839-4dc3-4d76-a17d-7fdb4f672440/original_0_713c61e1.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">Tailored High Waist Short</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.823</div>
+            <div class="item-detail">Neutrals · synthetic_woven</div>
+          </div>
+        </div></div>
+        <div class="cat-section"><div class="cat-header"><span>outerwear (4)</span><span class="l2-dist">L2: 4 types — 1×Blazer, 1×Jacket, 1×Coat, 1×Cape</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/1bd51926-769b-4c8f-8928-5f33a8059570/original_0_78615a2e.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Blazer</div>
+            <div class="item-name">Show Me Your Mumu Major Blazer</div>
+            <div class="item-brand">Free People</div>
+            <div class="item-score">T=0.876</div>
+            <div class="item-detail">Pinks · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/splendid/splendid_089eb3d08ca8/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jacket</div>
+            <div class="item-name">Portia Jacket</div>
+            <div class="item-brand">Splendid</div>
+            <div class="item-score">T=0.873</div>
+            <div class="item-detail">Reds · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/36a1b610-4800-427d-8ad0-aaf1a65aa27a/original_0_02358aea.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Coat</div>
+            <div class="item-name">Belted Notch Collar Coat</div>
+            <div class="item-brand">Ann Taylor</div>
+            <div class="item-score">T=0.826</div>
+            <div class="item-detail">Neutrals · wool</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/c7c8b266-f16e-4ecf-81eb-fcaf54eb7716/original_0_f84d949d.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Cape</div>
+            <div class="item-name">Wallis Berry Detail Knitted Cape</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.787</div>
+            <div class="item-detail">Reds · synthetic_woven</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#5</span>
+    <div class="comp-meta">
+      <b>Pocket Detail Brushed Knit Cardigan</b> — Boohoo
+      — $34
+      | before: 0.4s, after: 0.5s
+    </div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/17a415c3-1dba-4617-9eeb-01eaed0a9d86/original_0_fdb70d42.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Pocket Detail Brushed Knit Cardigan</div>
+      <div class="source-brand">Boohoo</div>
+      <div class="source-price">$34</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label side-label-before">BEFORE (current)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 2 types — 3×Skirt, 1×Jean</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/everlane/everlane_ed38a3df1d6c/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">The Carpenter Jean</div>
+            <div class="item-brand">Everlane</div>
+            <div class="item-score">T=0.878</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/5dc3c2eb-dc07-40b2-aaad-117c73c47f89/original_0_24ddd2da.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Petite Y2K Denim Skirt With Back Po</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.851</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/2295d3e3-f31a-4a67-9cd0-c16b42f3247f/original_0_703ba6c3.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Wool Look Check Mini Skirt</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.846</div>
+            <div class="item-detail">Browns · synthetic_woven</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_6c7e1eb13cac/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Kelly Skort - (Re)ssential</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score">T=0.846</div>
+            <div class="item-detail">Neutrals · wool</div>
+          </div>
+        </div></div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label side-label-after">AFTER (proposed)</div>
+        <div class="cat-section"><div class="cat-header"><span>bottoms (4)</span><span class="l2-dist">L2: 4 types — 1×Jean, 1×Short, 1×Pant, 1×Skirt</span></div><div class="items-row">
+          <div class="item-card">
+            <span class="item-rank">#1</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/everlane/everlane_ed38a3df1d6c/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Jean</div>
+            <div class="item-name">The Carpenter Jean</div>
+            <div class="item-brand">Everlane</div>
+            <div class="item-score">T=0.878</div>
+            <div class="item-detail">Neutrals · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#2</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/everlane/everlane_228e3b53374f/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Short</div>
+            <div class="item-name">The A-Line Denim Short | Garment-Dy</div>
+            <div class="item-brand">Everlane</div>
+            <div class="item-score">T=0.861</div>
+            <div class="item-detail">Browns · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#3</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/everlane/everlane_c8849ffa991f/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Pant</div>
+            <div class="item-name">The Organic Straight-Leg Pant | Toa</div>
+            <div class="item-brand">Everlane</div>
+            <div class="item-score">T=0.859</div>
+            <div class="item-detail">Browns · cotton</div>
+          </div>
+          <div class="item-card">
+            <span class="item-rank">#4</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/5dc3c2eb-dc07-40b2-aaad-117c73c47f89/original_0_24ddd2da.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2">Skirt</div>
+            <div class="item-name">Petite Y2K Denim Skirt With Back Po</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score">T=0.851</div>
+            <div class="item-detail">Blues · denim</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

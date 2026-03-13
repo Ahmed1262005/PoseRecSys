@@ -145,45 +145,6 @@ class SearchAnalytics:
         except Exception as e:
             logger.warning("Failed to log search impressions", error=str(e))
 
-    def load_impression_counts(
-        self,
-        user_id: Optional[str] = None,
-        anon_id: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Load per-product impression counts for a user (last 7 days).
-
-        Returns a dict of {product_id: count}. Used by the reranker to
-        soft-demote over-exposed products.
-
-        Returns an empty dict on failure (non-fatal).
-        """
-        if not user_id and not anon_id:
-            return {}
-        try:
-            params: Dict[str, Any] = {}
-            if user_id:
-                params["p_user_id"] = user_id
-            if anon_id:
-                params["p_anon_id"] = anon_id
-
-            result = self._supabase.rpc(
-                "get_user_search_impression_counts", params
-            ).execute()
-
-            if not result.data:
-                return {}
-
-            return {
-                str(row["product_id"]): int(row["impression_count"])
-                for row in result.data
-            }
-        except Exception as e:
-            logger.warning(
-                "Failed to load impression counts",
-                user_id=user_id,
-                error=str(e),
-            )
-            return {}
 
 
 # =============================================================================

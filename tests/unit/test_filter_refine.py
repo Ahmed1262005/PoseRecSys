@@ -160,6 +160,21 @@ def _make_algolia_facets(brand_counts: Dict[str, int] = None, nb_hits: int = 300
     }
 
 
+@pytest.fixture(autouse=True)
+def _clear_session_cache():
+    """Reset the SearchSessionCache singleton before each test.
+
+    Without this, session entries from earlier tests (even from other
+    test files) leak through the singleton and cause intermittent
+    assertion failures on cache lookups.
+    """
+    from search.session_cache import SearchSessionCache
+    instance = SearchSessionCache.get_instance()
+    instance._store.clear()
+    yield
+    instance._store.clear()
+
+
 @pytest.fixture
 def hybrid_service():
     """HybridSearchService with mocked Algolia + analytics."""

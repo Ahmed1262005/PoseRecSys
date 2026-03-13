@@ -54,12 +54,6 @@ MAX_SESSION_BOOST = 0.08  # Search cap (lighter than feed's 0.15)
 MAX_PER_BRAND = 4
 STRICT_DIVERSITY_POSITIONS = 5  # no brand repeats in top N positions
 
-# Impression-based soft demotion
-# penalty = -IMPRESSION_DEMOTION_COEFF * ln(1 + count)
-#   seen 1x  → -0.0021     seen 5x  → -0.0054
-#   seen 10x → -0.0072     seen 20x → -0.0091
-IMPRESSION_DEMOTION_COEFF = 0.003
-
 
 # ============================================================================
 # Helper: Extract attribute values from a search result dict
@@ -159,7 +153,6 @@ class SessionReranker:
         max_per_brand: int = MAX_PER_BRAND,
         user_context: Optional["UserContext"] = None,
         session_scores: Optional[Any] = None,
-        impression_counts: Optional[Dict[str, int]] = None,
         vibe_brand_clusters: Optional[Set[str]] = None,
         page_size: int = 0,
     ) -> List[dict]:
@@ -175,8 +168,6 @@ class SessionReranker:
             max_per_brand: Max items per brand for diversity (default 4).
             user_context: Context for age-affinity + weather scoring.
             session_scores: Live SessionScores from the recommendation pipeline.
-            impression_counts: Per-product impression counts from search history.
-                Used to soft-demote over-exposed products.
             vibe_brand_clusters: Set of cluster IDs from the query's vibe brand
                 (e.g., {"G", "A"} for Zara).  When present, brands belonging
                 to these clusters get a score boost.
@@ -212,10 +203,6 @@ class SessionReranker:
         # Step 3.75: Apply context-aware scoring (age affinity + weather/season)
         if user_context:
             results = self._apply_context_scoring(results, user_context)
-
-        # Step 3.9: Apply impression-based soft demotion
-        if impression_counts:
-            self._apply_impression_demotion(results, impression_counts)
 
         # Step 4: Greedy constrained diversity selection
         if max_per_brand > 0:
@@ -486,35 +473,6 @@ class SessionReranker:
             # Non-fatal — if scoring module fails, just skip
             pass
         return results
-
-    def _apply_impression_demotion(
-        self,
-        results: List[dict],
-        impression_counts: Dict[str, int],
-    ) -> None:
-        """Soft-demote products that have been shown too many times.
-
-        Applies a logarithmic penalty to ``rrf_score`` proportional to
-        the number of past impressions:
-
-            penalty = -IMPRESSION_DEMOTION_COEFF * ln(1 + count)
-
-        This is gentle — highly relevant products can still surface even
-        after 20 impressions, but mediocre matches get pushed down.
-
-        Mutates ``rrf_score`` in-place and re-sorts the list.
-        """
-        demoted = 0
-        for item in results:
-            pid = item.get("product_id", "")
-            count = impression_counts.get(pid, 0)
-            if count > 0:
-                penalty = -IMPRESSION_DEMOTION_COEFF * math.log(1 + count)
-                item["rrf_score"] = item.get("rrf_score", 0) + penalty
-                item["impression_penalty"] = penalty
-                demoted += 1
-        if demoted:
-            results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
 
     def _apply_constrained_diversity(
         self,

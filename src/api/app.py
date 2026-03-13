@@ -41,12 +41,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     # Pre-load FashionCLIP model so first requests are not slow
-    if settings.is_production:
+    try:
+        from core.clip_service import get_clip_service
+        get_clip_service().warmup()
+    except Exception as e:
+        logger.warning("FashionCLIP warmup failed (will lazy-load)", error=str(e))
+
+    # Load local FAISS index for fast semantic search (if enabled)
+    if settings.use_local_faiss:
         try:
-            from core.clip_service import get_clip_service
-            get_clip_service().warmup()
+            from search.local_vector_store import get_local_vector_store
+            store = get_local_vector_store()
+            store.load_snapshot(settings.faiss_snapshot_dir)
+            logger.info(
+                "Local FAISS index loaded for semantic search",
+                count=store.count,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "FAISS snapshot not found, semantic search will use pgvector",
+                snapshot_dir=settings.faiss_snapshot_dir,
+            )
         except Exception as e:
-            logger.warning("FashionCLIP warmup failed (will lazy-load)", error=str(e))
+            logger.warning("FAISS loading failed, falling back to pgvector", error=str(e))
 
     yield
 
@@ -139,6 +156,14 @@ def create_app() -> FastAPI:
         logger.info("Mounted search routes: /api/search/*")
     except ImportError as e:
         logger.warning(f"Could not load search router: {e}")
+
+    # Search V2 (Groq planner + heuristic bypass)
+    try:
+        from api.routes.search_v2 import router as search_v2_router
+        app.include_router(search_v2_router)
+        logger.info("Mounted search V2 routes: /api/search/v2/*")
+    except ImportError as e:
+        logger.warning(f"Could not load search V2 router: {e}")
 
     # POSE Canvas (inspiration management + style extraction)
     try:

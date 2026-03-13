@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blazer Occasion Gate Report -- 2026-03-10 18:35</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0d1117; color: #c9d1d9; padding: 24px; max-width: 1600px; margin: 0 auto; }
+  h1 { color: #58a6ff; margin-bottom: 6px; font-size: 24px; }
+  h2 { color: #d2a8ff; margin: 20px 0 10px; font-size: 16px; }
+  .meta { color: #8b949e; font-size: 13px; margin-bottom: 6px; line-height: 1.6; }
+  .rule-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+               padding: 14px 18px; margin-bottom: 20px; font-size: 13px; line-height: 1.7; }
+  .rule-box b { color: #58a6ff; }
+  .rule-box .red { color: #f85149; }
+  .rule-box .yellow { color: #d29922; }
+  .rule-box .green { color: #7ee787; }
+
+  .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+                padding: 14px 18px; min-width: 170px; text-align: center; }
+  .stat-value { font-size: 32px; font-weight: 700; }
+  .stat-label { font-size: 11px; color: #8b949e; margin-top: 4px; }
+  .good { color: #7ee787; }
+  .warn { color: #d29922; }
+  .bad { color: #f85149; }
+  .neutral { color: #8b949e; }
+
+  .comparison { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+                 margin-bottom: 24px; overflow: hidden; }
+  .comp-header { padding: 12px 18px; border-bottom: 1px solid #30363d;
+                   display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .comp-num { background: #238636; color: white; font-weight: 700; font-size: 14px;
+               border-radius: 6px; padding: 3px 10px; }
+  .comp-title { color: #58a6ff; font-weight: 600; font-size: 14px; }
+  .comp-detail { font-size: 12px; color: #8b949e; }
+  .comp-detail span { margin-right: 14px; }
+
+  .formality-badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
+                      font-size: 11px; font-weight: 700; }
+  .f1 { background: #1f1f22; color: #8b949e; border: 1px solid #30363d; }
+  .f2 { background: #1c2333; color: #58a6ff; border: 1px solid #1f6feb; }
+  .f3 { background: #1f3d2a; color: #7ee787; border: 1px solid #238636; }
+  .f4 { background: #2d1f3d; color: #d2a8ff; border: 1px solid #8957e5; }
+  .f5 { background: #3d1f1f; color: #f78166; border: 1px solid #da3633; }
+
+  .treatment { display: inline-block; padding: 2px 8px; border-radius: 4px;
+                font-size: 11px; font-weight: 700; text-transform: uppercase; margin-left: 8px; }
+  .t-filtered { background: #3d1f1f; color: #f85149; }
+  .t-penalized { background: #3d2f1f; color: #d29922; }
+  .t-neutral { background: #1c2333; color: #58a6ff; }
+  .t-boosted { background: #1f3d2a; color: #7ee787; }
+
+  .comp-body { display: flex; gap: 0; }
+  .source-col { width: 170px; min-width: 170px; background: #1a1f2e;
+                 border-right: 2px solid #238636; padding: 12px; text-align: center; }
+  .source-col img { width: 140px; height: 200px; object-fit: cover; border-radius: 8px;
+                     border: 2px solid #238636; }
+  .source-label { color: #238636; font-weight: 700; font-size: 10px;
+                   text-transform: uppercase; margin-bottom: 4px; }
+  .source-name { font-size: 10px; color: #c9d1d9; margin-top: 4px;
+                  max-height: 26px; overflow: hidden; }
+  .source-brand { font-size: 10px; color: #8b949e; }
+
+  .sides { flex: 1; display: flex; gap: 0; }
+  .side { flex: 1; padding: 12px; }
+  .side-before { border-right: 1px dashed #30363d; }
+  .side-label { font-size: 11px; font-weight: 700; text-transform: uppercase;
+                 padding: 3px 10px; border-radius: 4px; margin-bottom: 10px;
+                 display: inline-block; }
+  .label-before { background: #30363d; color: #c9d1d9; }
+  .label-after { background: #1f3d2a; color: #7ee787; }
+
+  .items-row { display: flex; gap: 10px; flex-wrap: nowrap; overflow-x: auto; }
+  .item-card { width: 130px; min-width: 130px; text-align: center; position: relative; }
+  .item-card img { width: 120px; height: 170px; object-fit: cover; border-radius: 6px;
+                    border: 2px solid #30363d; }
+  .item-card.blazer img { border-color: #f85149; }
+  .item-card.blazer-kept img { border-color: #7ee787; }
+  .item-l2 { font-size: 10px; font-weight: 700; margin-top: 3px; }
+  .item-l2.is-blazer { color: #f85149; }
+  .item-l2.not-blazer { color: #d2a8ff; }
+  .item-name { font-size: 9px; color: #c9d1d9; max-height: 22px; overflow: hidden;
+               line-height: 1.2; margin-top: 2px; }
+  .item-brand { font-size: 9px; color: #8b949e; }
+  .item-score { font-size: 10px; font-family: monospace; margin-top: 2px; }
+  .item-adj { font-size: 9px; font-family: monospace; color: #8b949e; }
+  .blazer-tag { position: absolute; top: 4px; right: 8px; background: #f85149;
+                 color: white; font-size: 9px; font-weight: 700; padding: 1px 5px;
+                 border-radius: 3px; }
+  .no-items { color: #8b949e; font-style: italic; font-size: 12px; padding: 20px; }
+
+  .occasions-list { font-size: 11px; color: #8b949e; }
+  .occ-match { color: #7ee787; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Blazer Occasion Gate Report</h1>
+<p class="meta">Generated 2026-03-10 18:35 | 8 products | 33s total</p>
+
+<div class="rule-box">
+  <b>BEFORE:</b> All structured outerwear (blazers, jackets, coats, bombers) get a uniform <b>+0.03</b> bonus. Blazers dominate regardless of outfit context.<br>
+  <b>AFTER (v3.5):</b> Blazer occasion gate active:<br>
+  &nbsp;&nbsp;<span class="red">Formality 1 + no formal occasions -> HARD FILTERED (blazers removed from candidates)</span><br>
+  &nbsp;&nbsp;<span class="yellow">Formality 2 + no formal occasions -> PENALIZED -0.10 (jackets/bombers rank higher)</span><br>
+  &nbsp;&nbsp;Formality 2 + formal occasion (work/date night/etc.) -> NEUTRAL (0.00)<br>
+  &nbsp;&nbsp;<span class="green">Formality 3+ (business casual and above) -> BOOSTED +0.03 (blazers preferred)</span>
+</div>
+
+<div class="summary">
+  <div class="stat-card">
+    <div class="stat-value bad">7</div>
+    <div class="stat-label">Blazers BEFORE</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value good">5</div>
+    <div class="stat-label">Blazers AFTER</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value good">2</div>
+    <div class="stat-label">Blazers removed/demoted</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value bad">2</div>
+    <div class="stat-label">Hard-filtered (formality 1)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value warn">1</div>
+    <div class="stat-label">Penalized (formality 2)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value good">4</div>
+    <div class="stat-label">Kept / boosted (formality 3+)</div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#1</span>
+    <span class="comp-title">Sleek Scoop Cami Top</span>
+    <span class="formality-badge f1">Casual (1)</span>
+    <span class="treatment t-filtered">hard-filtered</span>
+    <div class="comp-detail">
+      <span>Garage -- $27</span>
+      <span>L2: ?</span>
+      <span>Blazers: 1 -> 0</span>
+      <span>0.5s / 0.4s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/garage/garage_b6a3edac6173/primary.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Sleek Scoop Cami Top</div>
+      <div class="source-brand">Garage</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/0a552dc4-6745-401b-aa99-0a8684aa4d74/original_0_2c9100eb.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Vintage Look Faux Leather Crop Bike</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.884</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/bbe8b193-a749-4b47-b747-9dfcf70aca47/original_0_86eec785.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Buckle Detail Tailored Blazer</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.860</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/pacsun/pacsun_18210eae0fae/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">poncho</div>
+            <div class="item-name">Amaris Sequin Poncho</div>
+            <div class="item-brand">PacSun</div>
+            <div class="item-score" style="color:#d29922">T=0.795</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_7be0be0a8f75/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Seamless Ribbed Zip-Up Jacket</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score" style="color:#7ee787">T=0.858</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/0a552dc4-6745-401b-aa99-0a8684aa4d74/original_0_2c9100eb.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Vintage Look Faux Leather Crop Bike</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.884</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/pacsun/pacsun_18210eae0fae/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">poncho</div>
+            <div class="item-name">Amaris Sequin Poncho</div>
+            <div class="item-brand">PacSun</div>
+            <div class="item-score" style="color:#d29922">T=0.795</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_7be0be0a8f75/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Seamless Ribbed Zip-Up Jacket</div>
+            <div class="item-brand">Forever 21</div>
+            <div class="item-score" style="color:#7ee787">T=0.858</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/boohoo/boohoo_6c7a5f3d668e/gallery_4.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">DSGN Studio Sport Ultra Contour Sea</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.863</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#2</span>
+    <span class="comp-title">Olivia Linen Two Piece</span>
+    <span class="formality-badge f1">Casual (1)</span>
+    <span class="treatment t-filtered">hard-filtered</span>
+    <div class="comp-detail">
+      <span>Reformation -- $278</span>
+      <span>L2: ?</span>
+      <span>Blazers: 1 -> 0</span>
+      <span>0.5s / 0.4s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/reformation/reformation_536c96466430/primary.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Olivia Linen Two Piece</div>
+      <div class="source-brand">Reformation</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_91842fed6d24/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Etiquette Blazer - Linen</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#7ee787">T=0.882</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/alo-yoga/alo_yoga_131875b5bc83/gallery_3.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Linen Cropped Getaway Jacket</div>
+            <div class="item-brand">Alo Yoga</div>
+            <div class="item-score" style="color:#7ee787">T=0.869</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_06a92b7c665e/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Postage Trench Coat - Sway Crepe</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#d29922">T=0.829</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_f44900f7918d/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Rhinestone suit jacket</div>
+            <div class="item-brand">Maje</div>
+            <div class="item-score" style="color:#d29922">T=0.834</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/alo-yoga/alo_yoga_131875b5bc83/gallery_3.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Linen Cropped Getaway Jacket</div>
+            <div class="item-brand">Alo Yoga</div>
+            <div class="item-score" style="color:#7ee787">T=0.869</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_06a92b7c665e/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Postage Trench Coat - Sway Crepe</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#d29922">T=0.829</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/maje/maje_f44900f7918d/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Rhinestone suit jacket</div>
+            <div class="item-brand">Maje</div>
+            <div class="item-score" style="color:#d29922">T=0.834</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/cult-gaia/cult_gaia_9b74ce3b97d2/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">ISSA JACKET - BLACK</div>
+            <div class="item-brand">Cult Gaia</div>
+            <div class="item-score" style="color:#d29922">T=0.837</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#3</span>
+    <span class="comp-title">Cashmere Crewneck Dress</span>
+    <span class="formality-badge f2">Smart Casual (2)</span>
+    <span class="treatment t-penalized">penalized -0.10</span>
+    <div class="comp-detail">
+      <span>Another Tomorrow -- $750</span>
+      <span>L2: ?</span>
+      <span>Blazers: 1 -> 1</span>
+      <span>1.0s / 0.6s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/another-tomorrow/another_tomorrow_6bba8c41de9c/primary.png" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Cashmere Crewneck Dress</div>
+      <div class="source-brand">Another Tomorrow</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/toteme/toteme_e93d9179a8ea/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Classic tailored coat black</div>
+            <div class="item-brand">Toteme</div>
+            <div class="item-score" style="color:#7ee787">T=0.917</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_691c2adb3cc2/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Premium Tailored Extreme Shoulder M</div>
+            <div class="item-brand">Nasty Gal</div>
+            <div class="item-score" style="color:#7ee787">T=0.854</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/alexis/alexis_5ab8da9205d7/primary.webp" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Cabot Jacket</div>
+            <div class="item-brand">Alexis</div>
+            <div class="item-score" style="color:#d29922">T=0.835</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/joanna-ortiz/joanna_ortiz_420351876b53/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">cape</div>
+            <div class="item-name">Snow Cloud Cape</div>
+            <div class="item-brand">Joanna Ortiz</div>
+            <div class="item-score" style="color:#d29922">T=0.787</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/toteme/toteme_e93d9179a8ea/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Classic tailored coat black</div>
+            <div class="item-brand">Toteme</div>
+            <div class="item-score" style="color:#7ee787">T=0.917</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/alexis/alexis_5ab8da9205d7/primary.webp" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Cabot Jacket</div>
+            <div class="item-brand">Alexis</div>
+            <div class="item-score" style="color:#d29922">T=0.835</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/nasty-gal/nasty_gal_691c2adb3cc2/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Premium Tailored Extreme Shoulder M</div>
+            <div class="item-brand">Nasty Gal</div>
+            <div class="item-score" style="color:#d29922">T=0.824</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/joanna-ortiz/joanna_ortiz_420351876b53/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">cape</div>
+            <div class="item-name">Snow Cloud Cape</div>
+            <div class="item-brand">Joanna Ortiz</div>
+            <div class="item-score" style="color:#d29922">T=0.787</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#4</span>
+    <span class="comp-title">MIRVA cardiganUni Marron</span>
+    <span class="formality-badge f2">Smart Casual (2)</span>
+    <span class="treatment t-penalized">penalized -0.10</span>
+    <div class="comp-detail">
+      <span>Rouje -- $123</span>
+      <span>L2: ?</span>
+      <span>Blazers: 0 -> 0</span>
+      <span>0.6s / 0.5s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/rouje/rouje_93164286db1d/primary.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">MIRVA cardiganUni Marron</div>
+      <div class="source-brand">Rouje</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="no-items">No outerwear results</div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="no-items">No outerwear results</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#5</span>
+    <span class="comp-title">Cropped Open Cardigan</span>
+    <span class="formality-badge f2">Smart Casual (2)</span>
+    <span class="treatment t-penalized">penalized -0.10</span>
+    <div class="comp-detail">
+      <span>Ann Taylor -- $40</span>
+      <span>L2: ?</span>
+      <span>Blazers: 0 -> 0</span>
+      <span>0.4s / 0.4s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/00926f41-bb24-4c5e-8e97-515106e09e95/original_0_e6da77ab.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Cropped Open Cardigan</div>
+      <div class="source-brand">Ann Taylor</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="no-items">No outerwear results</div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="no-items">No outerwear results</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#6</span>
+    <span class="comp-title">Wide-Leg Dress Pants</span>
+    <span class="formality-badge f3">Business Casual (3)</span>
+    <span class="treatment t-boosted">boosted +0.03</span>
+    <div class="comp-detail">
+      <span>H&amp;M -- $45</span>
+      <span>L2: ?</span>
+      <span>Blazers: 1 -> 1</span>
+      <span>16.8s / 8.9s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/handm/handm_6edc357d8b2c/primary.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Wide-Leg Dress Pants</div>
+      <div class="source-brand">H&amp;M</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/dissh/dissh_becbc08274cb/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Lex Dark Clover Cropped Jacket</div>
+            <div class="item-brand">Dissh</div>
+            <div class="item-score" style="color:#7ee787">T=0.919</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_3dbbae1baad1/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Pelham Wool Blazer</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#7ee787">T=0.855</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_06a92b7c665e/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Postage Trench Coat - Sway Crepe</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#d29922">T=0.842</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/136c0e40-8566-42a7-8524-054aa4320ea8/original_0_cb37f9a7.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Plus Tailored Lace Hem Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.869</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/dissh/dissh_becbc08274cb/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Lex Dark Clover Cropped Jacket</div>
+            <div class="item-brand">Dissh</div>
+            <div class="item-score" style="color:#7ee787">T=0.919</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer-kept">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_3dbbae1baad1/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Pelham Wool Blazer</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#7ee787">T=0.855</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/aritzia/aritzia_06a92b7c665e/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Postage Trench Coat - Sway Crepe</div>
+            <div class="item-brand">Aritzia</div>
+            <div class="item-score" style="color:#d29922">T=0.842</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/136c0e40-8566-42a7-8524-054aa4320ea8/original_0_cb37f9a7.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Plus Tailored Lace Hem Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#7ee787">T=0.869</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#7</span>
+    <span class="comp-title">Velvet Floral Lace Insert Button Back Cut Out Maxi Dres</span>
+    <span class="formality-badge f4">Semi-Formal (4)</span>
+    <span class="treatment t-boosted">boosted +0.03</span>
+    <div class="comp-detail">
+      <span>Nasty Gal -- $42</span>
+      <span>L2: ?</span>
+      <span>Blazers: 2 -> 2</span>
+      <span>0.4s / 0.4s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/027a5919-ffaa-4f09-be56-3c7c2db51281/original_0_4f6461b3.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Velvet Floral Lace Insert Button Back Cu</div>
+      <div class="source-brand">Nasty Gal</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/664e8e1d-e811-4983-925f-3795dbb3e7dd/original_0_2a53d9f7.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Velvet Mini Blazer Dress</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.847</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/48363fb2-5a6b-4be4-9d10-5623c1e2bed0/original_0_165f2666.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Tall Cinched Waist Tailored Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.801</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/a3790411-ebab-42a7-b8a7-9028dac22ea6/original_0_a5f93c27.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Premium Vinyl High Shine Faux Leath</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.777</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_22aa26b8652d/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">KIZN Suede Blazer With Deep V Neckl</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#d29922">T=0.844</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card blazer-kept">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/664e8e1d-e811-4983-925f-3795dbb3e7dd/original_0_2a53d9f7.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Velvet Mini Blazer Dress</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.847</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/48363fb2-5a6b-4be4-9d10-5623c1e2bed0/original_0_165f2666.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Tall Cinched Waist Tailored Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.801</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/a3790411-ebab-42a7-b8a7-9028dac22ea6/original_0_a5f93c27.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Premium Vinyl High Shine Faux Leath</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#d29922">T=0.777</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card blazer-kept">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_22aa26b8652d/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">KIZN Suede Blazer With Deep V Neckl</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#d29922">T=0.844</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="comp-header">
+    <span class="comp-num">#8</span>
+    <span class="comp-title">Faux Leather O-Ring Tube Dress</span>
+    <span class="formality-badge f4">Semi-Formal (4)</span>
+    <span class="treatment t-boosted">boosted +0.03</span>
+    <div class="comp-detail">
+      <span>Forever 21 -- $21</span>
+      <span>L2: ?</span>
+      <span>Blazers: 1 -> 1</span>
+      <span>0.6s / 0.5s</span>
+    </div>
+    <div class="occasions-list">Occasions: <em>none</em></div>
+  </div>
+  <div class="comp-body">
+    <div class="source-col">
+      <div class="source-label">Source</div>
+      <img src="https://usepose.s3.us-east-1.amazonaws.com/products/forever-21/forever_21_8bc84e6170c2/primary.jpg" alt="source" loading="lazy"
+           onerror="this.style.display='none'">
+      <div class="source-name">Faux Leather O-Ring Tube Dress</div>
+      <div class="source-brand">Forever 21</div>
+    </div>
+    <div class="sides">
+      <div class="side side-before">
+        <div class="side-label label-before">BEFORE (no gate)</div>
+        <div class="items-row">
+          <div class="item-card blazer">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_c8885a721d05/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Fashion Forward Metallic Studded Cr</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#f85149">T=0.733</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/bfe461b2-201c-4b36-a851-a37c05b3c6f9/original_0_b3a70753.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Coast Structured Satin Wrap Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#f85149">T=0.714</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_296da6dbb828/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Double Breasted Belted Trench Coat</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#f85149">T=0.692</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/3939d032-529c-4fea-8cc0-55add8dae600/original_0_f1e08222.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">cape</div>
+            <div class="item-name">Hand Embellished Panelled Sequin Ta</div>
+            <div class="item-brand">Nasty Gal</div>
+            <div class="item-score" style="color:#f85149">T=0.653</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="side side-after">
+        <div class="side-label label-after">AFTER (blazer gate)</div>
+        <div class="items-row">
+          <div class="item-card blazer-kept">
+            <span class="blazer-tag">BLAZER</span>
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_c8885a721d05/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 is-blazer">blazer</div>
+            <div class="item-name">Fashion Forward Metallic Studded Cr</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#f85149">T=0.733</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/bfe461b2-201c-4b36-a851-a37c05b3c6f9/original_0_b3a70753.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">jacket</div>
+            <div class="item-name">Coast Structured Satin Wrap Jacket</div>
+            <div class="item-brand">Boohoo</div>
+            <div class="item-score" style="color:#f85149">T=0.714</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/missguided/missguided_296da6dbb828/primary.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">coat</div>
+            <div class="item-name">Double Breasted Belted Trench Coat</div>
+            <div class="item-brand">Missguided</div>
+            <div class="item-score" style="color:#f85149">T=0.692</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+          <div class="item-card">
+            
+            <img src="https://usepose.s3.us-east-1.amazonaws.com/products/3939d032-529c-4fea-8cc0-55add8dae600/original_0_f1e08222.jpg" alt="" loading="lazy" onerror="this.style.display='none'">
+            <div class="item-l2 not-blazer">cape</div>
+            <div class="item-name">Hand Embellished Panelled Sequin Ta</div>
+            <div class="item-brand">Nasty Gal</div>
+            <div class="item-score" style="color:#f85149">T=0.653</div>
+            <div class="item-adj">style: 0.00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

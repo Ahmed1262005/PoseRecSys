@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from core.logging import get_logger
+from core.sanitization import (
+    escape_follow_ups,
+    escape_timing_dict,
+    sanitize_url,
+    strip_tags,
+)
 from core.utils import filter_gallery_images
 from config.settings import get_settings
 from search.algolia_client import AlgoliaClient, get_algolia_client
@@ -536,11 +542,16 @@ class HybridSearchService:
         if request.search_session_id and request.cursor:
             cached = self._serve_cached_page(request)
             if cached is not None:
+                cached.timing["cache_status"] = "hit"
                 return cached
             # Cache miss (expired or invalid) — fall through to full pipeline
+            from search.session_cache import SearchSessionCache
+            _cache = SearchSessionCache.get_instance()
+            timing["cache_status"] = _cache.last_get_status or "miss"
             logger.info(
                 "Search session cache miss, running full pipeline",
                 search_session_id=request.search_session_id,
+                cache_status=_cache.last_get_status,
             )
 
         # -----------------------------------------------------------------
@@ -567,6 +578,10 @@ class HybridSearchService:
                 "Filter refinement cache miss, running full pipeline",
                 search_session_id=request.search_session_id,
             )
+
+        # Tag as fresh search if no cache was attempted/hit
+        if "cache_status" not in timing:
+            timing["cache_status"] = "fresh" if not request.search_session_id else "miss_no_cursor"
 
         # =====================================================================
         # STEP 1: Query Understanding (LLM Planner with regex fallback)
@@ -1418,18 +1433,6 @@ class HybridSearchService:
                 if computed_facets:
                     facets = computed_facets
 
-        # Step 5.5: Load impression counts for soft demotion
-        impression_counts: Optional[Dict[str, int]] = None
-        if user_id:
-            try:
-                _raw_counts = self.analytics.load_impression_counts(
-                    user_id=user_id,
-                )
-                if isinstance(_raw_counts, dict) and _raw_counts:
-                    impression_counts = _raw_counts
-            except Exception:
-                pass  # Non-fatal — skip demotion if load fails
-
         # Step 6: Rerank with session/profile + context scoring
         # Disable brand diversity cap when the user explicitly requested a
         # brand (via EXACT intent or a brands filter).  Otherwise the
@@ -1469,7 +1472,7 @@ class HybridSearchService:
             seen_ids=seen_ids,
             user_context=user_context,
             session_scores=session_scores,
-            impression_counts=impression_counts,
+
             page_size=_cat_cap_page_size,
         )
         if brand_cap is not None:
@@ -1667,8 +1670,12 @@ class HybridSearchService:
             except Exception as exc:
                 logger.warning("Failed to cache search session", error=str(exc))
 
+        # --- OUTPUT SANITIZATION (XSS prevention) ---
+        escape_timing_dict(timing)
+        escape_follow_ups(follow_ups)
+
         return HybridSearchResponse(
-            query=request.query,
+            query=strip_tags(request.query) or "",
             intent=intent.value,
             sort_by=request.sort_by.value,
             results=products,
@@ -2004,8 +2011,11 @@ class HybridSearchService:
             total_ms=timing["total_ms"],
         )
 
+        # --- OUTPUT SANITIZATION (XSS prevention) ---
+        escape_timing_dict(timing)
+
         return HybridSearchResponse(
-            query=entry.query,
+            query=strip_tags(entry.query) or "",
             intent=entry.intent,
             sort_by=entry.sort_by,
             results=products,
@@ -2276,8 +2286,11 @@ class HybridSearchService:
             total_ms=timing["total_ms"],
         )
 
+        # --- OUTPUT SANITIZATION (XSS prevention) ---
+        escape_timing_dict(timing)
+
         return HybridSearchResponse(
-            query=entry.query,
+            query=strip_tags(entry.query) or "",
             intent=entry.intent,
             sort_by=entry.sort_by,
             results=products,
@@ -2684,8 +2697,11 @@ class HybridSearchService:
             total_ms=timing["total_ms"],
         )
 
+        # --- OUTPUT SANITIZATION (XSS prevention) ---
+        escape_timing_dict(timing)
+
         return HybridSearchResponse(
-            query=entry.query,
+            query=strip_tags(entry.query) or "",
             intent=entry.intent,
             sort_by=entry.sort_by,
             results=products,
@@ -2917,8 +2933,11 @@ class HybridSearchService:
         except Exception as e:
             logger.warning("Failed to log sorted search analytics", error=str(e))
 
+        # --- OUTPUT SANITIZATION (XSS prevention) ---
+        escape_timing_dict(timing)
+
         return HybridSearchResponse(
-            query=request.query,
+            query=strip_tags(request.query) or "",
             intent=intent.value,
             sort_by=request.sort_by.value,
             results=products,
@@ -3286,7 +3305,23 @@ class HybridSearchService:
         query_embedding: Optional[np.ndarray] = None,
         exclude_product_ids: Optional[List[str]] = None,
     ) -> List[dict]:
-        """Search using multimodal embeddings (combined image + text vectors)."""
+        """Search using multimodal embeddings (combined image + text vectors).
+
+        Uses local FAISS index when available (settings.use_local_faiss=True
+        and snapshot loaded), otherwise falls back to Supabase pgvector RPC.
+        """
+        # ---- Local FAISS fast path ----
+        faiss_results = self._try_faiss_search(
+            query=query,
+            limit=limit,
+            query_embedding=query_embedding,
+            exclude_product_ids=exclude_product_ids,
+            request=request,
+        )
+        if faiss_results is not None:
+            return faiss_results
+
+        # ---- Supabase pgvector fallback ----
         try:
             # Skip category filter at RPC level — the search_multimodal SQL
             # function filters on p.broad_category which is NULL for all
@@ -3362,6 +3397,72 @@ class HybridSearchService:
                 query=query,
             )
             return []
+
+    def _try_faiss_search(
+        self,
+        query: str,
+        limit: int,
+        query_embedding: Optional[np.ndarray],
+        exclude_product_ids: Optional[List[str]],
+        request: HybridSearchRequest,
+    ) -> Optional[List[dict]]:
+        """Try local FAISS search. Returns None if FAISS is not available.
+
+        This is the fast path: ~10ms vs ~600ms for pgvector. Returns None
+        (triggering pgvector fallback) when:
+        - USE_LOCAL_FAISS is False (default)
+        - FAISS snapshot not loaded
+        - No query embedding provided (can't search without it)
+        - Any error during FAISS search
+        """
+        try:
+            from config.settings import get_settings
+            settings = get_settings()
+            if not settings.use_local_faiss:
+                return None
+
+            from search.local_vector_store import get_local_vector_store
+            store = get_local_vector_store()
+            if not store.ready:
+                return None
+
+            # FAISS requires a pre-computed embedding — if caller didn't
+            # provide one, we need to encode it here.
+            if query_embedding is None:
+                from core.clip_service import get_clip_service
+                clip = get_clip_service()
+                query_embedding = clip.encode_text(query)
+                if hasattr(query_embedding, "numpy"):
+                    query_embedding = query_embedding.numpy()
+                query_embedding = query_embedding.flatten().astype(np.float32)
+
+            exclude_set = set(exclude_product_ids) if exclude_product_ids else None
+
+            results = store.search(
+                query_embedding=query_embedding,
+                limit=limit,
+                exclude_product_ids=exclude_set,
+                include_brands=request.brands,
+                exclude_brands=request.exclude_brands,
+                min_price=request.min_price,
+                max_price=request.max_price,
+            )
+
+            if results:
+                logger.info(
+                    "FAISS local search returned results",
+                    query=query,
+                    count=len(results),
+                )
+            return results
+
+        except Exception as e:
+            logger.warning(
+                "FAISS search failed, falling back to pgvector",
+                error=str(e),
+                query=query,
+            )
+            return None
 
     def _search_image_only(
         self,
@@ -3465,7 +3566,28 @@ class HybridSearchService:
         pgvector results lack many attributes (category_l1, formality, neckline,
         etc.) that are only stored in Algolia. This method fetches them in a
         single batch call and merges them into the semantic results.
+
+        When FAISS results already have Gemini attributes baked into metadata
+        (v2 snapshot with has_gemini_attributes=true), this method detects
+        that and skips the Algolia round-trip entirely — saving 3-5s.
         """
+        if not results:
+            return results
+
+        # Fast path: if results already have Gemini attributes baked in
+        # (from FAISS v2 snapshot), skip the expensive Algolia fetch.
+        # Check the first few results for category_l1 as a sentinel field —
+        # pgvector results never have it, FAISS v2 results always do.
+        sample = results[:5]
+        attrs_present = sum(1 for r in sample if r.get("category_l1") is not None)
+        if attrs_present >= len(sample) * 0.5:
+            logger.info(
+                "Skipping Algolia enrichment — attributes already present (FAISS v2)",
+                total=len(results),
+                sample_with_attrs=attrs_present,
+            )
+            return results
+
         product_ids: List[str] = [r["product_id"] for r in results if r.get("product_id")]
         if not product_ids:
             return results
@@ -3980,33 +4102,43 @@ class HybridSearchService:
     # =========================================================================
 
     def _to_product_result(self, item: dict, position: int) -> ProductResult:
-        """Convert a merged result dict to a ProductResult."""
+        """Convert a merged result dict to a ProductResult.
+
+        HTML-escapes user-visible text fields and validates image URLs to
+        prevent stored XSS from malicious product data.
+        """
+        # Validate image URLs (reject javascript:, data:, etc.)
+        image_url = sanitize_url(item.get("image_url"))
+        gallery = item.get("gallery_images")
+        if gallery and isinstance(gallery, list):
+            gallery = [u for u in (sanitize_url(g) for g in gallery) if u is not None]
+
         return ProductResult(
             product_id=item.get("product_id", ""),
-            name=item.get("name", ""),
-            brand=item.get("brand", ""),
-            image_url=item.get("image_url"),
-            gallery_images=item.get("gallery_images"),
+            name=strip_tags(item.get("name", "")) or "",
+            brand=strip_tags(item.get("brand", "")) or "",
+            image_url=image_url,
+            gallery_images=gallery,
             price=item.get("price", 0),
             original_price=item.get("original_price"),
             is_on_sale=item.get("is_on_sale", False),
             is_set=item.get("is_set"),
             set_role=item.get("set_role"),
-            category_l1=item.get("category_l1"),
-            category_l2=item.get("category_l2"),
-            broad_category=item.get("broad_category"),
-            article_type=item.get("article_type"),
-            primary_color=item.get("primary_color"),
-            color_family=item.get("color_family"),
-            pattern=item.get("pattern"),
-            apparent_fabric=item.get("apparent_fabric"),
-            fit_type=item.get("fit_type"),
-            formality=item.get("formality"),
-            silhouette=item.get("silhouette"),
-            length=item.get("length"),
-            neckline=item.get("neckline"),
-            sleeve_type=item.get("sleeve_type"),
-            rise=item.get("rise"),
+            category_l1=strip_tags(item.get("category_l1")),
+            category_l2=strip_tags(item.get("category_l2")),
+            broad_category=strip_tags(item.get("broad_category")),
+            article_type=strip_tags(item.get("article_type")),
+            primary_color=strip_tags(item.get("primary_color")),
+            color_family=strip_tags(item.get("color_family")),
+            pattern=strip_tags(item.get("pattern")),
+            apparent_fabric=strip_tags(item.get("apparent_fabric")),
+            fit_type=strip_tags(item.get("fit_type")),
+            formality=strip_tags(item.get("formality")),
+            silhouette=strip_tags(item.get("silhouette")),
+            length=strip_tags(item.get("length")),
+            neckline=strip_tags(item.get("neckline")),
+            sleeve_type=strip_tags(item.get("sleeve_type")),
+            rise=strip_tags(item.get("rise")),
             style_tags=item.get("style_tags"),
             occasions=item.get("occasions"),
             seasons=item.get("seasons"),
